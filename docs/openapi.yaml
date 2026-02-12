@@ -1,0 +1,310 @@
+openapi: 3.1.0
+info:
+  title: Host Revenue Coach API
+  version: 1.0.0
+  description: AI Revenue Advisor for Airbnb hosts — pricing reports and market tracking.
+
+servers:
+  - url: /api
+    description: Default (relative)
+
+paths:
+  /reports:
+    post:
+      summary: Create a pricing report
+      operationId: createReport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateReportRequest"
+      responses:
+        "200":
+          description: Report created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingReport"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /reports/{id}:
+    get:
+      summary: Get a report by internal ID
+      operationId: getReportById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Report found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingReport"
+        "404":
+          description: Not found
+
+  /r/{shareId}:
+    get:
+      summary: Get a report by share ID (public)
+      operationId: getReportByShareId
+      parameters:
+        - name: shareId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Report found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingReport"
+        "404":
+          description: Not found
+
+  /track-market:
+    post:
+      summary: Subscribe to market tracking alerts
+      operationId: trackMarket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrackMarketRequest"
+      responses:
+        "200":
+          description: Tracking saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  id:
+                    type: string
+                    format: uuid
+        "400":
+          description: Validation error
+
+components:
+  schemas:
+    CreateReportRequest:
+      type: object
+      required: [listing, dates, discountPolicy]
+      properties:
+        listing:
+          $ref: "#/components/schemas/ListingInput"
+        dates:
+          $ref: "#/components/schemas/DateInput"
+        discountPolicy:
+          $ref: "#/components/schemas/DiscountPolicy"
+
+    ListingInput:
+      type: object
+      required: [address, propertyType, bedrooms, bathrooms, maxGuests]
+      properties:
+        address:
+          type: string
+          minLength: 5
+        propertyType:
+          type: string
+          enum: [entire_home, private_room, shared_room, hotel_room]
+        bedrooms:
+          type: integer
+          minimum: 0
+          maximum: 20
+        bathrooms:
+          type: number
+          minimum: 0.5
+          maximum: 20
+          multipleOf: 0.5
+        maxGuests:
+          type: integer
+          minimum: 1
+          maximum: 50
+        sizeSqFt:
+          type: integer
+          minimum: 0
+          maximum: 50000
+        amenities:
+          type: array
+          items:
+            type: string
+            enum:
+              - wifi
+              - kitchen
+              - washer
+              - dryer
+              - ac
+              - heating
+              - pool
+              - hot_tub
+              - free_parking
+              - ev_charger
+              - gym
+              - bbq
+              - fire_pit
+              - piano
+              - lake_access
+              - ski_in_out
+              - beach_access
+
+    DateInput:
+      type: object
+      required: [startDate, endDate]
+      properties:
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+
+    DiscountPolicy:
+      type: object
+      properties:
+        weeklyDiscountPct:
+          type: number
+          minimum: 0
+          maximum: 50
+          default: 0
+        monthlyDiscountPct:
+          type: number
+          minimum: 0
+          maximum: 70
+          default: 0
+        refundable:
+          type: boolean
+          default: true
+        nonRefundableDiscountPct:
+          type: number
+          minimum: 0
+          maximum: 30
+          default: 0
+        stackingMode:
+          type: string
+          enum: [compound, best_only, additive]
+          default: compound
+        maxTotalDiscountPct:
+          type: number
+          minimum: 0
+          maximum: 80
+          default: 40
+
+    PricingReport:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        shareId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [queued, ready, error]
+        coreVersion:
+          type: string
+        inputAddress:
+          type: string
+        inputAttributes:
+          $ref: "#/components/schemas/ListingInput"
+        inputDateStart:
+          type: string
+          format: date
+        inputDateEnd:
+          type: string
+          format: date
+        discountPolicy:
+          $ref: "#/components/schemas/DiscountPolicy"
+        resultSummary:
+          $ref: "#/components/schemas/ReportSummary"
+        resultCalendar:
+          type: array
+          items:
+            $ref: "#/components/schemas/CalendarDay"
+        errorMessage:
+          type: string
+          nullable: true
+
+    ReportSummary:
+      type: object
+      properties:
+        insightHeadline:
+          type: string
+        nightlyMin:
+          type: number
+        nightlyMedian:
+          type: number
+        nightlyMax:
+          type: number
+        occupancyPct:
+          type: number
+        weekdayAvg:
+          type: number
+        weekendAvg:
+          type: number
+        estimatedMonthlyRevenue:
+          type: number
+        weeklyStayAvgNightly:
+          type: number
+        monthlyStayAvgNightly:
+          type: number
+
+    CalendarDay:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        dayOfWeek:
+          type: string
+        isWeekend:
+          type: boolean
+        basePrice:
+          type: number
+        refundablePrice:
+          type: number
+        nonRefundablePrice:
+          type: number
+
+    TrackMarketRequest:
+      type: object
+      required: [email, address]
+      properties:
+        email:
+          type: string
+          format: email
+        address:
+          type: string
+          minLength: 5
+        notifyWeekly:
+          type: boolean
+          default: false
+        notifyUnderMarket:
+          type: boolean
+          default: false
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        details:
+          type: object
