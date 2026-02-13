@@ -1,5 +1,5 @@
 """
-AriaHost Pricing API — FastAPI service wrapping Airbnb comparable-listing scraper.
+AiraHost Pricing API — FastAPI service wrapping Airbnb comparable-listing scraper.
 
 Endpoints:
   POST /api/v1/estimate  — scrape target + nearby listings, return pricing recommendation.
@@ -27,18 +27,18 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("ariahost")
+logger = logging.getLogger("airahost")
 
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="AriaHost Pricing API", version="1.0.0")
+app = FastAPI(title="AiraHost Pricing API", version="1.0.0")
 
 # CORS — allow Vercel frontend + local dev
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "https://ariahost.vercel.app,http://localhost:3000",
+    "https://airahost.vercel.app,http://localhost:3000",
 ).split(",")
 
 app.add_middleware(
@@ -808,7 +808,7 @@ def run_estimate(req: EstimateRequest) -> EstimateResponse:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "ariahost-pricing"}
+    return {"status": "ok", "service": "airahost-pricing"}
 
 
 @app.post("/api/v1/estimate", response_model=EstimateResponse)
