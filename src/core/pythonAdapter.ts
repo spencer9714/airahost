@@ -6,7 +6,7 @@
  *
  * Environment variable:
  *   NEXT_PUBLIC_PYTHON_API_URL — base URL of the Python service
- *     e.g. "https://airahost-pricing-xxxxx-de.a.run.app"
+ *     e.g. "https://ariahost-pricing-xxxxx-de.a.run.app"
  *
  * To switch from mock to real:
  *   Update the import in /api/reports/route.ts
