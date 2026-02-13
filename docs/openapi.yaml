@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Host Revenue Coach API
+  title: AirHost API
   version: 1.0.0
   description: AI Revenue Advisor for Airbnb hosts — pricing reports and market tracking.
 

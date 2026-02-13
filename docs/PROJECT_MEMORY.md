@@ -1,4 +1,4 @@
-# PROJECT_MEMORY.md — Host Revenue Coach
+# PROJECT_MEMORY.md — AirHost
 
 > This file is the source of truth for any future developer or AI session
 > continuing work on this project. Read it fully before making changes.
@@ -7,7 +7,7 @@
 
 ## 1. North Star
 
-**Product:** Host Revenue Coach — an AI Revenue Advisor for Airbnb hosts.
+**Product:** AirHost — an AI Revenue Advisor for Airbnb hosts.
 
 **Primary promise:** "Make smarter pricing decisions. Earn more with confidence."
 

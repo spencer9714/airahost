@@ -1,4 +1,4 @@
-# Host Revenue Coach
+# AirHost
 
 > AI Revenue Advisor for Airbnb hosts.
 > Understand your market. Price smarter. Earn more.
