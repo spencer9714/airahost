@@ -10,7 +10,7 @@ const geistSans = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "AirHost — Airbnb Pricing Advisor",
+  title: "AiraHost — Airbnb Pricing Advisor",
   description:
     "Understand your market. Price smarter. Earn more. Free AI-powered revenue coaching for Airbnb hosts.",
 };
@@ -30,3 +30,4 @@ export default function RootLayout({
     </html>
   );
 }
+

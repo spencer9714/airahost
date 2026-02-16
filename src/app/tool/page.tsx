@@ -1,13 +1,15 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
+import { getSupabaseBrowser } from "@/lib/supabase";
 import type {
   PropertyType,
   Amenity,
   DiscountStackingMode,
+  InputMode,
 } from "@/lib/schemas";
 
 const PROPERTY_TYPES: { value: PropertyType; label: string }[] = [
@@ -37,11 +39,52 @@ const AMENITY_OPTIONS: { value: Amenity; label: string }[] = [
   { value: "beach_access", label: "Beach access" },
 ];
 
+function getPropertyTypeLabel(value: PropertyType): string {
+  return PROPERTY_TYPES.find((pt) => pt.value === value)?.label ?? "Property";
+}
+
+function extractAirbnbListingId(url: string): string | null {
+  const m = url.match(/\/rooms\/(\d+)/i);
+  return m?.[1] ?? null;
+}
+
+function buildListingAddressFromUrl(
+  listingUrl: string,
+  propertyType: PropertyType
+): string {
+  const id = extractAirbnbListingId(listingUrl);
+  const typeLabel = getPropertyTypeLabel(propertyType);
+
+  try {
+    const u = new URL(listingUrl);
+    const location =
+      u.searchParams.get("location") ||
+      u.searchParams.get("query") ||
+      u.searchParams.get("place");
+
+    if (id && location) {
+      return `Airbnb Listing #${id} · ${decodeURIComponent(
+        location
+      )} · ${typeLabel}`;
+    }
+    if (id) {
+      return `Airbnb Listing #${id} · ${typeLabel}`;
+    }
+    if (location) {
+      return `Airbnb Listing · ${decodeURIComponent(location)} · ${typeLabel}`;
+    }
+  } catch {
+    // Ignore parse errors and use fallback.
+  }
+
+  return `Airbnb Listing · ${typeLabel}`;
+}
+
 function getDefaultDates() {
   const start = new Date();
   start.setDate(start.getDate() + 7);
   const end = new Date(start);
-  end.setDate(end.getDate() + 30);
+  end.setDate(end.getDate() + 7);
   return {
     startDate: start.toISOString().split("T")[0],
     endDate: end.toISOString().split("T")[0],
@@ -50,10 +93,16 @@ function getDefaultDates() {
 
 export default function ToolPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const defaults = getDefaultDates();
+  const defaultSaveToListings = searchParams.get("from") === "dashboard";
 
   // Step tracking
   const [step, setStep] = useState(1);
+
+  // Step 1 — Input mode
+  const [inputMode, setInputMode] = useState<InputMode>("criteria");
+  const [listingUrl, setListingUrl] = useState("");
 
   // Step 1 — Listing
   const [address, setAddress] = useState("");
@@ -82,6 +131,16 @@ export default function ToolPage() {
   // Submit
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [isSignedIn, setIsSignedIn] = useState(false);
+  const [saveToListings, setSaveToListings] = useState(defaultSaveToListings);
+  const [saveListingName, setSaveListingName] = useState("");
+
+  useEffect(() => {
+    const supabase = getSupabaseBrowser();
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      setIsSignedIn(!!user);
+    });
+  }, []);
 
   function toggleAmenity(a: Amenity) {
     setAmenities((prev) =>
@@ -98,8 +157,9 @@ export default function ToolPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          inputMode,
           listing: {
-            address,
+            address: resolvedListingAddress,
             propertyType,
             bedrooms,
             bathrooms,
@@ -116,6 +176,14 @@ export default function ToolPage() {
             stackingMode,
             maxTotalDiscountPct: maxTotalDiscount,
           },
+          listingUrl: inputMode === "url" ? listingUrl : undefined,
+          saveToListings:
+            isSignedIn && saveToListings
+              ? {
+                  enabled: true,
+                  name: saveListingName.trim() || resolvedListingAddress,
+                }
+              : undefined,
         }),
       });
 
@@ -136,6 +204,13 @@ export default function ToolPage() {
   const dateRange = Math.round(
     (new Date(endDate).getTime() - new Date(startDate).getTime()) /
       (1000 * 60 * 60 * 24)
+  );
+  const resolvedListingAddress = useMemo(
+    () =>
+      inputMode === "url"
+        ? buildListingAddressFromUrl(listingUrl, propertyType)
+        : address,
+    [inputMode, listingUrl, propertyType, address]
   );
 
   return (
@@ -162,107 +237,157 @@ export default function ToolPage() {
 
             {step === 1 && (
               <div className="space-y-5">
-                <Field label="Address">
-                  <input
-                    type="text"
-                    placeholder="123 Main St, City, State"
-                    value={address}
-                    onChange={(e) => setAddress(e.target.value)}
-                    className="input"
-                  />
-                </Field>
-
-                <Field label="Property type">
-                  <div className="flex flex-wrap gap-2">
-                    {PROPERTY_TYPES.map((pt) => (
-                      <button
-                        key={pt.value}
-                        onClick={() => setPropertyType(pt.value)}
-                        className={`rounded-xl border px-4 py-2 text-sm transition-all ${
-                          propertyType === pt.value
-                            ? "border-accent bg-accent/5 text-accent"
-                            : "border-border hover:border-foreground/30"
-                        }`}
-                      >
-                        {pt.label}
-                      </button>
-                    ))}
-                  </div>
-                </Field>
-
-                <div className="grid grid-cols-3 gap-4">
-                  <Field label="Bedrooms">
-                    <Stepper
-                      value={bedrooms}
-                      onChange={setBedrooms}
-                      min={0}
-                      max={20}
-                    />
-                  </Field>
-                  <Field label="Bathrooms">
-                    <Stepper
-                      value={bathrooms}
-                      onChange={setBathrooms}
-                      min={0.5}
-                      max={20}
-                      step={0.5}
-                    />
-                  </Field>
-                  <Field label="Max guests">
-                    <Stepper
-                      value={maxGuests}
-                      onChange={setMaxGuests}
-                      min={1}
-                      max={50}
-                    />
-                  </Field>
+                {/* Mode toggle */}
+                <div className="flex gap-2 rounded-xl bg-gray-100 p-1">
+                  <button
+                    onClick={() => setInputMode("url")}
+                    className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
+                      inputMode === "url"
+                        ? "bg-white text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    I have a listing URL
+                  </button>
+                  <button
+                    onClick={() => setInputMode("criteria")}
+                    className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
+                      inputMode === "criteria"
+                        ? "bg-white text-foreground shadow-sm"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    Search by criteria
+                  </button>
                 </div>
 
-                <button
-                  className="text-sm text-muted underline"
-                  onClick={() => setShowAdvanced1(!showAdvanced1)}
-                >
-                  {showAdvanced1 ? "Hide" : "Show"} advanced options
-                </button>
-
-                {showAdvanced1 && (
-                  <div className="space-y-4 rounded-xl bg-gray-50 p-4">
-                    <Field label="Size (sq ft)">
+                {inputMode === "url" ? (
+                  /* Mode A: URL input */
+                  <div className="space-y-3">
+                    <Field label="Airbnb listing URL">
                       <input
-                        type="number"
-                        placeholder="Optional"
-                        value={sizeSqFt ?? ""}
-                        onChange={(e) =>
-                          setSizeSqFt(
-                            e.target.value ? Number(e.target.value) : undefined
-                          )
-                        }
+                        type="url"
+                        placeholder="https://www.airbnb.com/rooms/12345678"
+                        value={listingUrl}
+                        onChange={(e) => setListingUrl(e.target.value)}
                         className="input"
                       />
                     </Field>
-                    <Field label="Amenities">
+                    <p className="text-xs text-muted">
+                      Paste the full URL of an Airbnb listing. We&apos;ll analyze it
+                      and find comparable properties nearby.
+                    </p>
+                  </div>
+                ) : (
+                  /* Mode B: Criteria input */
+                  <>
+                    <Field label="Address">
+                      <input
+                        type="text"
+                        placeholder="123 Main St, City, State"
+                        value={address}
+                        onChange={(e) => setAddress(e.target.value)}
+                        className="input"
+                      />
+                    </Field>
+
+                    <Field label="Property type">
                       <div className="flex flex-wrap gap-2">
-                        {AMENITY_OPTIONS.map((a) => (
+                        {PROPERTY_TYPES.map((pt) => (
                           <button
-                            key={a.value}
-                            onClick={() => toggleAmenity(a.value)}
-                            className={`rounded-full border px-3 py-1.5 text-xs transition-all ${
-                              amenities.includes(a.value)
+                            key={pt.value}
+                            onClick={() => setPropertyType(pt.value)}
+                            className={`rounded-xl border px-4 py-2 text-sm transition-all ${
+                              propertyType === pt.value
                                 ? "border-accent bg-accent/5 text-accent"
                                 : "border-border hover:border-foreground/30"
                             }`}
                           >
-                            {a.label}
+                            {pt.label}
                           </button>
                         ))}
                       </div>
                     </Field>
-                  </div>
+
+                    <div className="grid grid-cols-3 gap-4">
+                      <Field label="Bedrooms">
+                        <Stepper
+                          value={bedrooms}
+                          onChange={setBedrooms}
+                          min={0}
+                          max={20}
+                        />
+                      </Field>
+                      <Field label="Bathrooms">
+                        <Stepper
+                          value={bathrooms}
+                          onChange={setBathrooms}
+                          min={0.5}
+                          max={20}
+                          step={0.5}
+                        />
+                      </Field>
+                      <Field label="Max guests">
+                        <Stepper
+                          value={maxGuests}
+                          onChange={setMaxGuests}
+                          min={1}
+                          max={50}
+                        />
+                      </Field>
+                    </div>
+
+                    <button
+                      className="text-sm text-muted underline"
+                      onClick={() => setShowAdvanced1(!showAdvanced1)}
+                    >
+                      {showAdvanced1 ? "Hide" : "Show"} advanced options
+                    </button>
+
+                    {showAdvanced1 && (
+                      <div className="space-y-4 rounded-xl bg-gray-50 p-4">
+                        <Field label="Size (sq ft)">
+                          <input
+                            type="number"
+                            placeholder="Optional"
+                            value={sizeSqFt ?? ""}
+                            onChange={(e) =>
+                              setSizeSqFt(
+                                e.target.value ? Number(e.target.value) : undefined
+                              )
+                            }
+                            className="input"
+                          />
+                        </Field>
+                        <Field label="Amenities">
+                          <div className="flex flex-wrap gap-2">
+                            {AMENITY_OPTIONS.map((a) => (
+                              <button
+                                key={a.value}
+                                onClick={() => toggleAmenity(a.value)}
+                                className={`rounded-full border px-3 py-1.5 text-xs transition-all ${
+                                  amenities.includes(a.value)
+                                    ? "border-accent bg-accent/5 text-accent"
+                                    : "border-border hover:border-foreground/30"
+                                }`}
+                              >
+                                {a.label}
+                              </button>
+                            ))}
+                          </div>
+                        </Field>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 <Button
                   onClick={() => setStep(2)}
-                  disabled={address.length < 5}
+                  disabled={
+                    inputMode === "url"
+                      ? !listingUrl.includes("airbnb.com/rooms/")
+                      : address.length < 5
+                  }
                   className="w-full"
                 >
                   Continue
@@ -459,6 +584,33 @@ export default function ToolPage() {
                   </p>
                 )}
 
+                {isSignedIn ? (
+                  <div className="rounded-xl border border-border bg-gray-50 p-4">
+                    <label className="flex items-center gap-2 text-sm font-medium">
+                      <input
+                        type="checkbox"
+                        checked={saveToListings}
+                        onChange={(e) => setSaveToListings(e.target.checked)}
+                        className="accent-accent"
+                      />
+                      Analyze and save to dashboard
+                    </label>
+                    {saveToListings ? (
+                      <input
+                        type="text"
+                        value={saveListingName}
+                        onChange={(e) => setSaveListingName(e.target.value)}
+                        placeholder="Listing name (optional)"
+                        className="input mt-3 w-full"
+                      />
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted">
+                    Sign in to save this analysis to your dashboard.
+                  </p>
+                )}
+
                 <Button
                   onClick={handleSubmit}
                   disabled={loading}
@@ -479,33 +631,46 @@ export default function ToolPage() {
               <h3 className="mb-4 text-lg font-semibold">Your listing</h3>
               <div className="space-y-3 text-sm">
                 <SummaryRow
-                  label="Address"
-                  value={address || "Not entered yet"}
+                  label="Mode"
+                  value={inputMode === "url" ? "Listing URL" : "Criteria search"}
                 />
-                <SummaryRow
-                  label="Type"
-                  value={
-                    PROPERTY_TYPES.find((p) => p.value === propertyType)
-                      ?.label ?? ""
-                  }
-                />
-                <SummaryRow
-                  label="Bedrooms"
-                  value={String(bedrooms)}
-                />
-                <SummaryRow
-                  label="Bathrooms"
-                  value={String(bathrooms)}
-                />
-                <SummaryRow
-                  label="Guests"
-                  value={String(maxGuests)}
-                />
-                {amenities.length > 0 && (
+                {inputMode === "url" ? (
                   <SummaryRow
-                    label="Amenities"
-                    value={`${amenities.length} selected`}
+                    label="URL"
+                    value={listingUrl ? listingUrl.replace(/https?:\/\/(www\.)?/, "").slice(0, 30) + (listingUrl.length > 40 ? "..." : "") : "Not entered yet"}
                   />
+                ) : (
+                  <>
+                    <SummaryRow
+                      label="Address"
+                      value={address || "Not entered yet"}
+                    />
+                    <SummaryRow
+                      label="Type"
+                      value={
+                        PROPERTY_TYPES.find((p) => p.value === propertyType)
+                          ?.label ?? ""
+                      }
+                    />
+                    <SummaryRow
+                      label="Bedrooms"
+                      value={String(bedrooms)}
+                    />
+                    <SummaryRow
+                      label="Bathrooms"
+                      value={String(bathrooms)}
+                    />
+                    <SummaryRow
+                      label="Guests"
+                      value={String(maxGuests)}
+                    />
+                    {amenities.length > 0 && (
+                      <SummaryRow
+                        label="Amenities"
+                        value={`${amenities.length} selected`}
+                      />
+                    )}
+                  </>
                 )}
                 <div className="my-3 border-t border-border" />
                 <SummaryRow

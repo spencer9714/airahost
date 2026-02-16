@@ -26,6 +26,7 @@ export async function GET(
     return NextResponse.json({ error: "Report not found" }, { status: 404 });
   }
 
+  const summary = data.result_summary;
   return NextResponse.json({
     id: data.id,
     shareId: data.share_id,
@@ -36,9 +37,16 @@ export async function GET(
     inputDateStart: data.input_date_start,
     inputDateEnd: data.input_date_end,
     discountPolicy: data.discount_policy,
-    resultSummary: data.result_summary,
+    resultSummary: summary,
     resultCalendar: data.result_calendar,
     createdAt: data.created_at,
     errorMessage: data.error_message,
+    workerAttempts: data.worker_attempts,
+    // Transparency fields (extracted from result_summary for convenience)
+    targetSpec: summary?.targetSpec ?? null,
+    queryCriteria: summary?.queryCriteria ?? null,
+    compsSummary: summary?.compsSummary ?? null,
+    priceDistribution: summary?.priceDistribution ?? null,
+    recommendedPrice: summary?.recommendedPrice ?? null,
   });
 }

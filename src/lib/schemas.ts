@@ -73,15 +73,28 @@ export const discountPolicySchema = z.object({
   maxTotalDiscountPct: z.number().min(0).max(80).default(40),
 });
 
+// ── Input Mode ──────────────────────────────────────────────────
+
+export const inputModeEnum = z.enum(["url", "criteria"]);
+
 // ── Full Report Request ─────────────────────────────────────────
 
 export const createReportRequestSchema = z.object({
+  inputMode: inputModeEnum.default("criteria"),
   listing: listingInputSchema,
   dates: dateInputSchema,
   discountPolicy: discountPolicySchema,
+  listingUrl: z.string().url().optional(),
+  saveToListings: z
+    .object({
+      enabled: z.boolean().default(false),
+      name: z.string().min(1).max(100).optional(),
+    })
+    .optional(),
 });
 
 export type CreateReportRequest = z.infer<typeof createReportRequestSchema>;
+export type InputMode = z.infer<typeof inputModeEnum>;
 export type ListingInput = z.infer<typeof listingInputSchema>;
 export type DateInput = z.infer<typeof dateInputSchema>;
 export type DiscountPolicy = z.infer<typeof discountPolicySchema>;
@@ -98,7 +111,68 @@ export interface CalendarDay {
   basePrice: number;
   refundablePrice: number;
   nonRefundablePrice: number;
+  flags?: string[]; // e.g. "peak", "low_demand", "missing_data", "interpolated"
 }
+
+// ── Transparency Types ──────────────────────────────────────────
+
+export interface TargetSpec {
+  title: string;
+  location: string;
+  propertyType: string;
+  accommodates: number | null;
+  bedrooms: number | null;
+  beds: number | null;
+  baths: number | null;
+  amenities: string[];
+  rating: number | null;
+  reviews: number | null;
+}
+
+export interface QueryCriteria {
+  locationBasis: string;
+  searchAdults: number;
+  checkin: string;
+  checkout: string;
+  propertyTypeFilter: string | null;
+  tolerances: {
+    accommodates: number;
+    bedrooms: number;
+    beds: number;
+    baths: number;
+  };
+}
+
+export interface CompsSummary {
+  collected: number;
+  afterFiltering: number;
+  usedForPricing: number;
+  filterStage: string;
+  topSimilarity: number | null;
+  avgSimilarity: number | null;
+  sampledDays?: number;
+  interpolatedDays?: number;
+  missingDays?: number;
+}
+
+export interface PriceDistribution {
+  min: number | null;
+  p25: number | null;
+  median: number | null;
+  p75: number | null;
+  max: number | null;
+  currency: string;
+}
+
+export interface RecommendedPrice {
+  nightly: number | null;
+  weekdayEstimate: number | null;
+  weekendEstimate: number | null;
+  discountApplied: number;
+  notes: string;
+}
+
+// ── Summary & Report ────────────────────────────────────────────
 
 export interface ReportSummary {
   insightHeadline: string;
@@ -111,13 +185,26 @@ export interface ReportSummary {
   estimatedMonthlyRevenue: number;
   weeklyStayAvgNightly: number;
   monthlyStayAvgNightly: number;
+  selectedRangeNights?: number;
+  selectedRangeAvgNightly?: number;
+  stayLengthAverages?: Array<{
+    stayLength: number;
+    avgNightly: number;
+    lengthDiscountPct: number;
+  }>;
+  // Embedded transparency fields (present in new reports)
+  targetSpec?: TargetSpec;
+  queryCriteria?: QueryCriteria;
+  compsSummary?: CompsSummary;
+  priceDistribution?: PriceDistribution;
+  recommendedPrice?: RecommendedPrice;
 }
 
 export interface PricingReport {
   id: string;
   shareId: string;
   createdAt: string;
-  status: "queued" | "ready" | "error";
+  status: "queued" | "running" | "ready" | "error";
   coreVersion: string;
   inputAddress: string;
   inputAttributes: ListingInput;
@@ -127,7 +214,61 @@ export interface PricingReport {
   resultSummary: ReportSummary | null;
   resultCalendar: CalendarDay[] | null;
   errorMessage: string | null;
+  workerAttempts?: number;
+  // Top-level transparency fields (extracted from resultSummary by API)
+  targetSpec?: TargetSpec | null;
+  queryCriteria?: QueryCriteria | null;
+  compsSummary?: CompsSummary | null;
+  priceDistribution?: PriceDistribution | null;
+  recommendedPrice?: RecommendedPrice | null;
 }
+
+// ── Saved Listings ─────────────────────────────────────────────
+
+export const createListingSchema = z.object({
+  name: z.string().min(1, "Name is required").max(100),
+  inputAddress: z.string().min(5, "Please enter a valid address"),
+  inputAttributes: listingInputSchema,
+  defaultDiscountPolicy: discountPolicySchema.optional(),
+});
+
+export const updateListingSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  inputAddress: z.string().min(5).optional(),
+  inputAttributes: listingInputSchema.optional(),
+  defaultDiscountPolicy: discountPolicySchema.optional(),
+});
+
+export interface SavedListing {
+  id: string;
+  userId: string;
+  name: string;
+  inputAddress: string;
+  inputAttributes: ListingInput;
+  defaultDiscountPolicy: DiscountPolicy | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListingReport {
+  id: string;
+  savedListingId: string;
+  pricingReportId: string;
+  trigger: "manual" | "rerun" | "scheduled";
+  createdAt: string;
+}
+
+export const rerunListingSchema = z.object({
+  dates: dateInputSchema,
+  discountPolicy: discountPolicySchema.optional(),
+  inputMode: inputModeEnum.optional(),
+  listingUrl: z.string().url().optional(),
+});
+
+export type CreateListingRequest = z.infer<typeof createListingSchema>;
+export type UpdateListingRequest = z.infer<typeof updateListingSchema>;
+export type RerunListingRequest = z.infer<typeof rerunListingSchema>;
 
 // ── Market Tracking ─────────────────────────────────────────────
 

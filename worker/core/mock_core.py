@@ -147,6 +147,10 @@ def generate_mock_report(
         [d["basePrice"] for d in calendar], total_days, discount_policy
     )
 
+    # Price distribution for transparency
+    p25 = sorted_prices[len(sorted_prices) // 4] if len(sorted_prices) >= 4 else min_p
+    p75 = sorted_prices[3 * len(sorted_prices) // 4] if len(sorted_prices) >= 4 else max_p
+
     summary = {
         "insightHeadline": headline,
         "nightlyMin": min_p,
@@ -161,6 +165,50 @@ def generate_mock_report(
         "selectedRangeNights": total_days,
         "selectedRangeAvgNightly": selected_range_avg,
         "stayLengthAverages": stay_length_averages,
+        # Transparency fields (consistent with scrape output)
+        "targetSpec": {
+            "title": "User-defined property",
+            "location": address,
+            "propertyType": attributes.get("propertyType", ""),
+            "accommodates": attributes.get("maxGuests"),
+            "bedrooms": attributes.get("bedrooms"),
+            "beds": attributes.get("bedrooms"),
+            "baths": attributes.get("bathrooms"),
+            "amenities": attributes.get("amenities", []),
+            "rating": None,
+            "reviews": None,
+        },
+        "queryCriteria": {
+            "locationBasis": address,
+            "searchAdults": min(attributes.get("maxGuests", 2), 16),
+            "checkin": start_date,
+            "checkout": end_date,
+            "propertyTypeFilter": attributes.get("propertyType", ""),
+            "tolerances": {"accommodates": 3, "bedrooms": 2, "beds": 3, "baths": 1.5},
+        },
+        "compsSummary": {
+            "collected": 0,
+            "afterFiltering": 0,
+            "usedForPricing": 0,
+            "filterStage": "mock",
+            "topSimilarity": None,
+            "avgSimilarity": None,
+        },
+        "priceDistribution": {
+            "min": min_p,
+            "p25": p25,
+            "median": median,
+            "p75": p75,
+            "max": max_p,
+            "currency": "USD",
+        },
+        "recommendedPrice": {
+            "nightly": base_nightly,
+            "weekdayEstimate": weekday_avg,
+            "weekendEstimate": weekend_avg,
+            "discountApplied": 0.0,
+            "notes": "Based on deterministic modeling (mock mode).",
+        },
     }
 
     debug = {

@@ -1,486 +1,180 @@
 """
-Playwright-based Airbnb price estimator.
+Playwright-based Airbnb price estimator — orchestrator.
 
 Connects to a local Chrome instance via CDP (Chrome DevTools Protocol)
 to scrape target listing specs and nearby comparable listings.
 
-Adapted from backend/main.py — refactored into reusable functions
-for the worker queue system.
+Uses day-by-day 1-night queries to get accurate nightly prices.  See
+day_query.py for the rationale (Airbnb search cards display total trip
+prices for multi-night stays, which inflates extracted nightly rates).
+
+This module orchestrates the pipeline by delegating to:
+  - target_extractor: listing page spec extraction
+  - comparable_collector: search page scrolling & card parsing
+  - similarity: scoring & filtering
+  - pricing_engine: price recommendation & transparent output
+  - day_query: day-by-day 1-night query engine
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import statistics
 import time
-from dataclasses import dataclass
+from datetime import datetime as dt
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, urlparse
+
+from worker.core.similarity import (
+    filter_similar_candidates,
+    similarity_score,
+)
+from worker.scraper.comparable_collector import (
+    build_search_url,
+    parse_card_to_spec,
+    scroll_and_collect,
+)
+from worker.scraper.day_query import (
+    DAY_MAX_CARDS,
+    DAY_SCROLL_ROUNDS,
+    MAX_NIGHTS,
+    MAX_SAMPLE_QUERIES,
+    PER_DAY_MAX_RETRIES,
+    SAMPLE_THRESHOLD,
+    compute_sample_dates,
+    daterange_nights,
+    detect_discount_evidence,
+    estimate_base_price_for_date,
+    interpolate_missing_days,
+)
+from worker.scraper.target_extractor import (
+    ListingSpec,
+    check_cdp_endpoint,
+    extract_target_spec,
+    safe_domain_base,
+)
 
 logger = logging.getLogger("worker.scraper")
 
-# ---------------------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ListingSpec:
-    url: str
-    title: str = ""
-    location: str = ""
-    accommodates: Optional[int] = None
-    bedrooms: Optional[int] = None
-    beds: Optional[int] = None
-    baths: Optional[float] = None
-    property_type: str = ""
-    nightly_price: Optional[float] = None
-    currency: str = "USD"
-    rating: Optional[float] = None
-    reviews: Optional[int] = None
-
 
 # ---------------------------------------------------------------------------
-# Regex helpers
-# ---------------------------------------------------------------------------
-
-_MONEY_RE = re.compile(
-    r"(?<!\w)(?:US)?\s?\$?\s?(\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?!\w)"
-)
-_BEDROOM_RE = re.compile(r"(\d+)\s*(?:bedroom|bedrooms|間臥室|卧室)", re.I)
-_BED_RE = re.compile(r"(\d+)\s*(?:bed|beds|張床|床)", re.I)
-_BATH_RE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(?:bath|baths|衛浴|浴室|衛生間|卫生间)", re.I
-)
-_GUEST_RE = re.compile(r"(\d+)\s*(?:guest|guests|位|人)", re.I)
-
-
-def _clean(s: str) -> str:
-    return (s or "").replace("\u00a0", " ").strip()
-
-
-def _to_int(x: str) -> Optional[int]:
-    try:
-        return int(x)
-    except Exception:
-        return None
-
-
-def _to_float(x: str) -> Optional[float]:
-    try:
-        return float(x)
-    except Exception:
-        return None
-
-
-def _extract_first_int(text: str, patterns: list) -> Optional[int]:
-    for p in patterns:
-        m = p.search(text or "")
-        if m:
-            return _to_int(m.group(1))
-    return None
-
-
-def _extract_first_float(text: str, patterns: list) -> Optional[float]:
-    for p in patterns:
-        m = p.search(text or "")
-        if m:
-            return _to_float(m.group(1))
-    return None
-
-
-def _parse_money_to_float(text: str) -> Optional[float]:
-    if not text:
-        return None
-    m = _MONEY_RE.search(text.replace(",", ""))
-    if not m:
-        return None
-    try:
-        return float(m.group(1).replace(",", ""))
-    except Exception:
-        return None
-
-
-def _weighted_median(
-    values: List[float], weights: List[float]
-) -> Optional[float]:
-    if not values or not weights or len(values) != len(weights):
-        return None
-    pairs = sorted(zip(values, weights), key=lambda x: x[0])
-    total = sum(w for _, w in pairs)
-    if total <= 0:
-        return None
-    cum = 0.0
-    for v, w in pairs:
-        cum += w
-        if cum >= total / 2:
-            return v
-    return pairs[-1][0]
-
-
-def _safe_domain_base(url: str) -> str:
-    p = urlparse(url)
-    if p.scheme and p.netloc:
-        return f"{p.scheme}://{p.netloc}".rstrip("/")
-    return "https://www.airbnb.com"
-
-
-# ---------------------------------------------------------------------------
-# Page-level extraction
+# Helper: assemble transparent result from day-by-day data
 # ---------------------------------------------------------------------------
 
 
-def extract_target_spec(page, listing_url: str) -> ListingSpec:
-    """Navigate to a listing page and extract specs."""
-    page.goto(listing_url, wait_until="domcontentloaded")
-    page.wait_for_timeout(800)
-
-    # JSON-LD
-    ld = None
-    try:
-        ld = page.evaluate(
-            """() => {
-              const scripts = Array.from(
-                document.querySelectorAll('script[type="application/ld+json"]')
-              );
-              return scripts.map(s => s.textContent || '').filter(Boolean);
-            }"""
-        )
-    except Exception:
-        ld = None
-
-    body_text = ""
-    try:
-        body_text = page.inner_text("body", timeout=8000)
-    except Exception:
-        body_text = ""
-
-    title = ""
-    location = ""
-    accommodates = None
-    bedrooms = None
-    beds = None
-    baths = None
-    property_type = ""
-
-    # Title
-    try:
-        title = _clean(page.locator("h1").first.inner_text(timeout=4000))
-    except Exception:
-        title = _clean((body_text.splitlines() or [""])[0])
-
-    # Location heuristics
-    top_slice = "\n".join(
-        ln.strip() for ln in (body_text.splitlines()[:80]) if ln.strip()
-    )
-    location_keywords = [
-        "United States", "Taiwan", "Canada", "日本", "台灣", "台湾",
-        "France", "Deutschland", "UK", "United Kingdom", "Australia",
-        "Korea", "韓國", "한국", "Hong Kong", "Singapore",
-    ]
-    for ln in top_slice.splitlines():
-        if any(k in ln for k in location_keywords):
-            if "," in ln and len(ln) <= 80:
-                location = _clean(ln)
-                break
-
-    # Specs from body text
-    accommodates = _extract_first_int(body_text, [_GUEST_RE])
-    bedrooms = _extract_first_int(body_text, [_BEDROOM_RE])
-    beds = _extract_first_int(body_text, [_BED_RE])
-    baths = _extract_first_float(body_text, [_BATH_RE])
-
-    # Property type
-    for ln in top_slice.splitlines():
-        if any(k in ln.lower() for k in ["entire", "private room", "shared room"]) or any(
-            k in ln for k in ["整套", "獨立房間", "合住房間"]
-        ):
-            property_type = _clean(ln)
-            break
-
-    # Override from JSON-LD if available
-    if isinstance(ld, list) and ld:
-        for block in ld:
-            try:
-                obj = json.loads(block)
-            except Exception:
-                continue
-            candidates = obj if isinstance(obj, list) else [obj]
-            for it in candidates:
-                if not isinstance(it, dict):
-                    continue
-                t = it.get("@type") or ""
-                if t and any(
-                    x in str(t)
-                    for x in [
-                        "LodgingBusiness", "Hotel", "Apartment",
-                        "House", "Accommodation",
-                    ]
-                ):
-                    title = title or _clean(str(it.get("name") or ""))
-                    addr = it.get("address") or {}
-                    if isinstance(addr, dict):
-                        parts = [
-                            str(addr[k])
-                            for k in [
-                                "addressLocality",
-                                "addressRegion",
-                                "addressCountry",
-                            ]
-                            if addr.get(k)
-                        ]
-                        if parts and not location:
-                            location = ", ".join(parts)
-                    break
-
-    return ListingSpec(
-        url=listing_url,
-        title=title,
-        location=location,
-        accommodates=accommodates,
-        bedrooms=bedrooms,
-        beds=beds,
-        baths=baths,
-        property_type=property_type,
-    )
-
-
-def build_search_url(
-    base_origin: str, location: str, checkin: str, checkout: str, adults: int
-) -> str:
-    q = quote(location)
-    return (
-        f"{base_origin}/s/{q}/homes"
-        f"?checkin={checkin}&checkout={checkout}&adults={adults}"
-    )
-
-
-def collect_search_cards(page) -> List[Dict[str, Any]]:
-    """Extract listing card data from a search results page."""
-    return page.evaluate(
-        """() => {
-          const cardRoots = []
-            .concat(Array.from(
-              document.querySelectorAll('div[data-testid="card-container"]')
-            ))
-            .concat(Array.from(
-              document.querySelectorAll('div[data-testid^="listing-card"]')
-            ))
-            .concat(
-              Array.from(document.querySelectorAll('a[href*="/rooms/"]'))
-                .map(a => a.closest('div[data-testid],div') || a)
-            );
-          const uniq = new Set();
-          const cards = [];
-          for (const root of cardRoots) {
-            if (!root) continue;
-            const a = root.querySelector('a[href*="/rooms/"]');
-            if (!a) continue;
-            const href = a.getAttribute('href') || '';
-            const abs = href.startsWith('http')
-              ? href
-              : location.origin + href;
-            const m = abs.match(/\\/rooms\\/(\\d+)/);
-            const roomId = m ? m[1] : abs;
-            if (uniq.has(roomId)) continue;
-            uniq.add(roomId);
-            const text = (root.innerText || '').trim();
-            const aria = a.getAttribute('aria-label') || '';
-            const title =
-              aria || (text.split('\\n').find(x => x.trim().length > 6) || '');
-            let priceText = '';
-            const priceCandidates = Array.from(
-              root.querySelectorAll('[data-testid*="price"],span,div')
-            )
-              .map(el => (el.innerText || '').trim())
-              .filter(
-                t =>
-                  t &&
-                  (t.includes('$') ||
-                    t.includes('US$') ||
-                    t.includes('每晚') ||
-                    t.includes('晚'))
-              );
-            priceCandidates.sort((a, b) => a.length - b.length);
-            priceText =
-              priceCandidates.find(
-                t => t.includes('$') || t.includes('US$')
-              ) || (priceCandidates[0] || '');
-            let rating = null;
-            let reviews = null;
-            const rateMatch = text.match(
-              /(\\d\\.\\d\\d|\\d\\.\\d)\\s*(?:\\(|·|・)?\\s*(\\d+)?/
-            );
-            if (rateMatch) {
-              const r = parseFloat(rateMatch[1]);
-              if (!isNaN(r) && r >= 2.5 && r <= 5.0) rating = r;
-              if (rateMatch[2]) {
-                const n = parseInt(rateMatch[2], 10);
-                if (!isNaN(n)) reviews = n;
-              }
-            }
-            cards.push({
-              room_id: roomId,
-              url: abs,
-              title,
-              text,
-              price_text: priceText,
-              rating,
-              reviews,
-            });
-          }
-          return cards;
-        }"""
-    )
-
-
-def scroll_and_collect(
-    page,
-    max_rounds: int = 12,
-    max_cards: int = 80,
-    pause_ms: int = 900,
-    rate_limit_seconds: float = 1.0,
-) -> List[Dict[str, Any]]:
-    """Scroll the search page and collect listing cards with rate limiting."""
-    all_cards: Dict[str, Dict[str, Any]] = {}
-    no_new = 0
-
-    for rd in range(1, max_rounds + 1):
-        try:
-            page.wait_for_timeout(400)
-            cards = collect_search_cards(page)
-        except Exception:
-            cards = []
-
-        new_count = 0
-        for c in cards:
-            rid = str(c.get("room_id") or c.get("url") or "")
-            if rid and rid not in all_cards:
-                all_cards[rid] = c
-                new_count += 1
-
-        logger.info(f"[SCAN] round={rd} new={new_count} total={len(all_cards)}")
-        no_new = no_new + 1 if new_count == 0 else 0
-
-        if no_new >= 3 or len(all_cards) >= max_cards:
-            break
-
-        # Rate limit between scroll rounds
-        time.sleep(rate_limit_seconds)
-
-        try:
-            page.mouse.wheel(0, 1600)
-        except Exception:
-            pass
-        page.wait_for_timeout(pause_ms)
-
-    return list(all_cards.values())
-
-
-def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
-    text = _clean(card.get("text") or "")
-    price_text = _clean(card.get("price_text") or "")
-    price = _parse_money_to_float(price_text)
-
-    return ListingSpec(
-        url=str(card.get("url") or ""),
-        title=_clean(card.get("title") or ""),
-        accommodates=_extract_first_int(text, [_GUEST_RE]),
-        bedrooms=_extract_first_int(text, [_BEDROOM_RE]),
-        beds=_extract_first_int(text, [_BED_RE]),
-        baths=_extract_first_float(text, [_BATH_RE]),
-        nightly_price=price,
-        rating=card.get("rating"),
-        reviews=card.get("reviews"),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Similarity scoring
-# ---------------------------------------------------------------------------
-
-
-def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
-    score = 0.0
-    weight_sum = 0.0
-
-    def add_num(t, c, w: float, tol: float):
-        nonlocal score, weight_sum
-        weight_sum += w
-        if t is None or c is None:
-            score += 0.35 * w
-            return
-        diff = abs(float(t) - float(c))
-        s = max(0.0, 1.0 - diff / tol)
-        score += s * w
-
-    add_num(target.accommodates, cand.accommodates, w=2.2, tol=3.0)
-    add_num(target.bedrooms, cand.bedrooms, w=2.6, tol=2.0)
-    add_num(target.beds, cand.beds, w=1.4, tol=3.0)
-    add_num(target.baths, cand.baths, w=2.0, tol=1.5)
-
-    if weight_sum <= 0:
-        return 0.0
-    return score / weight_sum
-
-
-def recommend_price(
+def _build_daily_transparent_result(
     target: ListingSpec,
-    comps: List[ListingSpec],
-    *,
-    top_k: int = 15,
-    new_listing_discount: float = 0.10,
-) -> Tuple[Optional[float], Dict[str, Any]]:
-    """Pick top-K similar comps and compute a recommended nightly price."""
-    comps = [c for c in comps if c.nightly_price and c.nightly_price > 0]
-    if not comps:
-        return None, {"reason": "No comparable prices collected."}
+    query_criteria: Dict[str, Any],
+    all_day_results: List[Dict[str, Any]],
+    timings_ms: Dict[str, int],
+    source: str,
+    extraction_warnings: List[str],
+    discount_evidence: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Assemble the unified transparent result dict from day-by-day results.
 
-    ranked = sorted(
-        comps, key=lambda c: similarity_score(target, c), reverse=True
-    )
-    picked = ranked[: max(3, top_k)]
-
-    prices = [c.nightly_price for c in picked if c.nightly_price]
-    weights = [
-        max(0.05, similarity_score(target, c))
-        for c in picked
-        if c.nightly_price
+    This replaces build_transparent_result for the day-by-day pipeline,
+    aggregating per-day stats into the standard output shape.
+    """
+    # Aggregate prices across all days with valid medians
+    valid_prices = [
+        r["median_price"] for r in all_day_results
+        if r.get("median_price") is not None
     ]
 
-    wm = _weighted_median(prices, weights)
-    if wm is None:
-        wm = statistics.median(prices) if prices else None
-    if wm is None:
-        return None, {"reason": "Failed to compute median."}
+    sampled_days = sum(1 for r in all_day_results if r.get("is_sampled", False))
+    interpolated_days = sum(
+        1 for r in all_day_results
+        if not r.get("is_sampled", False) and r.get("median_price") is not None
+    )
+    missing_days = sum(
+        1 for r in all_day_results if r.get("median_price") is None
+    )
 
-    rec = wm * (1.0 - max(0.0, min(0.35, new_listing_discount)))
+    total_comps_collected = sum(r.get("comps_collected", 0) for r in all_day_results)
+    total_comps_used = sum(r.get("comps_used", 0) for r in all_day_results)
 
-    debug: Dict[str, Any] = {
-        "picked_n": len(picked),
-        "weighted_median": round(wm, 2),
-        "discount_applied": new_listing_discount,
-        "recommended_nightly": round(rec, 2),
-        "p25": (
-            round(statistics.quantiles(prices, n=4)[0], 2)
-            if len(prices) >= 4
-            else None
-        ),
-        "p75": (
-            round(statistics.quantiles(prices, n=4)[2], 2)
-            if len(prices) >= 4
-            else None
-        ),
-        "min": round(min(prices), 2) if prices else None,
-        "max": round(max(prices), 2) if prices else None,
+    # Price distribution from aggregated daily medians
+    price_dist: Dict[str, Any] = {
+        "min": None, "p25": None, "median": None, "p75": None, "max": None,
+        "currency": "USD",
     }
-    return rec, debug
+    if valid_prices:
+        price_dist["min"] = round(min(valid_prices), 2)
+        price_dist["max"] = round(max(valid_prices), 2)
+        price_dist["median"] = round(statistics.median(valid_prices), 2)
+        if len(valid_prices) >= 4:
+            q = statistics.quantiles(valid_prices, n=4)
+            price_dist["p25"] = round(q[0], 2)
+            price_dist["p75"] = round(q[2], 2)
+
+    # Weekday vs weekend estimates from actual data
+    weekday_prices = [
+        r["median_price"] for r in all_day_results
+        if r.get("median_price") is not None and not r.get("is_weekend", False)
+    ]
+    weekend_prices = [
+        r["median_price"] for r in all_day_results
+        if r.get("median_price") is not None and r.get("is_weekend", False)
+    ]
+
+    overall_median = price_dist["median"]
+    weekday_est = round(statistics.median(weekday_prices)) if weekday_prices else (round(overall_median) if overall_median else None)
+    weekend_est = round(statistics.median(weekend_prices)) if weekend_prices else (round(overall_median) if overall_median else None)
+
+    return {
+        "targetSpec": {
+            "title": target.title or "",
+            "location": target.location or "",
+            "propertyType": target.property_type or "",
+            "accommodates": target.accommodates,
+            "bedrooms": target.bedrooms,
+            "beds": target.beds,
+            "baths": target.baths,
+            "amenities": target.amenities or [],
+            "rating": target.rating,
+            "reviews": target.reviews,
+        },
+        "queryCriteria": query_criteria,
+        "compsSummary": {
+            "collected": total_comps_collected,
+            "afterFiltering": total_comps_used,
+            "usedForPricing": total_comps_used,
+            "filterStage": "day_by_day",
+            "topSimilarity": None,
+            "avgSimilarity": None,
+            "sampledDays": sampled_days,
+            "interpolatedDays": interpolated_days,
+            "missingDays": missing_days,
+        },
+        "priceDistribution": price_dist,
+        "recommendedPrice": {
+            "nightly": overall_median,
+            "weekdayEstimate": weekday_est,
+            "weekendEstimate": weekend_est,
+            "discountApplied": 0.0,
+            "notes": "",
+        },
+        "debug": {
+            "source": source,
+            "extractionWarnings": extraction_warnings,
+            "timingsMs": timings_ms,
+            "pipelineVersion": "day-by-day-v1",
+            "discountEvidence": discount_evidence,
+            "dayQueryStats": {
+                "totalNights": len(all_day_results),
+                "sampled": sampled_days,
+                "interpolated": interpolated_days,
+                "missing": missing_days,
+                "validPriceCount": len(valid_prices),
+            },
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
-# Main scrape pipeline (connects to local Chrome via CDP)
+# Main scrape pipeline — day-by-day (connects to local Chrome via CDP)
 # ---------------------------------------------------------------------------
 
 
@@ -490,25 +184,65 @@ def run_scrape(
     checkout: str,
     cdp_url: str = "http://127.0.0.1:9222",
     adults: int = 2,
-    top_k: int = 15,
-    max_scroll_rounds: int = 12,
-    max_cards: int = 80,
+    top_k: int = 10,
+    max_scroll_rounds: int = DAY_SCROLL_ROUNDS,
+    max_cards: int = DAY_MAX_CARDS,
     max_runtime_seconds: int = 180,
     rate_limit_seconds: float = 1.0,
-) -> Tuple[Optional[float], List[ListingSpec], Dict[str, Any]]:
+    cdp_connect_timeout_ms: int = 15000,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Full scrape pipeline: extract target → search comps → rank → recommend.
+    Full scrape pipeline using day-by-day 1-night queries.
 
-    Returns (recommended_nightly, comps_list, debug_dict).
-    Uses CDP to connect to a locally running Chrome with active Airbnb session.
+    Returns (daily_results, transparent_result).
+    daily_results is a list of dicts, one per night in [checkin, checkout).
+    Each dict contains: date, median_price, comps_collected, comps_used,
+    filter_stage, flags, is_sampled, is_weekend, price_distribution, error.
+
+    Raises ValueError if the date range exceeds MAX_NIGHTS.
     """
     from playwright.sync_api import sync_playwright
 
     start_time = time.time()
-    base_origin = _safe_domain_base(listing_url)
+    timings: Dict[str, int] = {}
+    extraction_warnings: List[str] = []
+    base_origin = safe_domain_base(listing_url)
+
+    # Parse and validate dates
+    d_start = dt.strptime(checkin, "%Y-%m-%d").date()
+    d_end = dt.strptime(checkout, "%Y-%m-%d").date()
+    total_nights = (d_end - d_start).days
+    if total_nights < 1:
+        return [], _empty_transparent("scrape", "Invalid date range: checkout must be after checkin")
+    if total_nights > MAX_NIGHTS:
+        raise ValueError(
+            f"Date range of {total_nights} nights exceeds maximum of {MAX_NIGHTS}. "
+            f"Please select a shorter range."
+        )
+
+    all_nights = daterange_nights(d_start, d_end)
+
+    # Determine which nights to actually query
+    if total_nights <= SAMPLE_THRESHOLD:
+        sample_indices = list(range(total_nights))
+    else:
+        sample_indices = compute_sample_dates(total_nights, MAX_SAMPLE_QUERIES)
+
+    logger.info(
+        f"Day-by-day pipeline: {total_nights} nights, "
+        f"querying {len(sample_indices)} days (sampling={'yes' if len(sample_indices) < total_nights else 'no'})"
+    )
+
+    # CDP check
+    cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
+    if not cdp_ok:
+        return [], _empty_transparent("scrape", f"CDP unavailable: {cdp_reason}")
 
     with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(cdp_url)
+        browser = p.chromium.connect_over_cdp(
+            cdp_url,
+            timeout=cdp_connect_timeout_ms,
+        )
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.new_page()
 
@@ -516,8 +250,9 @@ def run_scrape(
             # Step 1: Extract target listing spec
             logger.info(f"Extracting target: {listing_url}")
             extract_start = time.time()
-            target = extract_target_spec(page, listing_url)
-            extract_ms = round((time.time() - extract_start) * 1000)
+            target, warnings = extract_target_spec(page, listing_url)
+            extraction_warnings.extend(warnings)
+            timings["extract_ms"] = round((time.time() - extract_start) * 1000)
 
             if not target.location:
                 tokens = [
@@ -526,81 +261,149 @@ def run_scrape(
                     if t.strip()
                 ]
                 target.location = tokens[-1] if tokens else ""
+                extraction_warnings.append(f"Location fallback from title: '{target.location}'")
                 logger.warning(f"Location fallback from title: '{target.location}'")
 
             if not target.location:
-                return None, [], {
-                    "error": "Cannot determine location from listing page.",
-                    "extract_target_ms": extract_ms,
+                return [], {
+                    "targetSpec": {
+                        "title": target.title,
+                        "location": "",
+                        "propertyType": target.property_type,
+                        "accommodates": target.accommodates,
+                        "bedrooms": target.bedrooms,
+                        "beds": target.beds,
+                        "baths": target.baths,
+                        "amenities": target.amenities,
+                        "rating": target.rating,
+                        "reviews": target.reviews,
+                    },
+                    "queryCriteria": None,
+                    "compsSummary": None,
+                    "priceDistribution": None,
+                    "recommendedPrice": None,
+                    "debug": {
+                        "source": "scrape",
+                        "error": "Cannot determine location from listing page.",
+                        "extractionWarnings": extraction_warnings,
+                        "timingsMs": timings,
+                    },
                 }
 
-            # Step 2: Search nearby comparables
-            search_url = build_search_url(
-                base_origin, target.location, checkin, checkout, adults
-            )
-            logger.info(f"Search URL: {search_url}")
+            # Use target listing capacity for search alignment
+            effective_adults = adults
+            if target.accommodates and target.accommodates > 0:
+                effective_adults = min(int(target.accommodates), 16)
 
-            # Rate limit before search page load
-            time.sleep(rate_limit_seconds)
-
-            page.goto(search_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(900)
-
-            # Dismiss modals
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-
-            # Check timeout before scrolling
-            elapsed = time.time() - start_time
-            remaining = max_runtime_seconds - elapsed
-            if remaining < 10:
-                return None, [], {
-                    "error": "Timeout before scroll phase.",
-                    "extract_target_ms": extract_ms,
-                    "total_ms": round(elapsed * 1000),
-                }
-
-            scroll_start = time.time()
-            raw_cards = scroll_and_collect(
-                page,
-                max_rounds=max_scroll_rounds,
-                max_cards=max_cards,
-                pause_ms=900,
-                rate_limit_seconds=rate_limit_seconds,
-            )
-            scroll_ms = round((time.time() - scroll_start) * 1000)
-
-            comps = [parse_card_to_spec(c) for c in raw_cards]
-            comps = [c for c in comps if c.url and c.nightly_price]
-
-            # Step 3: Rank & recommend
-            comps_scored = [
-                (c, similarity_score(target, c)) for c in comps
-            ]
-            comps_scored.sort(key=lambda x: x[1], reverse=True)
-
-            recommended, rec_debug = recommend_price(
-                target,
-                [c for c, _ in comps_scored],
-                top_k=top_k,
-            )
-
-            total_ms = round((time.time() - start_time) * 1000)
-
-            debug = {
-                "source": "scrape",
-                "extract_target_ms": extract_ms,
-                "scroll_ms": scroll_ms,
-                "total_ms": total_ms,
-                "comps_collected": len(comps),
-                "target_location": target.location,
-                "target_title": target.title,
-                **rec_debug,
+            query_criteria = {
+                "locationBasis": target.location,
+                "searchAdults": effective_adults,
+                "checkin": checkin,
+                "checkout": checkout,
+                "totalNights": total_nights,
+                "sampledNights": len(sample_indices),
+                "queryMode": "day_by_day",
+                "propertyTypeFilter": target.property_type or None,
             }
 
-            return recommended, comps, debug
+            # Step 2: Day-by-day 1-night queries
+            from worker.scraper.day_query import DayResult
+
+            sampled_results: List[DayResult] = []
+            day_loop_start = time.time()
+
+            for idx_pos, night_idx in enumerate(sample_indices):
+                # Check global timeout
+                elapsed = time.time() - start_time
+                remaining = max_runtime_seconds - elapsed
+                if remaining < 15:
+                    logger.warning(
+                        f"Global timeout approaching ({remaining:.0f}s left), "
+                        f"stopping after {idx_pos}/{len(sample_indices)} day-queries"
+                    )
+                    break
+
+                date_i = all_nights[night_idx]
+
+                # Retry logic
+                result: Optional[DayResult] = None
+                for attempt in range(1, PER_DAY_MAX_RETRIES + 1):
+                    time.sleep(rate_limit_seconds)
+                    result = estimate_base_price_for_date(
+                        page,
+                        target,
+                        base_origin,
+                        date_i,
+                        effective_adults,
+                        max_scroll_rounds=max_scroll_rounds,
+                        max_cards=max_cards,
+                        rate_limit_seconds=rate_limit_seconds,
+                        top_k=top_k,
+                    )
+                    if result.median_price is not None:
+                        break
+                    if attempt < PER_DAY_MAX_RETRIES:
+                        logger.info(
+                            f"[day_query] {date_i.isoformat()}: retry {attempt+1}/{PER_DAY_MAX_RETRIES}"
+                        )
+
+                if result is not None:
+                    sampled_results.append(result)
+
+            timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
+
+            # Step 3: Interpolate unsampled/failed days
+            interp_start = time.time()
+            all_day_results_obj = interpolate_missing_days(sampled_results, all_nights)
+            timings["interpolation_ms"] = round((time.time() - interp_start) * 1000)
+
+            # Convert DayResult objects to dicts
+            all_day_results: List[Dict[str, Any]] = []
+            for dr in all_day_results_obj:
+                all_day_results.append({
+                    "date": dr.date,
+                    "median_price": dr.median_price,
+                    "comps_collected": dr.comps_collected,
+                    "comps_used": dr.comps_used,
+                    "filter_stage": dr.filter_stage,
+                    "flags": dr.flags,
+                    "is_sampled": dr.is_sampled,
+                    "is_weekend": dr.is_weekend,
+                    "price_distribution": dr.price_distribution,
+                    "error": dr.error,
+                })
+
+            # Step 4: Discount evidence (debug only, if time permits)
+            discount_evidence = None
+            elapsed = time.time() - start_time
+            if elapsed < max_runtime_seconds - 20 and total_nights > 1:
+                try:
+                    discount_evidence = detect_discount_evidence(
+                        page, base_origin, target, checkin, checkout,
+                        effective_adults, rate_limit_seconds=rate_limit_seconds,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Discount evidence query failed: {exc}")
+
+            timings["total_ms"] = round((time.time() - start_time) * 1000)
+
+            transparent = _build_daily_transparent_result(
+                target=target,
+                query_criteria=query_criteria,
+                all_day_results=all_day_results,
+                timings_ms=timings,
+                source="scrape",
+                extraction_warnings=extraction_warnings,
+                discount_evidence=discount_evidence,
+            )
+
+            logger.info(
+                f"Day-by-day pipeline complete: {len(sample_indices)} queries, "
+                f"{sum(1 for r in all_day_results if r['median_price'] is not None)} valid prices, "
+                f"{timings['total_ms']}ms total"
+            )
+
+            return all_day_results, transparent
 
         finally:
             try:
@@ -620,26 +423,28 @@ def run_criteria_search(
     checkin: str,
     checkout: str,
     cdp_url: str = "http://127.0.0.1:9222",
-    top_k: int = 15,
-    max_scroll_rounds: int = 12,
-    max_cards: int = 80,
+    top_k: int = 10,
+    max_scroll_rounds: int = DAY_SCROLL_ROUNDS,
+    max_cards: int = DAY_MAX_CARDS,
     max_runtime_seconds: int = 180,
     rate_limit_seconds: float = 1.0,
-) -> Tuple[Optional[float], List[ListingSpec], Dict[str, Any]]:
+    cdp_connect_timeout_ms: int = 15000,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Criteria-based search: search Airbnb for listings matching the user's
     property criteria, find the most similar one, then use it as the anchor
-    listing for a full comp search via run_scrape().
+    listing for a full day-by-day scrape via run_scrape().
 
     Two-pass pipeline:
-      Pass 1 — Search Airbnb by address, collect cards, rank by similarity
-      Pass 2 — Use best match's URL as anchor for run_scrape()
+      Pass 1 -- Search Airbnb by address, collect cards, rank by similarity
+      Pass 2 -- Use best match's URL as anchor for run_scrape()
 
-    Returns (recommended_nightly, comps_list, debug_dict).
+    Returns (daily_results, transparent_result).
     """
     from playwright.sync_api import sync_playwright
 
     start_time = time.time()
+    timings: Dict[str, int] = {}
     base_origin = "https://www.airbnb.com"
 
     # Build a synthetic target spec from user criteria
@@ -656,13 +461,58 @@ def run_criteria_search(
 
     adults = min(attributes.get("maxGuests", 2), 16)
 
+    query_criteria = {
+        "locationBasis": address,
+        "searchAdults": adults,
+        "checkin": checkin,
+        "checkout": checkout,
+        "propertyTypeFilter": user_spec.property_type or None,
+        "tolerances": {
+            "accommodates": 3,
+            "bedrooms": 2,
+            "beds": 3,
+            "baths": 1.5,
+        },
+    }
+
+    cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
+    if not cdp_ok:
+        return [], {
+            "targetSpec": {
+                "title": "User property",
+                "location": address,
+                "propertyType": user_spec.property_type,
+                "accommodates": user_spec.accommodates,
+                "bedrooms": user_spec.bedrooms,
+                "beds": user_spec.beds,
+                "baths": user_spec.baths,
+                "amenities": [],
+                "rating": None,
+                "reviews": None,
+            },
+            "queryCriteria": query_criteria,
+            "compsSummary": None,
+            "priceDistribution": None,
+            "recommendedPrice": None,
+            "debug": {
+                "source": "criteria",
+                "error": f"CDP unavailable: {cdp_reason}",
+                "cdp_url": cdp_url,
+                "extractionWarnings": [],
+                "timingsMs": {},
+            },
+        }
+
     with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(cdp_url)
+        browser = p.chromium.connect_over_cdp(
+            cdp_url,
+            timeout=cdp_connect_timeout_ms,
+        )
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.new_page()
 
         try:
-            # Pass 1: Search Airbnb for the area
+            # Pass 1: Search Airbnb for the area to find an anchor listing
             search_url = build_search_url(
                 base_origin, address, checkin, checkout, adults
             )
@@ -681,10 +531,7 @@ def run_criteria_search(
             # Check timeout
             elapsed = time.time() - start_time
             if elapsed > max_runtime_seconds - 10:
-                return None, [], {
-                    "error": "Timeout before scroll",
-                    "source": "criteria",
-                }
+                return [], _empty_transparent("criteria", "Timeout before scroll")
 
             scroll_start = time.time()
             raw_cards = scroll_and_collect(
@@ -694,21 +541,29 @@ def run_criteria_search(
                 pause_ms=900,
                 rate_limit_seconds=rate_limit_seconds,
             )
-            scroll_ms = round((time.time() - scroll_start) * 1000)
+            timings["scroll_ms"] = round((time.time() - scroll_start) * 1000)
 
             candidates = [parse_card_to_spec(c) for c in raw_cards]
             candidates = [c for c in candidates if c.url and c.nightly_price]
 
             if not candidates:
-                return None, [], {
-                    "error": "No listings found in search results",
-                    "source": "criteria",
-                    "scroll_ms": scroll_ms,
-                    "search_address": address,
+                return [], {
+                    "targetSpec": None,
+                    "queryCriteria": query_criteria,
+                    "compsSummary": {"collected": 0, "afterFiltering": 0, "usedForPricing": 0, "filterStage": "empty", "topSimilarity": None, "avgSimilarity": None},
+                    "priceDistribution": None,
+                    "recommendedPrice": None,
+                    "debug": {
+                        "source": "criteria",
+                        "error": "No listings found in search results",
+                        "extractionWarnings": [],
+                        "timingsMs": timings,
+                    },
                 }
 
             # Rank by similarity to user's spec
-            scored = [(c, similarity_score(user_spec, c)) for c in candidates]
+            filtered_candidates, _filter_debug = filter_similar_candidates(user_spec, candidates)
+            scored = [(c, similarity_score(user_spec, c)) for c in filtered_candidates]
             scored.sort(key=lambda x: x[1], reverse=True)
 
             best_match = scored[0][0]
@@ -727,33 +582,25 @@ def run_criteria_search(
             except Exception:
                 pass
 
-    # Pass 2: Use best match as anchor for full scrape pipeline
+    # Pass 2: Use best match as anchor for full day-by-day scrape
     elapsed = time.time() - start_time
     remaining = max_runtime_seconds - elapsed
 
     if remaining < 30:
-        # Not enough time for a full scrape; use initial search results directly
-        logger.info(f"[criteria] Low time ({remaining:.0f}s), using direct results")
-        recommended, rec_debug = recommend_price(
-            user_spec, [c for c, _ in scored], top_k=top_k
+        # Not enough time for day-by-day scrape; return empty daily_results
+        # (process_job will fall back to mock)
+        logger.info(f"[criteria] Low time ({remaining:.0f}s), returning empty daily_results for mock fallback")
+        return [], _empty_transparent(
+            "criteria_direct",
+            f"Insufficient time for day-by-day queries ({remaining:.0f}s remaining)",
         )
-        return recommended, [c for c, _ in scored], {
-            "source": "criteria_direct",
-            "anchor_url": best_match.url,
-            "anchor_score": round(best_score, 3),
-            "scroll_ms": scroll_ms,
-            "total_ms": round((time.time() - start_time) * 1000),
-            "comps_collected": len(candidates),
-            "search_address": address,
-            **rec_debug,
-        }
 
-    # Full second pass via run_scrape
+    # Full second pass via run_scrape (day-by-day)
     logger.info(
-        f"[criteria] Running full scrape on anchor: {best_match.url} "
+        f"[criteria] Running day-by-day scrape on anchor: {best_match.url} "
         f"({remaining:.0f}s remaining)"
     )
-    recommended, comps, scrape_debug = run_scrape(
+    daily_results, scrape_transparent = run_scrape(
         listing_url=best_match.url,
         checkin=checkin,
         checkout=checkout,
@@ -764,19 +611,36 @@ def run_criteria_search(
         max_cards=max_cards,
         max_runtime_seconds=int(remaining),
         rate_limit_seconds=rate_limit_seconds,
+        cdp_connect_timeout_ms=cdp_connect_timeout_ms,
     )
 
-    # Merge debug info from both passes
-    debug = {
-        **scrape_debug,
-        "source": "criteria",
-        "criteria_search_ms": round(elapsed * 1000),
-        "anchor_url": best_match.url,
-        "anchor_score": round(best_score, 3),
-        "anchor_bedrooms": best_match.bedrooms,
-        "anchor_price": best_match.nightly_price,
-        "initial_candidates": len(candidates),
-        "search_address": address,
-    }
+    # Merge criteria-specific info into the transparent result
+    scrape_transparent["debug"]["source"] = "criteria"
+    scrape_transparent["debug"]["criteria_search_ms"] = round(elapsed * 1000)
+    scrape_transparent["debug"]["anchor_url"] = best_match.url
+    scrape_transparent["debug"]["anchor_score"] = round(best_score, 3)
+    scrape_transparent["debug"]["initial_candidates"] = len(candidates)
 
-    return recommended, comps, debug
+    return daily_results, scrape_transparent
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _empty_transparent(source: str, error: str) -> Dict[str, Any]:
+    """Return a minimal transparent_result dict for error/empty cases."""
+    return {
+        "targetSpec": None,
+        "queryCriteria": None,
+        "compsSummary": None,
+        "priceDistribution": None,
+        "recommendedPrice": None,
+        "debug": {
+            "source": source,
+            "error": error,
+            "extractionWarnings": [],
+            "timingsMs": {},
+        },
+    }

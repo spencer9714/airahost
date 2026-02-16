@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useMemo, use } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef, use } from "react";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
+import { HowWeEstimated } from "@/components/report/HowWeEstimated";
 import type { PricingReport, CalendarDay } from "@/lib/schemas";
 import { generatePricingReport } from "@/core/pricingCore";
 
-// Seeded demo report
+// ── Demo report (unchanged) ───────────────────────────────────
 function getDemoReport(): PricingReport {
   const result = generatePricingReport({
     listing: {
@@ -60,6 +61,10 @@ function getDemoReport(): PricingReport {
   };
 }
 
+// ── Polling config ────────────────────────────────────────────
+const POLL_INTERVAL_MS = 2_000;
+const SLOW_THRESHOLD_MS = 120_000; // 2 minutes
+
 export default function ResultsPage({
   params,
 }: {
@@ -73,12 +78,42 @@ export default function ResultsPage({
     "base"
   );
 
+  // Polling state
+  const [pollStartedAt] = useState(() => Date.now());
+  const [isSlow, setIsSlow] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Market tracking
   const [trackEmail, setTrackEmail] = useState("");
   const [trackWeekly, setTrackWeekly] = useState(true);
   const [trackUnderMarket, setTrackUnderMarket] = useState(true);
   const [trackSubmitted, setTrackSubmitted] = useState(false);
   const [trackLoading, setTrackLoading] = useState(false);
+
+  const fetchReport = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/r/${shareId}`);
+      if (!res.ok) throw new Error("Report not found");
+      const data = await res.json();
+      setReport(data);
+
+      // Stop polling once in a terminal state
+      if (data.status === "ready" || data.status === "error") {
+        if (pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+        setLoading(false);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+      setLoading(false);
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    }
+  }, [shareId]);
 
   useEffect(() => {
     if (shareId === "demo") {
@@ -87,15 +122,24 @@ export default function ResultsPage({
       return;
     }
 
-    fetch(`/api/r/${shareId}`)
-      .then((res) => {
-        if (!res.ok) throw new Error("Report not found");
-        return res.json();
-      })
-      .then(setReport)
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [shareId]);
+    // Initial fetch
+    fetchReport();
+
+    // Start polling
+    pollRef.current = setInterval(() => {
+      fetchReport();
+      if (Date.now() - pollStartedAt > SLOW_THRESHOLD_MS) {
+        setIsSlow(true);
+      }
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [shareId, fetchReport, pollStartedAt]);
 
   async function handleTrackSubmit() {
     if (!report) return;
@@ -120,17 +164,84 @@ export default function ResultsPage({
     }
   }
 
-  if (loading) {
+  // ── Queued / Running state ──────────────────────────────────
+  if (
+    report &&
+    (report.status === "queued" || report.status === "running") &&
+    !error
+  ) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-center">
-          <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-          <p className="text-muted">Generating your revenue report...</p>
+        <div className="mx-auto max-w-md text-center">
+          <div className="mx-auto mb-6 h-10 w-10 animate-spin rounded-full border-3 border-accent border-t-transparent" />
+          <h2 className="mb-2 text-xl font-semibold">Analyzing your market</h2>
+          <p className="mb-1 text-sm text-muted">
+            {report.status === "queued"
+              ? "Your report is in the queue..."
+              : "Crunching the numbers..."}
+          </p>
+          <p className="text-sm text-muted">
+            This typically takes 30 to 90 seconds.
+          </p>
+
+          {isSlow && (
+            <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm font-medium text-amber-800">
+                This is taking longer than usual
+              </p>
+              <p className="mt-1 text-xs text-amber-700">
+                The worker may be busy or temporarily offline. Your report will
+                be processed as soon as possible.
+              </p>
+            </div>
+          )}
+
+          {report.inputAddress && (
+            <p className="mt-4 text-xs text-muted">
+              Report for: {report.inputAddress}
+            </p>
+          )}
         </div>
       </div>
     );
   }
 
+  // ── Error state ─────────────────────────────────────────────
+  if (report && report.status === "error") {
+    return (
+      <div className="mx-auto max-w-5xl px-6 py-20 text-center">
+        <div className="mx-auto mb-6 flex h-16 w-16 items-center justify-center rounded-full bg-rose-50">
+          <span className="text-3xl">!</span>
+        </div>
+        <h1 className="mb-3 text-2xl font-bold">Something went wrong</h1>
+        <p className="mb-6 text-muted">
+          {report.errorMessage ||
+            "We couldn't generate your pricing report. Please try again."}
+        </p>
+        <Button
+          onClick={() => {
+            window.location.href = "/tool";
+          }}
+        >
+          Try again
+        </Button>
+      </div>
+    );
+  }
+
+  // ── Initial loading ─────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          <p className="text-muted">Loading report...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Not found ───────────────────────────────────────────────
   if (error || !report || !report.resultSummary) {
     return (
       <div className="mx-auto max-w-5xl px-6 py-20 text-center">
@@ -140,9 +251,28 @@ export default function ResultsPage({
     );
   }
 
+  // ── Ready — show results ────────────────────────────────────
   const s = report.resultSummary;
   const cal = report.resultCalendar ?? [];
   const dp = report.discountPolicy;
+  const stayLengthAverages =
+    s.stayLengthAverages && s.stayLengthAverages.length > 0
+      ? s.stayLengthAverages
+      : [
+          {
+            stayLength: Math.min(7, cal.length || 7),
+            avgNightly: s.weeklyStayAvgNightly,
+            lengthDiscountPct: 0,
+          },
+          {
+            stayLength: Math.min(28, cal.length || 28),
+            avgNightly: s.monthlyStayAvgNightly,
+            lengthDiscountPct: 0,
+          },
+        ].filter(
+          (point, idx, arr) =>
+            arr.findIndex((x) => x.stayLength === point.stayLength) === idx
+        );
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
@@ -160,6 +290,12 @@ export default function ResultsPage({
             ${s.estimatedMonthlyRevenue.toLocaleString()}
           </span>
         </p>
+        {s.selectedRangeNights && s.selectedRangeAvgNightly ? (
+          <p className="mt-1 text-xs text-muted">
+            Based on your selected {s.selectedRangeNights}-night stay average of $
+            {s.selectedRangeAvgNightly}/night.
+          </p>
+        ) : null}
       </Card>
 
       {/* Section 2 — Market Snapshot */}
@@ -192,6 +328,11 @@ export default function ResultsPage({
           </div>
         </Card>
       </div>
+
+      {/* Section 2.5 — How We Estimated (transparency) */}
+      {(report.targetSpec || report.resultSummary?.targetSpec) && (
+        <HowWeEstimated report={report} />
+      )}
 
       {/* Section 3 — Price Calendar */}
       <PriceCalendar
@@ -245,22 +386,17 @@ export default function ResultsPage({
           </p>
           <div className="mt-4 rounded-xl bg-gray-50 p-4">
             <p className="font-medium text-foreground">Example</p>
-            <p className="mt-1">
-              For a 7-night stay, the average nightly rate after discounts is{" "}
-              <strong className="text-foreground">
-                ${s.weeklyStayAvgNightly}
-              </strong>
-              .
-            </p>
-            {cal.length >= 28 && (
-              <p className="mt-1">
-                For a 28-night stay, the average nightly rate after discounts is{" "}
-                <strong className="text-foreground">
-                  ${s.monthlyStayAvgNightly}
-                </strong>
-                .
+            {stayLengthAverages.map((point) => (
+              <p key={point.stayLength} className="mt-1">
+                For a {point.stayLength}-night stay, average nightly after discounts is{" "}
+                <strong className="text-foreground">${point.avgNightly}</strong>
+                {point.lengthDiscountPct > 0 ? (
+                  <> (includes {point.lengthDiscountPct}% length-of-stay discount).</>
+                ) : (
+                  <> (no length-of-stay discount).</>
+                )}
               </p>
-            )}
+            ))}
           </div>
         </div>
       </Card>
@@ -392,7 +528,7 @@ function PriceCalendar({
   const firstDow = new Date(Date.UTC(current.year, current.month, 1)).getUTCDay();
   const daysInMonth = new Date(Date.UTC(current.year, current.month + 1, 0)).getUTCDate();
 
-  // Build grid: array of 6 weeks × 7 days, each cell is date number or null
+  // Build grid: array of weeks × 7 days, each cell is date number or null
   const weeks: (number | null)[][] = [];
   let week: (number | null)[] = new Array(firstDow).fill(null);
   for (let d = 1; d <= daysInMonth; d++) {
@@ -500,7 +636,6 @@ function PriceCalendar({
             const entry = dayMap.get(ds);
 
             if (!entry) {
-              // Day exists in the month but outside report range
               return (
                 <div
                   key={ds}
@@ -516,13 +651,16 @@ function PriceCalendar({
                 ? entry.basePrice
                 : entry.refundablePrice;
             const colorClass = priceColor(entry.basePrice);
+            const flags = entry.flags ?? [];
+            const isInterpolated = flags.includes("interpolated");
+            const isMissing = flags.includes("missing_data");
 
             return (
               <div
                 key={ds}
                 className={`group relative flex aspect-square flex-col items-center justify-center rounded-xl border border-border/60 transition-shadow hover:shadow-md ${
                   entry.isWeekend ? "border-accent/20" : ""
-                }`}
+                } ${isInterpolated && !isMissing ? "border-dashed" : ""}`}
               >
                 <span className="text-[10px] leading-none text-muted sm:text-xs">
                   {day}
@@ -530,10 +668,9 @@ function PriceCalendar({
                 <span
                   className={`mt-0.5 rounded-md px-1 py-0.5 text-xs font-semibold sm:text-sm ${colorClass}`}
                 >
-                  ${price}
+                  {isMissing ? "?" : isInterpolated ? "~" : ""}${price}
                 </span>
 
-                {/* Tooltip on hover — effective view shows both prices */}
                 {calendarView === "effective" && (
                   <div className="pointer-events-none absolute -top-16 left-1/2 z-10 hidden -translate-x-1/2 rounded-xl border border-border bg-white px-3 py-2 shadow-lg group-hover:block">
                     <p className="whitespace-nowrap text-[10px] text-muted">
@@ -542,6 +679,12 @@ function PriceCalendar({
                     <p className="whitespace-nowrap text-[10px] text-muted">
                       Non-refund: <strong>${entry.nonRefundablePrice}</strong>
                     </p>
+                    {isInterpolated && (
+                      <p className="whitespace-nowrap text-[10px] text-amber-600">Estimated from nearby days</p>
+                    )}
+                    {isMissing && (
+                      <p className="whitespace-nowrap text-[10px] text-rose-600">No market data available</p>
+                    )}
                   </div>
                 )}
               </div>
@@ -563,12 +706,19 @@ function PriceCalendar({
             <span className="inline-block h-3 w-3 rounded bg-rose-50 border border-rose-200" />
             Higher
           </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-3 w-3 rounded border border-dashed border-gray-400" />
+            ~Estimated
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="text-rose-500 font-medium">?</span>
+            No data
+          </span>
           {calendarView === "effective" && (
             <span className="text-muted">Hover for details</span>
           )}
         </div>
 
-        {/* Month dots for multi-month ranges */}
         {months.length > 1 && (
           <div className="mt-3 flex items-center justify-center gap-1.5">
             {months.map((m, i) => (

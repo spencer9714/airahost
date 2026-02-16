@@ -4,8 +4,8 @@
  * Generates deterministic pricing reports based on listing attributes.
  * Uses simple hashing for reproducible output.
  *
- * TODO: Replace this module with a call to the Python pricing service.
- * See pythonAdapter.ts for the integration boundary.
+ * Used by the /r/demo page for seeded demo reports.
+ * Real pricing is handled by the worker queue (see worker/).
  */
 
 import type {
@@ -105,6 +105,47 @@ function applyDiscount(
   };
 }
 
+function averageRefundablePriceForStay(
+  basePrices: number[],
+  stayLength: number,
+  policy: DiscountPolicy
+): number {
+  if (basePrices.length === 0) return 0;
+  const total = basePrices.reduce(
+    (sum, p) => sum + applyDiscount(p, stayLength, policy).refundablePrice,
+    0
+  );
+  return Math.round(total / basePrices.length);
+}
+
+function buildStayLengthAverages(
+  basePrices: number[],
+  totalDays: number,
+  policy: DiscountPolicy
+): Array<{ stayLength: number; avgNightly: number; lengthDiscountPct: number }> {
+  if (totalDays < 1) return [];
+
+  const points = new Set<number>([1, totalDays]);
+  if (totalDays >= 7) points.add(7);
+  if (totalDays >= 28) points.add(28);
+
+  return Array.from(points)
+    .sort((a, b) => a - b)
+    .map((stayLength) => {
+      let lengthDiscountPct = 0;
+      if (stayLength >= 28 && policy.monthlyDiscountPct > 0) {
+        lengthDiscountPct = policy.monthlyDiscountPct;
+      } else if (stayLength >= 7 && policy.weeklyDiscountPct > 0) {
+        lengthDiscountPct = policy.weeklyDiscountPct;
+      }
+      return {
+        stayLength,
+        avgNightly: averageRefundablePriceForStay(basePrices, stayLength, policy),
+        lengthDiscountPct,
+      };
+    });
+}
+
 // ── Main function ───────────────────────────────────────────────
 
 export interface PricingCoreInput {
@@ -192,7 +233,14 @@ export function generatePricingReport(
     : baseNightly;
 
   const occupancyPct = Math.round(55 + rand() * 30);
-  const estimatedMonthlyRevenue = Math.round(median * 30 * (occupancyPct / 100));
+  const selectedRangeAvgNightly = averageRefundablePriceForStay(
+    basePrices,
+    totalDays,
+    input.discountPolicy
+  );
+  const estimatedMonthlyRevenue = Math.round(
+    selectedRangeAvgNightly * 30 * (occupancyPct / 100)
+  );
 
   const marketMedian = Math.round(median * (0.9 + rand() * 0.3));
   const priceDiff = marketMedian - median;
@@ -203,16 +251,20 @@ export function generatePricingReport(
         ? `You're pricing $${Math.abs(priceDiff)} above the local median — consider if your amenities justify this.`
         : `Your pricing is well-aligned with the local market.`;
 
-  const refundablePrices7 = calendar.slice(0, Math.min(7, calendar.length));
-  const weeklyStayAvgNightly = Math.round(
-    refundablePrices7.reduce((a, d) => a + d.refundablePrice, 0) /
-      refundablePrices7.length
+  const weeklyStayAvgNightly = averageRefundablePriceForStay(
+    basePrices,
+    Math.min(7, totalDays),
+    input.discountPolicy
   );
-
-  const refundablePrices28 = calendar.slice(0, Math.min(28, calendar.length));
-  const monthlyStayAvgNightly = Math.round(
-    refundablePrices28.reduce((a, d) => a + d.refundablePrice, 0) /
-      refundablePrices28.length
+  const monthlyStayAvgNightly = averageRefundablePriceForStay(
+    basePrices,
+    Math.min(28, totalDays),
+    input.discountPolicy
+  );
+  const stayLengthAverages = buildStayLengthAverages(
+    basePrices,
+    totalDays,
+    input.discountPolicy
   );
 
   return {
@@ -228,6 +280,9 @@ export function generatePricingReport(
       estimatedMonthlyRevenue,
       weeklyStayAvgNightly,
       monthlyStayAvgNightly,
+      selectedRangeNights: totalDays,
+      selectedRangeAvgNightly,
+      stayLengthAverages,
     },
     calendar,
   };

@@ -1,5 +1,5 @@
 -- ============================================================
--- AirHost — Initial Schema
+-- AiraHost — Initial Schema
 -- ============================================================
 
 -- Pricing Reports
@@ -65,3 +65,4 @@ create policy "Users can insert own tracking prefs"
 -- NOTE: Public access to shared reports (via /api/r/{shareId})
 -- is handled by the API route using the service role key,
 -- which bypasses RLS. This is intentional.
+

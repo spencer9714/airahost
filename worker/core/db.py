@@ -55,6 +55,7 @@ def complete_job(
     calendar: list,
     core_version: str,
     debug: Optional[Dict[str, Any]] = None,
+    input_attributes: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Mark a job as ready with results. Idempotent — overwrites existing results."""
     update: Dict[str, Any] = {
@@ -66,10 +67,39 @@ def complete_job(
     }
     if debug:
         update["result_core_debug"] = debug
+    if input_attributes is not None:
+        update["input_attributes"] = input_attributes
 
     client.table("pricing_reports").update(update).eq("id", report_id).eq(
         "worker_claim_token", str(worker_token)
     ).execute()
+
+
+def sync_linked_listing_attributes(
+    client: Client,
+    report_id: str,
+    input_attributes: Dict[str, Any],
+) -> None:
+    """Update linked saved listing attributes from finalized report attributes."""
+    link_result = (
+        client.table("listing_reports")
+        .select("saved_listing_id")
+        .eq("pricing_report_id", report_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = link_result.data or []
+    if not rows:
+        return
+
+    listing_id = rows[0].get("saved_listing_id")
+    if not listing_id:
+        return
+
+    client.table("saved_listings").update(
+        {"input_attributes": input_attributes}
+    ).eq("id", listing_id).execute()
 
 
 def fail_job(

@@ -48,6 +48,7 @@ STALE_MINUTES = int(os.getenv("WORKER_STALE_MINUTES", "15"))
 MAX_ATTEMPTS = int(os.getenv("WORKER_MAX_ATTEMPTS", "3"))
 HEARTBEAT_SECONDS = int(os.getenv("WORKER_HEARTBEAT_SECONDS", "10"))
 MAX_RUNTIME_SECONDS = int(os.getenv("WORKER_MAX_RUNTIME_SECONDS", "180"))
+CDP_CONNECT_TIMEOUT_MS = int(os.getenv("CDP_CONNECT_TIMEOUT_MS", "15000"))
 WORKER_VERSION = os.getenv("WORKER_VERSION", "worker-0.1.0")
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222")
 
@@ -144,18 +145,65 @@ def _get_listing_url(job: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _merge_extracted_specs_into_attributes(
+    current_attributes: Dict[str, Any],
+    transparent_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    For URL mode, overwrite placeholder form values with extracted Airbnb specs
+    so downstream UI shows real listing details.
+
+    Reads from transparent_result["targetSpec"] (new format).
+    """
+    merged = dict(current_attributes or {})
+    specs = (transparent_result or {}).get("targetSpec") or {}
+    if not isinstance(specs, dict):
+        return merged
+
+    if specs.get("propertyType"):
+        merged["propertyType"] = specs["propertyType"]
+    if isinstance(specs.get("accommodates"), int) and specs["accommodates"] > 0:
+        merged["maxGuests"] = specs["accommodates"]
+    if isinstance(specs.get("bedrooms"), int) and specs["bedrooms"] >= 0:
+        merged["bedrooms"] = specs["bedrooms"]
+    if isinstance(specs.get("baths"), (int, float)) and specs["baths"] > 0:
+        merged["bathrooms"] = float(specs["baths"])
+    if isinstance(specs.get("beds"), int) and specs["beds"] > 0:
+        merged["beds"] = specs["beds"]
+
+    return merged
+
+
+def _should_bypass_precache_for_url_mode(
+    input_mode: str,
+    listing_url: Optional[str],
+) -> bool:
+    """
+    URL mode must scrape at least once to replace placeholder attributes
+    (e.g. 1 bed / 1 bath / 2 guests) with real listing specs.
+    """
+    return input_mode == "url" and bool(listing_url)
+
+
 def _build_scrape_calendar(
-    recommended: float,
+    daily_results: list,
     start_date: str,
     end_date: str,
     discount_policy: Dict[str, Any],
-    comps_debug: Dict[str, Any],
+    transparent_result: Dict[str, Any],
 ) -> tuple:
     """
-    Build summary + calendar from scrape results.
-    Uses the recommended nightly price as baseline with some variation.
+    Build summary + calendar from day-by-day scrape results.
+
+    Each entry in daily_results is a dict with at least:
+      date, median_price, is_weekend, flags
+
+    Uses per-day median_price as basePrice.  Falls back to the overall
+    median for days with no data.  Returns (None, None) if ALL days
+    have no price data.
     """
     from datetime import datetime as dt, timedelta as td, timezone as tz
+    import statistics as _stats
 
     DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -163,28 +211,51 @@ def _build_scrape_calendar(
     end = dt.strptime(end_date, "%Y-%m-%d").replace(tzinfo=tz.utc)
     total_days = max(1, (end - start).days)
 
-    # Build calendar days with price variation around the recommended price
+    # Build a date -> daily_result lookup
+    dr_map: Dict[str, Dict] = {}
+    for dr in daily_results:
+        dr_map[dr["date"]] = dr
+
+    # Compute overall median for fallback
+    valid_prices = [
+        dr["median_price"] for dr in daily_results
+        if dr.get("median_price") is not None
+    ]
+    if not valid_prices:
+        return None, None
+
+    overall_median = round(_stats.median(valid_prices))
+
+    # Build calendar days using per-day prices
     calendar = []
     for i in range(total_days):
         d = start + td(days=i)
+        ds = d.strftime("%Y-%m-%d")
         dow = d.weekday()
         is_weekend = dow >= 4  # Fri, Sat
 
-        # Simple variation: ±5% for daily, +15% weekend boost
-        base_price = round(recommended)
-        if is_weekend:
-            base_price = round(recommended * 1.15)
+        dr = dr_map.get(ds)
+        if dr and dr.get("median_price") is not None:
+            base_price = round(dr["median_price"])
+        else:
+            base_price = overall_median
 
         disc = apply_discount(base_price, total_days, discount_policy)
 
-        calendar.append({
-            "date": d.strftime("%Y-%m-%d"),
+        entry: Dict[str, Any] = {
+            "date": ds,
             "dayOfWeek": DAY_NAMES[dow],
             "isWeekend": is_weekend,
             "basePrice": base_price,
             "refundablePrice": disc["refundablePrice"],
             "nonRefundablePrice": disc["nonRefundablePrice"],
-        })
+        }
+
+        # Add flags from day result
+        if dr and dr.get("flags"):
+            entry["flags"] = dr["flags"]
+
+        calendar.append(entry)
 
     # Summary
     base_prices = [d["basePrice"] for d in calendar]
@@ -200,32 +271,32 @@ def _build_scrape_calendar(
 
     occupancy = 70  # reasonable default for scraped results
     selected_range_avg = average_refundable_price_for_stay(
-        [d["basePrice"] for d in calendar], total_days, discount_policy
+        base_prices, total_days, discount_policy
     )
     est_monthly = round(selected_range_avg * 30 * (occupancy / 100))
 
-    # Insight from comps
-    wm = comps_debug.get("weighted_median")
-    rec = comps_debug.get("recommended_nightly")
-    if wm and rec:
-        diff = round(wm - rec)
-        if diff > 5:
-            headline = f"Comparable listings average ${round(wm)}/night. Our recommendation accounts for a new-listing discount."
-        elif diff < -5:
-            headline = f"At ${round(rec)}/night you're competitively positioned against the ${round(wm)} market median."
-        else:
+    # Insight from price data
+    rec_price_info = (transparent_result or {}).get("recommendedPrice") or {}
+    rec = rec_price_info.get("nightly")
+    if rec and median:
+        diff = round(median - rec)
+        if abs(diff) <= 5:
             headline = f"Your recommended price of ${round(rec)}/night is well-aligned with the local market."
+        elif diff > 5:
+            headline = f"At ${round(rec)}/night you're competitively positioned against the ${median} market median."
+        else:
+            headline = f"Comparable listings average ${median}/night. Your recommended price factors in market positioning."
     else:
-        headline = f"Based on nearby comparable listings, we recommend ${round(recommended)}/night."
+        headline = f"Based on nearby comparable listings, the median nightly price is ${median}."
 
     weekly_avg = average_refundable_price_for_stay(
-        [d["basePrice"] for d in calendar], min(7, total_days), discount_policy
+        base_prices, min(7, total_days), discount_policy
     )
     monthly_avg = average_refundable_price_for_stay(
-        [d["basePrice"] for d in calendar], min(28, total_days), discount_policy
+        base_prices, min(28, total_days), discount_policy
     )
     stay_length_averages = build_stay_length_averages(
-        [d["basePrice"] for d in calendar], total_days, discount_policy
+        base_prices, total_days, discount_policy
     )
 
     summary = {
@@ -275,12 +346,18 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         discount_policy = job.get("discount_policy") or {}
         listing_url = _get_listing_url(job)
         input_mode = attributes.get("inputMode", "criteria")
+        finalized_input_attributes = dict(attributes)
+        finalized_input_attributes["inputMode"] = input_mode
+        finalized_input_attributes["listingUrl"] = listing_url or None
+        bypass_precache = _should_bypass_precache_for_url_mode(
+            str(input_mode), listing_url
+        )
 
-        # Check cache first
+        # Check cache first (except URL mode where we must scrape to extract specs)
         cache_key = job.get("cache_key") or compute_cache_key(
             address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
         )
-        cached = get_cached(client, cache_key)
+        cached = None if bypass_precache else get_cached(client, cache_key)
         if cached:
             summary, calendar = cached
             logger.info(f"[{report_id}] Cache hit for key={cache_key[:12]}...")
@@ -296,8 +373,12 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     "worker_version": WORKER_VERSION,
                     "total_ms": round((time.time() - start_time) * 1000),
                 },
+                input_attributes=finalized_input_attributes,
             )
             return
+
+        # transparent_result holds the new structured output from scrape/criteria
+        transparent_result: Optional[Dict[str, Any]] = None
 
         if listing_url:
             # Mode A: URL scrape — user provided a listing URL
@@ -305,7 +386,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             try:
                 from worker.scraper.price_estimator import run_scrape
 
-                recommended, comps, debug = run_scrape(
+                daily_results, transparent_result = run_scrape(
                     listing_url=listing_url,
                     checkin=start_date,
                     checkout=end_date,
@@ -314,29 +395,72 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     max_cards=MAX_CARDS,
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
+                    cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                 )
 
-                if recommended and recommended > 0:
-                    summary, calendar = _build_scrape_calendar(
-                        recommended, start_date, end_date, discount_policy, debug,
+                valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
+                if daily_results and valid_prices:
+                    result = _build_scrape_calendar(
+                        daily_results, start_date, end_date, discount_policy, transparent_result,
                     )
-                    core_version = WORKER_VERSION + "+scrape"
+                    if result[0] is not None and result[1] is not None:
+                        summary, calendar = result
+                        finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                            finalized_input_attributes, transparent_result
+                        )
+                        core_version = WORKER_VERSION + "+scrape"
+                    else:
+                        logger.warning(f"[{report_id}] All day prices missing, falling back to mock")
+                        scrape_transparent = dict(transparent_result or {})
+                        finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                            finalized_input_attributes, scrape_transparent
+                        )
+                        summary, calendar, mock_debug = generate_mock_report(
+                            address, attributes, start_date, end_date, discount_policy,
+                        )
+                        mock_debug["scrape_transparent"] = scrape_transparent.get("debug")
+                        mock_debug["scrape_fallback"] = True
+                        mock_debug["scrape_error"] = "All day-queries returned no valid prices"
+                        transparent_result = None
+                        core_version = MOCK_VERSION + "+scrape-fallback"
                 else:
-                    logger.warning(f"[{report_id}] Scrape produced no recommendation, falling back to mock")
-                    summary, calendar, debug = generate_mock_report(
+                    logger.warning(f"[{report_id}] Scrape produced no daily results, falling back to mock")
+                    scrape_transparent = dict(transparent_result or {})
+                    finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                        finalized_input_attributes, scrape_transparent
+                    )
+                    summary, calendar, mock_debug = generate_mock_report(
                         address, attributes, start_date, end_date, discount_policy,
                     )
-                    debug["scrape_fallback"] = True
-                    debug["scrape_error"] = debug.get("error") or "No recommendation produced"
+                    mock_debug["scrape_transparent"] = scrape_transparent.get("debug")
+                    mock_debug["scrape_fallback"] = True
+                    mock_debug["scrape_error"] = (scrape_transparent.get("debug") or {}).get("error") or "No daily results produced"
+                    transparent_result = None
                     core_version = MOCK_VERSION + "+scrape-fallback"
+
+            except ValueError as exc:
+                # Date range too long — user-facing error
+                logger.warning(f"[{report_id}] Validation error: {exc}")
+                db_helpers.fail_job(
+                    client, report_id, worker_token,
+                    error_message=str(exc),
+                    debug={
+                        "error": str(exc),
+                        "worker_host": socket.gethostname(),
+                        "worker_version": WORKER_VERSION,
+                        "total_ms": round((time.time() - start_time) * 1000),
+                    },
+                )
+                return
 
             except Exception as exc:
                 logger.error(f"[{report_id}] Scrape error: {exc}, falling back to mock")
-                summary, calendar, debug = generate_mock_report(
+                summary, calendar, mock_debug = generate_mock_report(
                     address, attributes, start_date, end_date, discount_policy,
                 )
-                debug["scrape_error"] = str(exc)
-                debug["scrape_fallback"] = True
+                mock_debug["scrape_error"] = str(exc)
+                mock_debug["scrape_fallback"] = True
+                transparent_result = None
                 core_version = MOCK_VERSION + "+scrape-fallback"
 
         elif input_mode == "criteria":
@@ -345,7 +469,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             try:
                 from worker.scraper.price_estimator import run_criteria_search
 
-                recommended, comps, debug = run_criteria_search(
+                daily_results, transparent_result = run_criteria_search(
                     address=address,
                     attributes=attributes,
                     checkin=start_date,
@@ -355,47 +479,93 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     max_cards=MAX_CARDS,
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
+                    cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                 )
 
-                if recommended and recommended > 0:
-                    summary, calendar = _build_scrape_calendar(
-                        recommended, start_date, end_date, discount_policy, debug,
+                valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
+                if daily_results and valid_prices:
+                    result = _build_scrape_calendar(
+                        daily_results, start_date, end_date, discount_policy, transparent_result,
                     )
-                    core_version = WORKER_VERSION + "+criteria"
+                    if result[0] is not None and result[1] is not None:
+                        summary, calendar = result
+                        core_version = WORKER_VERSION + "+criteria"
+                    else:
+                        logger.warning(f"[{report_id}] All day prices missing in criteria mode, falling back to mock")
+                        summary, calendar, mock_debug = generate_mock_report(
+                            address, attributes, start_date, end_date, discount_policy,
+                        )
+                        mock_debug["criteria_fallback"] = True
+                        mock_debug["criteria_error"] = "All day-queries returned no valid prices"
+                        transparent_result = None
+                        core_version = MOCK_VERSION + "+criteria-fallback"
                 else:
-                    logger.warning(f"[{report_id}] Criteria search produced no recommendation, falling back to mock")
-                    summary, calendar, debug = generate_mock_report(
+                    logger.warning(f"[{report_id}] Criteria search produced no daily results, falling back to mock")
+                    summary, calendar, mock_debug = generate_mock_report(
                         address, attributes, start_date, end_date, discount_policy,
                     )
-                    debug["criteria_fallback"] = True
-                    debug["criteria_error"] = debug.get("error") or "No recommendation produced"
+                    mock_debug["criteria_fallback"] = True
+                    mock_debug["criteria_error"] = ((transparent_result or {}).get("debug") or {}).get("error") or "No daily results produced"
+                    transparent_result = None
                     core_version = MOCK_VERSION + "+criteria-fallback"
+
+            except ValueError as exc:
+                logger.warning(f"[{report_id}] Validation error: {exc}")
+                db_helpers.fail_job(
+                    client, report_id, worker_token,
+                    error_message=str(exc),
+                    debug={
+                        "error": str(exc),
+                        "worker_host": socket.gethostname(),
+                        "worker_version": WORKER_VERSION,
+                        "total_ms": round((time.time() - start_time) * 1000),
+                    },
+                )
+                return
 
             except Exception as exc:
                 logger.error(f"[{report_id}] Criteria search error: {exc}, falling back to mock")
-                summary, calendar, debug = generate_mock_report(
+                summary, calendar, mock_debug = generate_mock_report(
                     address, attributes, start_date, end_date, discount_policy,
                 )
-                debug["criteria_error"] = str(exc)
-                debug["criteria_fallback"] = True
+                mock_debug["criteria_error"] = str(exc)
+                mock_debug["criteria_fallback"] = True
+                transparent_result = None
                 core_version = MOCK_VERSION + "+criteria-fallback"
 
         else:
             # Fallback: Mock pricing
             logger.info(f"[{report_id}] Fallback (mock): {address}")
-            summary, calendar, debug = generate_mock_report(
+            summary, calendar, mock_debug = generate_mock_report(
                 address, attributes, start_date, end_date, discount_policy,
             )
+            transparent_result = None
             core_version = MOCK_VERSION
 
         total_ms = round((time.time() - start_time) * 1000)
+
+        # Build debug dict from transparent_result or mock_debug
+        if transparent_result:
+            debug = transparent_result.get("debug") or {}
+        else:
+            debug = mock_debug  # type: ignore[possibly-undefined]
+
         debug.update({
             "cache_hit": False,
             "cache_key": cache_key,
+            "cache_bypassed_for_url_mode": bypass_precache,
             "worker_host": socket.gethostname(),
             "worker_version": WORKER_VERSION,
             "total_ms": total_ms,
         })
+
+        # Enrich summary with transparency fields
+        if transparent_result:
+            summary["targetSpec"] = transparent_result.get("targetSpec")
+            summary["queryCriteria"] = transparent_result.get("queryCriteria")
+            summary["compsSummary"] = transparent_result.get("compsSummary")
+            summary["priceDistribution"] = transparent_result.get("priceDistribution")
+            summary["recommendedPrice"] = transparent_result.get("recommendedPrice")
 
         # Write results
         db_helpers.complete_job(
@@ -404,14 +574,27 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             calendar=calendar,
             core_version=core_version,
             debug=debug,
+            input_attributes=finalized_input_attributes,
         )
 
-        # Store in cache
+        if listing_url:
+            try:
+                db_helpers.sync_linked_listing_attributes(
+                    client, report_id, finalized_input_attributes
+                )
+            except Exception as exc:
+                logger.warning(f"[{report_id}] Failed to sync linked listing attributes: {exc}")
+
+        # Store in cache (enriched summary includes transparency)
         try:
+            source = debug.get("source", "unknown")
+            comps_count = 0
+            if transparent_result:
+                comps_count = (transparent_result.get("compsSummary") or {}).get("collected", 0)
             meta = {
-                "source": debug.get("source", "unknown"),
+                "source": source,
                 "listing_url": listing_url or "",
-                "comps_count": debug.get("comps_collected", 0),
+                "comps_count": comps_count,
             }
             set_cached(client, cache_key, summary, calendar, meta=meta)
         except Exception as exc:
@@ -452,7 +635,7 @@ def main():
     logger.info(f"AriaHost Worker starting (version={WORKER_VERSION})")
     logger.info(f"  poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
     logger.info(f"  heartbeat={HEARTBEAT_SECONDS}s, max_runtime={MAX_RUNTIME_SECONDS}s")
-    logger.info(f"  CDP={CDP_URL}")
+    logger.info(f"  CDP={CDP_URL}, connect_timeout={CDP_CONNECT_TIMEOUT_MS}ms")
 
     client = db_helpers.get_client()
     backoff = POLL_SECONDS

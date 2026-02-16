@@ -2,7 +2,17 @@
   "permissions": {
     "allow": [
       "Bash(npx create-next-app@latest:*)",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(nssm status:*)",
+      "Bash(python -c:*)",
+      "Bash(test:*)",
+      "Bash(C:/Python314/python.exe:*)",
+      "Bash(nssm set:*)",
+      "Bash(curl:*)",
+      "Bash(tasklist:*)",
+      "Bash(nssm restart:*)",
+      "Bash(node -e:*)",
+      "Bash(powershell:*)"
     ]
   }
 }
