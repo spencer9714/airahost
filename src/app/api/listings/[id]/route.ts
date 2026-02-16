@@ -3,6 +3,24 @@ import { updateListingSchema } from "@/lib/schemas";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
 
+interface LinkedReportSnapshot {
+  id: string;
+  share_id: string;
+  status: string;
+  created_at: string;
+  input_date_start: string;
+  input_date_end: string;
+  result_summary: { nightlyMedian?: number } | null;
+}
+
+interface ReportHistoryRow {
+  id: string;
+  trigger: string;
+  created_at: string;
+  pricing_report_id: string;
+  pricing_reports: LinkedReportSnapshot | null;
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -42,21 +60,29 @@ export async function GET(
       .order("created_at", { ascending: false })
       .limit(20);
 
-    const reportRows = (reports ?? []) as Array<{
+    const rawReportRows = (reports ?? []) as unknown as Array<{
       id: string;
       trigger: string;
       created_at: string;
       pricing_report_id: string;
-      pricing_reports: {
-        id: string;
-        share_id: string;
-        status: string;
-        created_at: string;
-        input_date_start: string;
-        input_date_end: string;
-        result_summary: { nightlyMedian?: number } | null;
-      } | null;
+      pricing_reports:
+        | LinkedReportSnapshot
+        | LinkedReportSnapshot[]
+        | null
+        | undefined;
     }>;
+
+    const reportRows: ReportHistoryRow[] = rawReportRows.map((row) => {
+      const relation = row.pricing_reports;
+      const normalized = Array.isArray(relation) ? relation[0] ?? null : relation ?? null;
+      return {
+        id: row.id,
+        trigger: row.trigger,
+        created_at: row.created_at,
+        pricing_report_id: row.pricing_report_id,
+        pricing_reports: normalized,
+      };
+    });
 
     const missingReportIds = reportRows
       .filter((row) => !row.pricing_reports && row.pricing_report_id)
@@ -77,9 +103,7 @@ export async function GET(
 
       for (const row of reportRows) {
         if (!row.pricing_reports) {
-          row.pricing_reports =
-            (fallbackById.get(row.pricing_report_id) as typeof row.pricing_reports) ??
-            null;
+          row.pricing_reports = fallbackById.get(row.pricing_report_id) ?? null;
         }
       }
     }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
@@ -93,9 +93,7 @@ function getDefaultDates() {
 
 export default function ToolPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const defaults = getDefaultDates();
-  const defaultSaveToListings = searchParams.get("from") === "dashboard";
 
   // Step tracking
   const [step, setStep] = useState(1);
@@ -132,7 +130,7 @@ export default function ToolPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [isSignedIn, setIsSignedIn] = useState(false);
-  const [saveToListings, setSaveToListings] = useState(defaultSaveToListings);
+  const [saveToListings, setSaveToListings] = useState(false);
   const [saveListingName, setSaveListingName] = useState("");
 
   useEffect(() => {
@@ -140,6 +138,13 @@ export default function ToolPage() {
     supabase.auth.getUser().then(({ data: { user } }) => {
       setIsSignedIn(!!user);
     });
+  }, []);
+
+  useEffect(() => {
+    const from = new URLSearchParams(window.location.search).get("from");
+    if (from === "dashboard") {
+      setSaveToListings(true);
+    }
   }, []);
 
   function toggleAmenity(a: Amenity) {
