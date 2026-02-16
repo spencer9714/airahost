@@ -86,7 +86,7 @@ function getDefaultDates() {
   const start = new Date();
   start.setDate(start.getDate() + 7);
   const end = new Date(start);
-  end.setDate(end.getDate() + 30);
+  end.setDate(end.getDate() + 7);
   return {
     startDate: start.toISOString().split("T")[0],
     endDate: end.toISOString().split("T")[0],

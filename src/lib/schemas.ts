@@ -51,9 +51,9 @@ export const dateInputSchema = z
       const start = new Date(d.startDate);
       const end = new Date(d.endDate);
       const diff = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
-      return diff >= 1 && diff <= 180;
+      return diff >= 1 && diff <= 30;
     },
-    { message: "Date range must be 1–180 days" }
+    { message: "Date range must be 1–30 days" }
   );
 
 // ── Discount Policy ─────────────────────────────────────────────

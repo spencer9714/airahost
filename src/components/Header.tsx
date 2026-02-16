@@ -32,17 +32,19 @@ export async function Header() {
           >
             Analyze
           </Link>
-          <Link
-            href="/dashboard"
-            className="transition-colors hover:text-foreground"
-          >
-            Dashboard
-          </Link>
           {user ? (
-            <UserMenu
-              email={user.email ?? ""}
-              displayName={displayName}
-            />
+            <>
+              <Link
+                href="/dashboard"
+                className="transition-colors hover:text-foreground"
+              >
+                Dashboard
+              </Link>
+              <UserMenu
+                email={user.email ?? ""}
+                displayName={displayName}
+              />
+            </>
           ) : (
             <Link
               href="/login"

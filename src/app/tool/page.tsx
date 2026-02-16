@@ -435,12 +435,12 @@ export default function ToolPage() {
                 </div>
                 <p className="text-sm text-muted">
                   {dateRange > 0
-                    ? `${dateRange} nights selected (max 180)`
+                    ? `${dateRange} nights selected (max 30)`
                     : "Please select valid dates"}
                 </p>
                 <Button
                   onClick={() => setStep(3)}
-                  disabled={dateRange < 1 || dateRange > 180}
+                  disabled={dateRange < 1 || dateRange > 30}
                   className="w-full"
                 >
                   Continue
@@ -598,7 +598,7 @@ export default function ToolPage() {
                         onChange={(e) => setSaveToListings(e.target.checked)}
                         className="accent-accent"
                       />
-                      Analyze and save to dashboard
+                      Save to my dashboard
                     </label>
                     {saveToListings ? (
                       <input
@@ -611,9 +611,17 @@ export default function ToolPage() {
                     ) : null}
                   </div>
                 ) : (
-                  <p className="text-xs text-muted">
-                    Sign in to save this analysis to your dashboard.
-                  </p>
+                  <div className="rounded-xl border border-border bg-gray-50 p-4">
+                    <p className="text-sm text-muted">
+                      Want to save this analysis and track pricing over time?{" "}
+                      <a
+                        href="/login?next=/tool?from=dashboard"
+                        className="font-medium text-accent hover:underline"
+                      >
+                        Sign in or create an account
+                      </a>
+                    </p>
+                  </div>
                 )}
 
                 <Button

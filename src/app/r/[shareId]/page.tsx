@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback, useRef, use } from "react";
+import Link from "next/link";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { HowWeEstimated } from "@/components/report/HowWeEstimated";
+import { getSupabaseBrowser } from "@/lib/supabase";
 import type { PricingReport, CalendarDay } from "@/lib/schemas";
 import { generatePricingReport } from "@/core/pricingCore";
 
@@ -83,6 +85,9 @@ export default function ResultsPage({
   const [isSlow, setIsSlow] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Auth state
+  const [isSignedIn, setIsSignedIn] = useState<boolean | null>(null);
+
   // Market tracking
   const [trackEmail, setTrackEmail] = useState("");
   const [trackWeekly, setTrackWeekly] = useState(true);
@@ -140,6 +145,13 @@ export default function ResultsPage({
       }
     };
   }, [shareId, fetchReport, pollStartedAt]);
+
+  useEffect(() => {
+    const supabase = getSupabaseBrowser();
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      setIsSignedIn(!!user);
+    });
+  }, []);
 
   async function handleTrackSubmit() {
     if (!report) return;
@@ -328,6 +340,23 @@ export default function ResultsPage({
           </div>
         </Card>
       </div>
+
+      {/* Save to dashboard CTA (signed-out users) */}
+      {isSignedIn === false && shareId !== "demo" && (
+        <Card className="mb-6 border-accent/20 bg-accent/3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">Save this report to your dashboard</p>
+              <p className="mt-1 text-xs text-muted">
+                Create a free account to track pricing, rerun analyses, and compare over time.
+              </p>
+            </div>
+            <Link href="/login?next=/dashboard">
+              <Button size="sm">Sign up free</Button>
+            </Link>
+          </div>
+        </Card>
+      )}
 
       {/* Section 2.5 — How We Estimated (transparency) */}
       {(report.targetSpec || report.resultSummary?.targetSpec) && (
