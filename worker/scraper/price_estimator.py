@@ -607,3 +607,176 @@ def run_scrape(
                 page.close()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Criteria-based search (Mode B)
+# ---------------------------------------------------------------------------
+
+
+def run_criteria_search(
+    address: str,
+    attributes: Dict[str, Any],
+    checkin: str,
+    checkout: str,
+    cdp_url: str = "http://127.0.0.1:9222",
+    top_k: int = 15,
+    max_scroll_rounds: int = 12,
+    max_cards: int = 80,
+    max_runtime_seconds: int = 180,
+    rate_limit_seconds: float = 1.0,
+) -> Tuple[Optional[float], List[ListingSpec], Dict[str, Any]]:
+    """
+    Criteria-based search: search Airbnb for listings matching the user's
+    property criteria, find the most similar one, then use it as the anchor
+    listing for a full comp search via run_scrape().
+
+    Two-pass pipeline:
+      Pass 1 — Search Airbnb by address, collect cards, rank by similarity
+      Pass 2 — Use best match's URL as anchor for run_scrape()
+
+    Returns (recommended_nightly, comps_list, debug_dict).
+    """
+    from playwright.sync_api import sync_playwright
+
+    start_time = time.time()
+    base_origin = "https://www.airbnb.com"
+
+    # Build a synthetic target spec from user criteria
+    user_spec = ListingSpec(
+        url="",
+        title="User property",
+        location=address,
+        accommodates=attributes.get("maxGuests"),
+        bedrooms=attributes.get("bedrooms"),
+        beds=attributes.get("bedrooms"),  # approximate beds = bedrooms
+        baths=attributes.get("bathrooms"),
+        property_type=attributes.get("propertyType", ""),
+    )
+
+    adults = min(attributes.get("maxGuests", 2), 16)
+
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp(cdp_url)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.new_page()
+
+        try:
+            # Pass 1: Search Airbnb for the area
+            search_url = build_search_url(
+                base_origin, address, checkin, checkout, adults
+            )
+            logger.info(f"[criteria] Search URL: {search_url}")
+
+            time.sleep(rate_limit_seconds)
+            page.goto(search_url, wait_until="domcontentloaded")
+            page.wait_for_timeout(900)
+
+            # Dismiss modals
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+            # Check timeout
+            elapsed = time.time() - start_time
+            if elapsed > max_runtime_seconds - 10:
+                return None, [], {
+                    "error": "Timeout before scroll",
+                    "source": "criteria",
+                }
+
+            scroll_start = time.time()
+            raw_cards = scroll_and_collect(
+                page,
+                max_rounds=max_scroll_rounds,
+                max_cards=max_cards,
+                pause_ms=900,
+                rate_limit_seconds=rate_limit_seconds,
+            )
+            scroll_ms = round((time.time() - scroll_start) * 1000)
+
+            candidates = [parse_card_to_spec(c) for c in raw_cards]
+            candidates = [c for c in candidates if c.url and c.nightly_price]
+
+            if not candidates:
+                return None, [], {
+                    "error": "No listings found in search results",
+                    "source": "criteria",
+                    "scroll_ms": scroll_ms,
+                    "search_address": address,
+                }
+
+            # Rank by similarity to user's spec
+            scored = [(c, similarity_score(user_spec, c)) for c in candidates]
+            scored.sort(key=lambda x: x[1], reverse=True)
+
+            best_match = scored[0][0]
+            best_score = scored[0][1]
+
+            logger.info(
+                f"[criteria] Best match: {best_match.url} "
+                f"(score={best_score:.3f}, "
+                f"bedrooms={best_match.bedrooms}, "
+                f"price=${best_match.nightly_price})"
+            )
+
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    # Pass 2: Use best match as anchor for full scrape pipeline
+    elapsed = time.time() - start_time
+    remaining = max_runtime_seconds - elapsed
+
+    if remaining < 30:
+        # Not enough time for a full scrape; use initial search results directly
+        logger.info(f"[criteria] Low time ({remaining:.0f}s), using direct results")
+        recommended, rec_debug = recommend_price(
+            user_spec, [c for c, _ in scored], top_k=top_k
+        )
+        return recommended, [c for c, _ in scored], {
+            "source": "criteria_direct",
+            "anchor_url": best_match.url,
+            "anchor_score": round(best_score, 3),
+            "scroll_ms": scroll_ms,
+            "total_ms": round((time.time() - start_time) * 1000),
+            "comps_collected": len(candidates),
+            "search_address": address,
+            **rec_debug,
+        }
+
+    # Full second pass via run_scrape
+    logger.info(
+        f"[criteria] Running full scrape on anchor: {best_match.url} "
+        f"({remaining:.0f}s remaining)"
+    )
+    recommended, comps, scrape_debug = run_scrape(
+        listing_url=best_match.url,
+        checkin=checkin,
+        checkout=checkout,
+        cdp_url=cdp_url,
+        adults=adults,
+        top_k=top_k,
+        max_scroll_rounds=max_scroll_rounds,
+        max_cards=max_cards,
+        max_runtime_seconds=int(remaining),
+        rate_limit_seconds=rate_limit_seconds,
+    )
+
+    # Merge debug info from both passes
+    debug = {
+        **scrape_debug,
+        "source": "criteria",
+        "criteria_search_ms": round(elapsed * 1000),
+        "anchor_url": best_match.url,
+        "anchor_score": round(best_score, 3),
+        "anchor_bedrooms": best_match.bedrooms,
+        "anchor_price": best_match.nightly_price,
+        "initial_candidates": len(candidates),
+        "search_address": address,
+    }
+
+    return recommended, comps, debug

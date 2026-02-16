@@ -31,7 +31,11 @@ load_dotenv()
 
 from worker.core import db as db_helpers
 from worker.core.cache import compute_cache_key, get_cached, set_cached
-from worker.core.discounts import apply_discount
+from worker.core.discounts import (
+    apply_discount,
+    average_refundable_price_for_stay,
+    build_stay_length_averages,
+)
 from worker.core.mock_core import CORE_VERSION as MOCK_VERSION
 from worker.core.mock_core import generate_mock_report
 
@@ -195,7 +199,10 @@ def _build_scrape_calendar(
     weekend_avg = round(sum(weekend_p) / len(weekend_p)) if weekend_p else median
 
     occupancy = 70  # reasonable default for scraped results
-    est_monthly = round(median * 30 * (occupancy / 100))
+    selected_range_avg = average_refundable_price_for_stay(
+        [d["basePrice"] for d in calendar], total_days, discount_policy
+    )
+    est_monthly = round(selected_range_avg * 30 * (occupancy / 100))
 
     # Insight from comps
     wm = comps_debug.get("weighted_median")
@@ -211,10 +218,15 @@ def _build_scrape_calendar(
     else:
         headline = f"Based on nearby comparable listings, we recommend ${round(recommended)}/night."
 
-    weekly_slice = calendar[:min(7, len(calendar))]
-    monthly_slice = calendar[:min(28, len(calendar))]
-    weekly_avg = round(sum(d["refundablePrice"] for d in weekly_slice) / len(weekly_slice))
-    monthly_avg = round(sum(d["refundablePrice"] for d in monthly_slice) / len(monthly_slice))
+    weekly_avg = average_refundable_price_for_stay(
+        [d["basePrice"] for d in calendar], min(7, total_days), discount_policy
+    )
+    monthly_avg = average_refundable_price_for_stay(
+        [d["basePrice"] for d in calendar], min(28, total_days), discount_policy
+    )
+    stay_length_averages = build_stay_length_averages(
+        [d["basePrice"] for d in calendar], total_days, discount_policy
+    )
 
     summary = {
         "insightHeadline": headline,
@@ -227,6 +239,9 @@ def _build_scrape_calendar(
         "estimatedMonthlyRevenue": est_monthly,
         "weeklyStayAvgNightly": weekly_avg,
         "monthlyStayAvgNightly": monthly_avg,
+        "selectedRangeNights": total_days,
+        "selectedRangeAvgNightly": selected_range_avg,
+        "stayLengthAverages": stay_length_averages,
     }
 
     return summary, calendar
@@ -259,10 +274,11 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         end_date = str(job.get("input_date_end", ""))
         discount_policy = job.get("discount_policy") or {}
         listing_url = _get_listing_url(job)
+        input_mode = attributes.get("inputMode", "criteria")
 
         # Check cache first
         cache_key = job.get("cache_key") or compute_cache_key(
-            address, attributes, start_date, end_date, discount_policy, listing_url
+            address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
         )
         cached = get_cached(client, cache_key)
         if cached:
@@ -284,8 +300,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             return
 
         if listing_url:
-            # Mode 1: Scrape
-            logger.info(f"[{report_id}] Mode 1 (scrape): {listing_url}")
+            # Mode A: URL scrape — user provided a listing URL
+            logger.info(f"[{report_id}] Mode A (URL scrape): {listing_url}")
             try:
                 from worker.scraper.price_estimator import run_scrape
 
@@ -306,7 +322,6 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     )
                     core_version = WORKER_VERSION + "+scrape"
                 else:
-                    # Fallback to mock if scrape returned nothing useful
                     logger.warning(f"[{report_id}] Scrape produced no recommendation, falling back to mock")
                     summary, calendar, debug = generate_mock_report(
                         address, attributes, start_date, end_date, discount_policy,
@@ -316,7 +331,6 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     core_version = MOCK_VERSION + "+scrape-fallback"
 
             except Exception as exc:
-                # Scrape failed — graceful fallback to mock
                 logger.error(f"[{report_id}] Scrape error: {exc}, falling back to mock")
                 summary, calendar, debug = generate_mock_report(
                     address, attributes, start_date, end_date, discount_policy,
@@ -324,9 +338,51 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 debug["scrape_error"] = str(exc)
                 debug["scrape_fallback"] = True
                 core_version = MOCK_VERSION + "+scrape-fallback"
+
+        elif input_mode == "criteria":
+            # Mode B: Criteria search — find best matching listing, then scrape comps
+            logger.info(f"[{report_id}] Mode B (criteria search): {address}")
+            try:
+                from worker.scraper.price_estimator import run_criteria_search
+
+                recommended, comps, debug = run_criteria_search(
+                    address=address,
+                    attributes=attributes,
+                    checkin=start_date,
+                    checkout=end_date,
+                    cdp_url=CDP_URL,
+                    max_scroll_rounds=MAX_SCROLL_ROUNDS,
+                    max_cards=MAX_CARDS,
+                    max_runtime_seconds=MAX_RUNTIME_SECONDS,
+                    rate_limit_seconds=RATE_LIMIT_SECONDS,
+                )
+
+                if recommended and recommended > 0:
+                    summary, calendar = _build_scrape_calendar(
+                        recommended, start_date, end_date, discount_policy, debug,
+                    )
+                    core_version = WORKER_VERSION + "+criteria"
+                else:
+                    logger.warning(f"[{report_id}] Criteria search produced no recommendation, falling back to mock")
+                    summary, calendar, debug = generate_mock_report(
+                        address, attributes, start_date, end_date, discount_policy,
+                    )
+                    debug["criteria_fallback"] = True
+                    debug["criteria_error"] = debug.get("error") or "No recommendation produced"
+                    core_version = MOCK_VERSION + "+criteria-fallback"
+
+            except Exception as exc:
+                logger.error(f"[{report_id}] Criteria search error: {exc}, falling back to mock")
+                summary, calendar, debug = generate_mock_report(
+                    address, attributes, start_date, end_date, discount_policy,
+                )
+                debug["criteria_error"] = str(exc)
+                debug["criteria_fallback"] = True
+                core_version = MOCK_VERSION + "+criteria-fallback"
+
         else:
-            # Mode 2: Mock pricing
-            logger.info(f"[{report_id}] Mode 2 (mock): {address}")
+            # Fallback: Mock pricing
+            logger.info(f"[{report_id}] Fallback (mock): {address}")
             summary, calendar, debug = generate_mock_report(
                 address, attributes, start_date, end_date, discount_policy,
             )

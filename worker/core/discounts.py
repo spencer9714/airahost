@@ -82,3 +82,53 @@ def build_calendar(
             "nonRefundablePrice": discounted["nonRefundablePrice"],
         })
     return calendar
+
+
+def average_refundable_price_for_stay(
+    base_prices: List[float],
+    stay_length: int,
+    policy: Dict[str, Any],
+) -> int:
+    """
+    Average nightly refundable price for a specific stay length.
+    """
+    if not base_prices:
+        return 0
+    prices = [apply_discount(p, stay_length, policy)["refundablePrice"] for p in base_prices]
+    return round(sum(prices) / len(prices))
+
+
+def build_stay_length_averages(
+    base_prices: List[float],
+    total_days: int,
+    policy: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    Build representative stay-length price points within the selected date range.
+    """
+    if total_days < 1:
+        return []
+
+    points = {1, total_days}
+    if total_days >= 7:
+        points.add(7)
+    if total_days >= 28:
+        points.add(28)
+
+    weekly_pct = int(policy.get("weeklyDiscountPct", 0) or 0)
+    monthly_pct = int(policy.get("monthlyDiscountPct", 0) or 0)
+
+    out: List[Dict[str, Any]] = []
+    for stay_len in sorted(points):
+        length_discount_pct = 0
+        if stay_len >= 28 and monthly_pct > 0:
+            length_discount_pct = monthly_pct
+        elif stay_len >= 7 and weekly_pct > 0:
+            length_discount_pct = weekly_pct
+
+        out.append({
+            "stayLength": stay_len,
+            "avgNightly": average_refundable_price_for_stay(base_prices, stay_len, policy),
+            "lengthDiscountPct": length_discount_pct,
+        })
+    return out

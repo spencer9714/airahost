@@ -25,12 +25,14 @@ def compute_cache_key(
     end_date: str,
     discount_policy: Dict[str, Any],
     listing_url: Optional[str] = None,
+    input_mode: str = "criteria",
 ) -> str:
     """
     Compute a stable cache key from report inputs.
     Canonical JSON ensures deterministic ordering.
     """
     payload = {
+        "inputMode": input_mode,
         "listing_url": listing_url or "",
         "address": address,
         "propertyType": attributes.get("propertyType", ""),

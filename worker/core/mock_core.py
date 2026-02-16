@@ -13,7 +13,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple
 
-from worker.core.discounts import apply_discount
+from worker.core.discounts import (
+    apply_discount,
+    average_refundable_price_for_stay,
+    build_stay_length_averages,
+)
 
 CORE_VERSION = "mock-v1.0.0"
 
@@ -119,7 +123,10 @@ def generate_mock_report(
     weekend_avg = round(sum(weekend_prices) / len(weekend_prices)) if weekend_prices else base_nightly
 
     occupancy_pct = round(55 + rand() * 30)
-    est_monthly_revenue = round(median * 30 * (occupancy_pct / 100))
+    selected_range_avg = average_refundable_price_for_stay(
+        [d["basePrice"] for d in calendar], total_days, discount_policy
+    )
+    est_monthly_revenue = round(selected_range_avg * 30 * (occupancy_pct / 100))
 
     market_median = round(median * (0.9 + rand() * 0.3))
     price_diff = market_median - median
@@ -130,11 +137,15 @@ def generate_mock_report(
     else:
         headline = "Your pricing is well-aligned with the local market."
 
-    weekly_slice = calendar[: min(7, len(calendar))]
-    weekly_avg = round(sum(d["refundablePrice"] for d in weekly_slice) / len(weekly_slice))
-
-    monthly_slice = calendar[: min(28, len(calendar))]
-    monthly_avg = round(sum(d["refundablePrice"] for d in monthly_slice) / len(monthly_slice))
+    weekly_avg = average_refundable_price_for_stay(
+        [d["basePrice"] for d in calendar], min(7, total_days), discount_policy
+    )
+    monthly_avg = average_refundable_price_for_stay(
+        [d["basePrice"] for d in calendar], min(28, total_days), discount_policy
+    )
+    stay_length_averages = build_stay_length_averages(
+        [d["basePrice"] for d in calendar], total_days, discount_policy
+    )
 
     summary = {
         "insightHeadline": headline,
@@ -147,6 +158,9 @@ def generate_mock_report(
         "estimatedMonthlyRevenue": est_monthly_revenue,
         "weeklyStayAvgNightly": weekly_avg,
         "monthlyStayAvgNightly": monthly_avg,
+        "selectedRangeNights": total_days,
+        "selectedRangeAvgNightly": selected_range_avg,
+        "stayLengthAverages": stay_length_averages,
     }
 
     debug = {
