@@ -132,6 +132,13 @@ export async function PATCH(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const { data: currentListing } = await supabase
+      .from("saved_listings")
+      .select("id, name, input_address")
+      .eq("id", id)
+      .eq("user_id", user.id)
+      .single();
+
     const body = await req.json();
     const parsed = updateListingSchema.safeParse(body);
 
@@ -164,6 +171,65 @@ export async function PATCH(
         { error: "Listing not found" },
         { status: 404 }
       );
+    }
+
+    // If listing name changed, propagate it to linked reports so report titles stay in sync.
+    if (parsed.data.name !== undefined) {
+      const nextName = parsed.data.name.trim();
+      if (nextName) {
+        const admin = getSupabaseAdmin();
+
+        const { data: links } = await admin
+          .from("listing_reports")
+          .select("pricing_report_id")
+          .eq("saved_listing_id", id);
+
+        const reportIds = (links ?? [])
+          .map((row) => row.pricing_report_id as string | null)
+          .filter((v): v is string => Boolean(v));
+
+        const directMatchCandidates = [
+          currentListing?.name?.trim(),
+          currentListing?.input_address?.trim(),
+        ].filter((v): v is string => Boolean(v));
+
+        // Linked reports are the authoritative source for this saved listing.
+        if (reportIds.length > 0) {
+          await admin
+            .from("pricing_reports")
+            .update({ input_address: nextName })
+            .in("id", reportIds)
+            .eq("user_id", user.id);
+
+          const { data: reportRows } = await admin
+            .from("pricing_reports")
+            .select("id, input_attributes")
+            .in("id", reportIds)
+            .eq("user_id", user.id);
+
+          for (const row of reportRows ?? []) {
+            const attrs = ((row.input_attributes as Record<string, unknown> | null) ?? {});
+            const nextAttrs: Record<string, unknown> = {
+              ...attrs,
+              address: nextName,
+            };
+            await admin
+              .from("pricing_reports")
+              .update({ input_attributes: nextAttrs })
+              .eq("id", row.id)
+              .eq("user_id", user.id);
+          }
+        }
+
+        // Fallback: also sync any legacy reports still using old listing title/address.
+        if (directMatchCandidates.length > 0) {
+          await admin
+            .from("pricing_reports")
+            .update({ input_address: nextName })
+            .eq("user_id", user.id)
+            .in("input_address", directMatchCandidates);
+        }
+      }
     }
 
     return NextResponse.json(listing);
