@@ -255,12 +255,21 @@ def run_scrape(
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
 
             if not target.location:
-                tokens = [
-                    t.strip()
-                    for t in re.split(r"[-|•,]", target.title)
-                    if t.strip()
-                ]
-                target.location = tokens[-1] if tokens else ""
+                # Try "... in City, State" pattern first
+                loc_m = re.search(
+                    r"\bin\s+([A-Z][a-zA-Z\s,]+(?:,\s*[A-Z][a-zA-Z\s]+)?)",
+                    target.title,
+                )
+                if loc_m:
+                    target.location = loc_m.group(1).strip().rstrip(",.")
+                else:
+                    # Fallback: last meaningful token from title delimiters
+                    tokens = [
+                        t.strip()
+                        for t in re.split(r"[-|•·]", target.title)
+                        if t.strip() and len(t.strip()) >= 3
+                    ]
+                    target.location = tokens[-1] if tokens else ""
                 extraction_warnings.append(f"Location fallback from title: '{target.location}'")
                 logger.warning(f"Location fallback from title: '{target.location}'")
 

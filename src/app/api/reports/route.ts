@@ -55,11 +55,17 @@ export async function POST(req: NextRequest) {
     } = parsed.data;
     const shareId = generateShareId();
 
-    const authClient = await getSupabaseServer();
-    const {
-      data: { user },
-    } = await authClient.auth.getUser();
-    const requestUserId = user?.id ?? null;
+    let requestUserId: string | null = null;
+    try {
+      const authClient = await getSupabaseServer();
+      const {
+        data: { user },
+      } = await authClient.auth.getUser();
+      requestUserId = user?.id ?? null;
+    } catch {
+      // Auth check failed — continue as anonymous user
+      requestUserId = null;
+    }
 
     let saveUserId: string | null = null;
     if (saveToListings?.enabled) {
@@ -162,7 +168,11 @@ export async function POST(req: NextRequest) {
     if (error) {
       console.error("Supabase insert error:", error);
       return NextResponse.json(
-        { error: "Failed to create report" },
+        {
+          error: "Failed to create report",
+          detail: error.message,
+          code: error.code,
+        },
         { status: 500 }
       );
     }
@@ -199,9 +209,13 @@ export async function POST(req: NextRequest) {
       shareId: report.share_id,
       status: report.status,
     });
-  } catch {
+  } catch (err) {
+    console.error("Report creation error:", err);
     return NextResponse.json(
-      { error: "Internal server error" },
+      {
+        error: "Internal server error",
+        detail: err instanceof Error ? err.message : String(err),
+      },
       { status: 500 }
     );
   }

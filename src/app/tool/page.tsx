@@ -194,7 +194,11 @@ export default function ToolPage() {
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || "Something went wrong");
+        throw new Error(
+          data.detail
+            ? `${data.error}: ${data.detail}`
+            : data.error || "Something went wrong"
+        );
       }
 
       const data = await res.json();
