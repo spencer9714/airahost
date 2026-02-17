@@ -36,8 +36,7 @@ from worker.core.discounts import (
     average_refundable_price_for_stay,
     build_stay_length_averages,
 )
-from worker.core.mock_core import CORE_VERSION as MOCK_VERSION
-from worker.core.mock_core import generate_mock_report
+# mock_core removed — scrape failures now mark jobs as error
 
 # ---------------------------------------------------------------------------
 # Config
@@ -380,6 +379,20 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         # transparent_result holds the new structured output from scrape/criteria
         transparent_result: Optional[Dict[str, Any]] = None
 
+        def _fail(error_msg: str, detail: str = "") -> None:
+            """Mark job as error — no mock fallback."""
+            logger.warning(f"[{report_id}] Failing: {detail or error_msg}")
+            db_helpers.fail_job(
+                client, report_id, worker_token,
+                error_message=error_msg,
+                debug={
+                    "error": detail or error_msg,
+                    "worker_host": socket.gethostname(),
+                    "worker_version": WORKER_VERSION,
+                    "total_ms": round((time.time() - start_time) * 1000),
+                },
+            )
+
         if listing_url:
             # Mode A: URL scrape — user provided a listing URL
             logger.info(f"[{report_id}] Mode A (URL scrape): {listing_url}")
@@ -410,58 +423,29 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                         )
                         core_version = WORKER_VERSION + "+scrape"
                     else:
-                        logger.warning(f"[{report_id}] All day prices missing, falling back to mock")
-                        scrape_transparent = dict(transparent_result or {})
-                        finalized_input_attributes = _merge_extracted_specs_into_attributes(
-                            finalized_input_attributes, scrape_transparent
+                        _fail(
+                            "Service is busy. Could not collect enough pricing data — please try again later.",
+                            "All day-queries returned no valid prices",
                         )
-                        summary, calendar, mock_debug = generate_mock_report(
-                            address, attributes, start_date, end_date, discount_policy,
-                        )
-                        mock_debug["scrape_transparent"] = scrape_transparent.get("debug")
-                        mock_debug["scrape_fallback"] = True
-                        mock_debug["scrape_error"] = "All day-queries returned no valid prices"
-                        transparent_result = None
-                        core_version = MOCK_VERSION + "+scrape-fallback"
+                        return
                 else:
-                    logger.warning(f"[{report_id}] Scrape produced no daily results, falling back to mock")
-                    scrape_transparent = dict(transparent_result or {})
-                    finalized_input_attributes = _merge_extracted_specs_into_attributes(
-                        finalized_input_attributes, scrape_transparent
+                    scrape_err = ((transparent_result or {}).get("debug") or {}).get("error") or "No results"
+                    _fail(
+                        "Service is busy. Could not reach Airbnb data — please try again later.",
+                        f"Scrape produced no daily results: {scrape_err}",
                     )
-                    summary, calendar, mock_debug = generate_mock_report(
-                        address, attributes, start_date, end_date, discount_policy,
-                    )
-                    mock_debug["scrape_transparent"] = scrape_transparent.get("debug")
-                    mock_debug["scrape_fallback"] = True
-                    mock_debug["scrape_error"] = (scrape_transparent.get("debug") or {}).get("error") or "No daily results produced"
-                    transparent_result = None
-                    core_version = MOCK_VERSION + "+scrape-fallback"
+                    return
 
             except ValueError as exc:
-                # Date range too long — user-facing error
-                logger.warning(f"[{report_id}] Validation error: {exc}")
-                db_helpers.fail_job(
-                    client, report_id, worker_token,
-                    error_message=str(exc),
-                    debug={
-                        "error": str(exc),
-                        "worker_host": socket.gethostname(),
-                        "worker_version": WORKER_VERSION,
-                        "total_ms": round((time.time() - start_time) * 1000),
-                    },
-                )
+                _fail(str(exc), str(exc))
                 return
 
             except Exception as exc:
-                logger.error(f"[{report_id}] Scrape error: {exc}, falling back to mock")
-                summary, calendar, mock_debug = generate_mock_report(
-                    address, attributes, start_date, end_date, discount_policy,
+                _fail(
+                    "Service is busy. An error occurred during analysis — please try again later.",
+                    str(exc),
                 )
-                mock_debug["scrape_error"] = str(exc)
-                mock_debug["scrape_fallback"] = True
-                transparent_result = None
-                core_version = MOCK_VERSION + "+scrape-fallback"
+                return
 
         elif input_mode == "criteria":
             # Mode B: Criteria search — find best matching listing, then scrape comps
@@ -491,65 +475,41 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                         summary, calendar = result
                         core_version = WORKER_VERSION + "+criteria"
                     else:
-                        logger.warning(f"[{report_id}] All day prices missing in criteria mode, falling back to mock")
-                        summary, calendar, mock_debug = generate_mock_report(
-                            address, attributes, start_date, end_date, discount_policy,
+                        _fail(
+                            "Service is busy. Could not collect enough pricing data — please try again later.",
+                            "All day-queries returned no valid prices in criteria mode",
                         )
-                        mock_debug["criteria_fallback"] = True
-                        mock_debug["criteria_error"] = "All day-queries returned no valid prices"
-                        transparent_result = None
-                        core_version = MOCK_VERSION + "+criteria-fallback"
+                        return
                 else:
-                    logger.warning(f"[{report_id}] Criteria search produced no daily results, falling back to mock")
-                    summary, calendar, mock_debug = generate_mock_report(
-                        address, attributes, start_date, end_date, discount_policy,
+                    criteria_err = ((transparent_result or {}).get("debug") or {}).get("error") or "No results"
+                    _fail(
+                        "Service is busy. Could not reach Airbnb data — please try again later.",
+                        f"Criteria search produced no daily results: {criteria_err}",
                     )
-                    mock_debug["criteria_fallback"] = True
-                    mock_debug["criteria_error"] = ((transparent_result or {}).get("debug") or {}).get("error") or "No daily results produced"
-                    transparent_result = None
-                    core_version = MOCK_VERSION + "+criteria-fallback"
+                    return
 
             except ValueError as exc:
-                logger.warning(f"[{report_id}] Validation error: {exc}")
-                db_helpers.fail_job(
-                    client, report_id, worker_token,
-                    error_message=str(exc),
-                    debug={
-                        "error": str(exc),
-                        "worker_host": socket.gethostname(),
-                        "worker_version": WORKER_VERSION,
-                        "total_ms": round((time.time() - start_time) * 1000),
-                    },
-                )
+                _fail(str(exc), str(exc))
                 return
 
             except Exception as exc:
-                logger.error(f"[{report_id}] Criteria search error: {exc}, falling back to mock")
-                summary, calendar, mock_debug = generate_mock_report(
-                    address, attributes, start_date, end_date, discount_policy,
+                _fail(
+                    "Service is busy. An error occurred during analysis — please try again later.",
+                    str(exc),
                 )
-                mock_debug["criteria_error"] = str(exc)
-                mock_debug["criteria_fallback"] = True
-                transparent_result = None
-                core_version = MOCK_VERSION + "+criteria-fallback"
+                return
 
         else:
-            # Fallback: Mock pricing
-            logger.info(f"[{report_id}] Fallback (mock): {address}")
-            summary, calendar, mock_debug = generate_mock_report(
-                address, attributes, start_date, end_date, discount_policy,
+            # No listing URL and no criteria — cannot proceed
+            _fail(
+                "Please provide either a listing URL or search criteria.",
+                "No listing URL and input mode is not criteria",
             )
-            transparent_result = None
-            core_version = MOCK_VERSION
+            return
 
         total_ms = round((time.time() - start_time) * 1000)
 
-        # Build debug dict from transparent_result or mock_debug
-        if transparent_result:
-            debug = transparent_result.get("debug") or {}
-        else:
-            debug = mock_debug  # type: ignore[possibly-undefined]
-
+        debug = (transparent_result or {}).get("debug") or {}
         debug.update({
             "cache_hit": False,
             "cache_key": cache_key,

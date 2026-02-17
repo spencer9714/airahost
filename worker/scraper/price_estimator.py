@@ -597,8 +597,8 @@ def run_criteria_search(
 
     if remaining < 30:
         # Not enough time for day-by-day scrape; return empty daily_results
-        # (process_job will fall back to mock)
-        logger.info(f"[criteria] Low time ({remaining:.0f}s), returning empty daily_results for mock fallback")
+        # (process_job will fail the job with a user-facing error)
+        logger.info(f"[criteria] Low time ({remaining:.0f}s), returning empty daily_results")
         return [], _empty_transparent(
             "criteria_direct",
             f"Insufficient time for day-by-day queries ({remaining:.0f}s remaining)",
