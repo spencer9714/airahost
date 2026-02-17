@@ -157,6 +157,12 @@ export async function PATCH(
       updates.input_attributes = parsed.data.inputAttributes;
     if (parsed.data.defaultDiscountPolicy !== undefined)
       updates.default_discount_policy = parsed.data.defaultDiscountPolicy;
+    if (parsed.data.defaultDateMode !== undefined)
+      updates.default_date_mode = parsed.data.defaultDateMode;
+    if (parsed.data.defaultStartDate !== undefined)
+      updates.default_start_date = parsed.data.defaultStartDate;
+    if (parsed.data.defaultEndDate !== undefined)
+      updates.default_end_date = parsed.data.defaultEndDate;
 
     const { data: listing, error } = await supabase
       .from("saved_listings")
@@ -198,14 +204,12 @@ export async function PATCH(
           await admin
             .from("pricing_reports")
             .update({ input_address: nextName })
-            .in("id", reportIds)
-            .eq("user_id", user.id);
+            .in("id", reportIds);
 
           const { data: reportRows } = await admin
             .from("pricing_reports")
             .select("id, input_attributes")
-            .in("id", reportIds)
-            .eq("user_id", user.id);
+            .in("id", reportIds);
 
           for (const row of reportRows ?? []) {
             const attrs = ((row.input_attributes as Record<string, unknown> | null) ?? {});
@@ -216,8 +220,7 @@ export async function PATCH(
             await admin
               .from("pricing_reports")
               .update({ input_attributes: nextAttrs })
-              .eq("id", row.id)
-              .eq("user_id", user.id);
+              .eq("id", row.id);
           }
         }
 

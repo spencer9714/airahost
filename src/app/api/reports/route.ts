@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createReportRequestSchema } from "@/lib/schemas";
+import { createReportRequestSchema, listingAnalysisSchema } from "@/lib/schemas";
 import { generateShareId } from "@/lib/shareId";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
@@ -36,6 +36,143 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
+
+    // ── Listing-based analysis shorthand ──────────────────────
+    const listingParsed = listingAnalysisSchema.safeParse(body);
+    if (listingParsed.success) {
+      const { listingId, listingUrl, dateRange } = listingParsed.data;
+
+      const authClient = await getSupabaseServer();
+      const {
+        data: { user },
+      } = await authClient.auth.getUser();
+      if (!user) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+
+      const { data: listing, error: listingErr } = await authClient
+        .from("saved_listings")
+        .select("*")
+        .eq("id", listingId)
+        .eq("user_id", user.id)
+        .single();
+
+      if (listingErr || !listing) {
+        return NextResponse.json(
+          { error: "Listing not found" },
+          { status: 404 }
+        );
+      }
+
+      const attrs = (listing.input_attributes ?? {}) as Record<string, unknown>;
+      const fallbackInputMode =
+        attrs.inputMode === "url" || attrs.inputMode === "criteria"
+          ? attrs.inputMode
+          : "criteria";
+      const inputMode = listingUrl ? "url" : fallbackInputMode;
+      const discountPolicy = listing.default_discount_policy ?? {};
+      const address = listing.input_address;
+      const admin = getSupabaseAdmin();
+
+      const cacheKey = computeCacheKey(
+        address,
+        listing.input_attributes as Record<string, unknown>,
+        dateRange.startDate,
+        dateRange.endDate,
+        discountPolicy as Record<string, unknown>,
+        listingUrl,
+        inputMode
+      );
+
+      let cachedSummary = null;
+      let cachedCalendar = null;
+      try {
+        const { data: cacheRows } = await admin
+          .from("pricing_cache")
+          .select("summary, calendar")
+          .eq("cache_key", cacheKey)
+          .gt("expires_at", new Date().toISOString())
+          .limit(1);
+        if (cacheRows && cacheRows.length > 0) {
+          cachedSummary = cacheRows[0].summary;
+          cachedCalendar = cacheRows[0].calendar;
+        }
+      } catch {
+        // Cache miss
+      }
+
+      const isCacheHit = cachedSummary !== null;
+      const shareId = generateShareId();
+
+      const report = {
+        id: crypto.randomUUID(),
+        user_id: user.id,
+        share_id: shareId,
+        listing_id: listingId,
+        input_address: address,
+        input_attributes: { ...listing.input_attributes, inputMode },
+        input_date_start: dateRange.startDate,
+        input_date_end: dateRange.endDate,
+        discount_policy: discountPolicy,
+        input_listing_url: listingUrl || null,
+        cache_key: cacheKey,
+        status: isCacheHit ? "ready" : "queued",
+        core_version: isCacheHit ? "cache-hit" : "pending",
+        result_summary: cachedSummary,
+        result_calendar: cachedCalendar,
+        result_core_debug: {
+          cache_hit: isCacheHit,
+          cache_key: cacheKey,
+          request_source: "api/reports (listing shorthand)",
+          input_mode: inputMode,
+          listing_id: listingId,
+          report_input: {
+            mode: inputMode,
+            listing_url: listingUrl || null,
+            listing_address: address,
+            listing_attributes: listing.input_attributes,
+            date_start: dateRange.startDate,
+            date_end: dateRange.endDate,
+            discount_policy: discountPolicy,
+          },
+          created_at: new Date().toISOString(),
+        },
+        error_message: null,
+      };
+
+      const { error: insertError } = await admin
+        .from("pricing_reports")
+        .insert(report);
+
+      if (insertError) {
+        console.error("Report insert error:", insertError);
+        return NextResponse.json(
+          { error: "Failed to create report", detail: insertError.message },
+          { status: 500 }
+        );
+      }
+
+      // Link report to listing
+      await admin.from("listing_reports").insert({
+        saved_listing_id: listingId,
+        pricing_report_id: report.id,
+        trigger: "manual",
+      });
+
+      // Update last_used_at
+      await authClient
+        .from("saved_listings")
+        .update({ last_used_at: new Date().toISOString() })
+        .eq("id", listingId);
+
+      return NextResponse.json({
+        reportId: report.id,
+        shareId: report.share_id,
+        status: report.status,
+      });
+    }
+
+    // ── Full report creation (existing flow) ─────────────────
     const parsed = createReportRequestSchema.safeParse(body);
 
     if (!parsed.success) {

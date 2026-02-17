@@ -10,6 +10,8 @@ import { RecommendationBanner } from "@/components/dashboard/RecommendationBanne
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
+import { ListingTabs } from "@/components/dashboard/ListingTabs";
+import { ListingPopover } from "@/components/dashboard/ListingPopover";
 import type {
   PropertyType,
   CalendarDay,
@@ -17,6 +19,7 @@ import type {
   RecommendedPrice,
   CompsSummary,
   PriceDistribution,
+  DateMode,
 } from "@/lib/schemas";
 
 type LatestReport = {
@@ -56,6 +59,9 @@ type ListingRow = {
   };
   created_at: string;
   last_used_at: string | null;
+  default_date_mode?: DateMode;
+  default_start_date?: string | null;
+  default_end_date?: string | null;
   latestReport: LatestReport;
   latestLinkedAt: string | null;
 };
@@ -82,16 +88,6 @@ type ListingDetailResponse = {
   }>;
 };
 
-function getDefaultDates() {
-  const start = new Date();
-  start.setDate(start.getDate() + 7);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 7);
-  return {
-    startDate: start.toISOString().split("T")[0],
-    endDate: end.toISOString().split("T")[0],
-  };
-}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -114,6 +110,7 @@ export default function DashboardPage() {
   const [pricingMode, setPricingMode] = useState<
     "refundable" | "nonRefundable"
   >("refundable");
+  const [listingPopoverOpen, setListingPopoverOpen] = useState(false);
 
   const loadDashboardData = useCallback(async () => {
     setLoading(true);
@@ -131,13 +128,19 @@ export default function DashboardPage() {
       const loadedListings = (data.listings ?? []) as ListingRow[];
       setListings(loadedListings);
       setRecentReports((data.recentReports ?? []) as RecentReportRow[]);
-      // Auto-select first listing with a ready report
+      // Auto-select: prefer most recently analyzed listing, then first saved
       if (!activeListingId && loadedListings.length > 0) {
-        const withReport = loadedListings.find(
-          (l) =>
-            l.latestReport?.status === "ready" && l.latestReport.result_summary
-        );
-        setActiveListingId(withReport?.id ?? loadedListings[0].id);
+        const withReports = loadedListings
+          .filter(
+            (l) =>
+              l.latestReport?.status === "ready" && l.latestReport.result_summary
+          )
+          .sort((a, b) => {
+            const aDate = a.latestLinkedAt ?? "";
+            const bDate = b.latestLinkedAt ?? "";
+            return bDate.localeCompare(aDate);
+          });
+        setActiveListingId(withReports[0]?.id ?? loadedListings[0].id);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load dashboard");
@@ -184,16 +187,21 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleRerun(listingId: string) {
+  async function handleRunAnalysis(
+    listingId: string,
+    dates: { startDate: string; endDate: string }
+  ) {
     setRerunningId(listingId);
-    const dates = getDefaultDates();
     try {
-      const res = await fetch(`/api/listings/${listingId}/rerun`, {
+      const res = await fetch("/api/reports", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dates }),
+        body: JSON.stringify({
+          listingId,
+          dateRange: dates,
+        }),
       });
-      if (!res.ok) throw new Error("Failed to rerun analysis");
+      if (!res.ok) throw new Error("Failed to run analysis");
       const data = await res.json();
       await loadDashboardData();
       if (data.shareId) router.push(`/r/${data.shareId}`);
@@ -202,6 +210,24 @@ export default function DashboardPage() {
     } finally {
       setRerunningId(null);
     }
+  }
+
+  function handleSaveDateDefaults(
+    listingId: string,
+    mode: DateMode,
+    startDate: string | null,
+    endDate: string | null
+  ) {
+    // Fire-and-forget PATCH — debounced by the ListingCard
+    void fetch(`/api/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        defaultDateMode: mode,
+        defaultStartDate: startDate,
+        defaultEndDate: endDate,
+      }),
+    });
   }
 
   async function handleDelete(listingId: string) {
@@ -281,6 +307,22 @@ export default function DashboardPage() {
     [listings.length]
   );
 
+  const readyListings = useMemo(
+    () =>
+      listings
+        .filter(
+          (l) =>
+            l.latestReport?.status === "ready" && l.latestReport.result_summary
+        )
+        .map((l) => ({ id: l.id, name: l.name })),
+    [listings]
+  );
+
+  function handleListingSelect(id: string) {
+    setActiveListingId(id);
+    setListingPopoverOpen(false);
+  }
+
   if (!authReady || loading) {
     return (
       <div className="mx-auto max-w-5xl px-6 py-10">
@@ -314,42 +356,110 @@ export default function DashboardPage() {
         </Card>
       )}
 
-      {/* Recommendation Banner */}
+      {/* ═══ Section A: Today's Recommendation ═══ */}
       {activeListing && activeSummary && activeReport && (
-        <RecommendationBanner
-          listingName={activeListing.name}
-          summary={activeSummary}
-          recommendedPrice={activeSummary.recommendedPrice ?? null}
-          reportShareId={activeReport.share_id}
-          onRerun={() => handleRerun(activeListing.id)}
-          isRerunning={rerunningId === activeListing.id}
-        />
-      )}
+        <section className="space-y-5 rounded-2xl bg-gray-50/80 p-5 sm:p-6">
+          {/* Title row */}
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold">
+                Today&apos;s recommendation
+              </h2>
+              <p className="text-sm text-muted">
+                For{" "}
+                <span className="font-medium text-foreground">
+                  {activeListing.name}
+                </span>
+              </p>
+            </div>
+            {readyListings.length > 1 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setListingPopoverOpen((v) => !v)}
+                  className="text-sm text-muted transition-colors hover:text-foreground"
+                >
+                  Change listing
+                </button>
+                <ListingPopover
+                  open={listingPopoverOpen}
+                  onClose={() => setListingPopoverOpen(false)}
+                  listings={readyListings}
+                  selectedId={activeListing.id}
+                  onSelect={handleListingSelect}
+                />
+              </div>
+            )}
+          </div>
 
-      {/* Pricing Heatmap */}
-      {activeCalendar.length > 0 && (
-        <PricingHeatmap
-          calendar={activeCalendar}
-          pricingMode={pricingMode}
-          onModeChange={setPricingMode}
-        />
-      )}
-
-      {/* Smart Alerts */}
-      {activeSummary && (
-        <section>
-          <h2 className="mb-3 text-lg font-semibold">Alerts</h2>
-          <SmartAlerts
-            summary={activeSummary}
-            compsSummary={activeSummary.compsSummary ?? null}
-            priceDistribution={activeSummary.priceDistribution ?? null}
+          {/* Listing tabs */}
+          <ListingTabs
+            listings={readyListings}
+            selectedId={activeListing.id}
+            onChange={handleListingSelect}
+            onMoreClick={() => setListingPopoverOpen(true)}
           />
+
+          {/* Recommendation card */}
+          <RecommendationBanner
+            listingName={activeListing.name}
+            summary={activeSummary}
+            recommendedPrice={activeSummary.recommendedPrice ?? null}
+            reportShareId={activeReport.share_id}
+            onRerun={() => {
+              const today = new Date().toISOString().split("T")[0];
+              const end = new Date();
+              end.setDate(end.getDate() + 30);
+              void handleRunAnalysis(activeListing.id, {
+                startDate: today,
+                endDate: end.toISOString().split("T")[0],
+              });
+            }}
+            isRerunning={rerunningId === activeListing.id}
+            propertyMeta={{
+              propertyType: activeListing.input_attributes.propertyType,
+              guests: activeListing.input_attributes.maxGuests,
+              beds:
+                activeListing.input_attributes.beds ??
+                activeListing.input_attributes.bedrooms,
+              baths: activeListing.input_attributes.bathrooms,
+            }}
+            lastAnalysisDate={activeListing.latestLinkedAt}
+          />
+
+          {/* Pricing Heatmap */}
+          {activeCalendar.length > 0 && (
+            <PricingHeatmap
+              calendar={activeCalendar}
+              pricingMode={pricingMode}
+              onModeChange={setPricingMode}
+            />
+          )}
+
+          {/* Smart Alerts */}
+          {activeSummary && (
+            <div>
+              <h3 className="mb-3 text-base font-semibold">Alerts</h3>
+              <SmartAlerts
+                summary={activeSummary}
+                compsSummary={activeSummary.compsSummary ?? null}
+                priceDistribution={activeSummary.priceDistribution ?? null}
+              />
+            </div>
+          )}
         </section>
       )}
 
-      {/* Listings */}
+      {/* ═══ Section B: Saved Listings ═══ */}
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold">Saved Listings</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">Saved Listings</h2>
+          {listings.length > 0 && (
+            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-muted">
+              {listings.length}
+            </span>
+          )}
+        </div>
         {listings.length === 0 ? (
           <Card className="text-center">
             <p className="text-sm text-muted">
@@ -358,24 +468,30 @@ export default function DashboardPage() {
             </p>
           </Card>
         ) : (
-          <div className="grid gap-4">
-            {listings.map((listing) => (
-              <ListingCard
-                key={listing.id}
-                listing={listing}
-                isActive={listing.id === activeListingId}
-                onSelect={() => setActiveListingId(listing.id)}
-                onRerun={() => handleRerun(listing.id)}
-                onDelete={() => handleDelete(listing.id)}
-                onViewDetails={() => loadListingHistory(listing.id)}
-                isRerunning={rerunningId === listing.id}
-                isExpanded={expandedListingId === listing.id}
-                historyLoading={historyLoading}
-                historyRows={historyRows}
-                onRename={handleRenameListing}
-              />
-            ))}
-          </div>
+          <Card>
+            <div className="divide-y divide-border">
+              {listings.map((listing) => (
+                <ListingCard
+                  key={listing.id}
+                  listing={listing}
+                  isActive={listing.id === activeListingId}
+                  onSelect={() => setActiveListingId(listing.id)}
+                  onRunAnalysis={handleRunAnalysis}
+                  onDelete={() => handleDelete(listing.id)}
+                  onViewDetails={() => loadListingHistory(listing.id)}
+                  onViewHistory={() =>
+                    router.push(`/dashboard/listings/${listing.id}`)
+                  }
+                  isRunning={rerunningId === listing.id}
+                  isExpanded={expandedListingId === listing.id}
+                  historyLoading={historyLoading}
+                  historyRows={historyRows}
+                  onRename={handleRenameListing}
+                  onSaveDateDefaults={handleSaveDateDefaults}
+                />
+              ))}
+            </div>
+          </Card>
         )}
       </section>
 

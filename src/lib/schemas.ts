@@ -272,6 +272,9 @@ export interface PricingReport {
 
 // ── Saved Listings ─────────────────────────────────────────────
 
+export const dateModeEnum = z.enum(["next_30", "custom"]);
+export type DateMode = z.infer<typeof dateModeEnum>;
+
 export const createListingSchema = z.object({
   name: z.string().min(1, "Name is required").max(100),
   inputAddress: z.string().min(5, "Please enter a valid address"),
@@ -284,6 +287,9 @@ export const updateListingSchema = z.object({
   inputAddress: z.string().min(5).optional(),
   inputAttributes: listingInputSchema.optional(),
   defaultDiscountPolicy: discountPolicySchema.optional(),
+  defaultDateMode: dateModeEnum.optional(),
+  defaultStartDate: z.string().nullable().optional(),
+  defaultEndDate: z.string().nullable().optional(),
 });
 
 export interface SavedListing {
@@ -293,6 +299,9 @@ export interface SavedListing {
   inputAddress: string;
   inputAttributes: ListingInput;
   defaultDiscountPolicy: DiscountPolicy | null;
+  defaultDateMode: DateMode;
+  defaultStartDate: string | null;
+  defaultEndDate: string | null;
   lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -313,9 +322,16 @@ export const rerunListingSchema = z.object({
   listingUrl: z.string().url().optional(),
 });
 
+export const listingAnalysisSchema = z.object({
+  listingId: z.string().uuid(),
+  listingUrl: z.string().url().optional(),
+  dateRange: dateInputSchema,
+});
+
 export type CreateListingRequest = z.infer<typeof createListingSchema>;
 export type UpdateListingRequest = z.infer<typeof updateListingSchema>;
 export type RerunListingRequest = z.infer<typeof rerunListingSchema>;
+export type ListingAnalysisRequest = z.infer<typeof listingAnalysisSchema>;
 
 // ── Market Tracking ─────────────────────────────────────────────
 

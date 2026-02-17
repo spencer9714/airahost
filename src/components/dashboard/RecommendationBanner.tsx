@@ -10,6 +10,13 @@ interface Props {
   reportShareId: string;
   onRerun: () => void;
   isRerunning: boolean;
+  propertyMeta: {
+    propertyType: string;
+    guests: number;
+    beds: number;
+    baths: number;
+  } | null;
+  lastAnalysisDate: string | null;
 }
 
 function positionBadge(suggestedPrice: number, marketMedian: number) {
@@ -40,6 +47,8 @@ export function RecommendationBanner({
   reportShareId,
   onRerun,
   isRerunning,
+  propertyMeta,
+  lastAnalysisDate,
 }: Props) {
   const suggested = recommendedPrice?.nightly ?? summary.nightlyMedian;
   const median = summary.nightlyMedian;
@@ -49,10 +58,16 @@ export function RecommendationBanner({
     <Card className="border-accent/20 bg-accent/[0.02]">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <p className="text-sm font-medium text-accent">
-            Tonight&apos;s recommendation
-          </p>
-          <p className="mt-0.5 text-xs text-muted">{listingName}</p>
+          <p className="text-sm font-bold">{listingName}</p>
+
+          {propertyMeta && (
+            <p className="mt-0.5 text-xs text-muted">
+              {propertyMeta.propertyType} · {propertyMeta.guests} guest
+              {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
+              {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
+              {propertyMeta.baths !== 1 ? "s" : ""}
+            </p>
+          )}
 
           <div className="mt-3 flex items-baseline gap-4">
             <div>
@@ -71,6 +86,13 @@ export function RecommendationBanner({
             >
               {badge.label}
             </span>
+          )}
+
+          {lastAnalysisDate && (
+            <p className="mt-2 text-xs text-muted">
+              Based on your last analysis on{" "}
+              {new Date(lastAnalysisDate).toLocaleDateString()}
+            </p>
           )}
         </div>
 

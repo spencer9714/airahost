@@ -16,7 +16,8 @@
       "Bash(cmd /c \"rmdir /s /q \"\"c:\\\\Users\\\\Spencer\\\\OneDrive\\\\文件\\\\GitHub\\\\ariahost\\\\.next\"\" 2>nul & mkdir \"\"c:\\\\temp\\\\ariahost-next\"\" 2>nul & mklink /J \"\"c:\\\\Users\\\\Spencer\\\\OneDrive\\\\文件\\\\GitHub\\\\ariahost\\\\.next\"\" \"\"c:\\\\temp\\\\ariahost-next\"\"\")",
       "Bash(cmd /c:*)",
       "Bash(git log:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(ls -la \"c:\\\\Users\\\\Spencer\\\\OneDrive\\\\文件\\\\GitHub\\\\ariahost\\\\src\\\\app\\\\dashboard\"\" 2>/dev/null | findstr /V \"^d \")"
     ]
   }
 }

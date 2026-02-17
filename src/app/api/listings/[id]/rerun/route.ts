@@ -104,6 +104,7 @@ export async function POST(
       id: crypto.randomUUID(),
       user_id: user.id,
       share_id: shareId,
+      listing_id: id,
       input_address: address,
       input_attributes: { ...attributes, inputMode },
       input_date_start: dates.startDate,
