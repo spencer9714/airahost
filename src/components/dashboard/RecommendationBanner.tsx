@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import type { ReportSummary, RecommendedPrice } from "@/lib/schemas";
 
@@ -25,18 +24,18 @@ function positionBadge(suggestedPrice: number, marketMedian: number) {
   if (pct < -3) {
     return {
       label: `${Math.abs(pct)}% below market`,
-      color: "bg-emerald-50 text-emerald-700 border-emerald-200",
+      color: "bg-emerald-50 text-emerald-800 border-emerald-300",
     };
   }
   if (pct > 3) {
     return {
       label: `${pct}% above market`,
-      color: "bg-amber-50 text-amber-700 border-amber-200",
+      color: "bg-amber-50 text-amber-800 border-amber-300",
     };
   }
   return {
     label: "At market",
-    color: "bg-gray-50 text-gray-600 border-gray-200",
+    color: "bg-gray-100 text-gray-700 border-gray-300",
   };
 }
 
@@ -55,50 +54,62 @@ export function RecommendationBanner({
   const badge = positionBadge(suggested, median);
 
   return (
-    <Card className="border-accent/20 bg-accent/[0.02]">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-sm font-bold">{listingName}</p>
+    <div className="rounded-2xl border border-border bg-white p-6 sm:p-8">
+      <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-4">
+          {/* Listing name + meta */}
+          <div>
+            <h3 className="text-lg font-bold tracking-tight">{listingName}</h3>
+            {propertyMeta && (
+              <p className="mt-1 text-sm text-foreground/70">
+                {propertyMeta.propertyType} · {propertyMeta.guests} guest
+                {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
+                {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
+                {propertyMeta.baths !== 1 ? "s" : ""}
+              </p>
+            )}
+          </div>
 
-          {propertyMeta && (
-            <p className="mt-0.5 text-xs text-muted">
-              {propertyMeta.propertyType} · {propertyMeta.guests} guest
-              {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
-              {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
-              {propertyMeta.baths !== 1 ? "s" : ""}
-            </p>
-          )}
-
-          <div className="mt-3 flex items-baseline gap-4">
+          {/* Price display */}
+          <div className="flex items-end gap-6">
             <div>
-              <p className="text-3xl font-bold">${suggested}</p>
-              <p className="text-xs text-muted">Suggested nightly</p>
+              <p className="text-sm font-medium uppercase tracking-wide text-foreground/60">
+                Suggested nightly
+              </p>
+              <p className="text-4xl font-bold tracking-tight">${suggested}</p>
             </div>
-            <div className="text-center">
-              <p className="text-lg font-semibold text-muted">${median}</p>
-              <p className="text-xs text-muted">Market median</p>
+            <div>
+              <p className="text-sm font-medium uppercase tracking-wide text-foreground/60">
+                Market median
+              </p>
+              <p className="text-2xl font-semibold tracking-tight text-foreground/70">
+                ${median}
+              </p>
             </div>
           </div>
 
+          {/* Badge */}
           {badge && (
             <span
-              className={`mt-2 inline-block rounded-full border px-2.5 py-0.5 text-xs font-medium ${badge.color}`}
+              className={`inline-block rounded-full border px-3 py-1 text-sm font-semibold ${badge.color}`}
             >
               {badge.label}
             </span>
           )}
 
+          {/* Analysis date */}
           {lastAnalysisDate && (
-            <p className="mt-2 text-xs text-muted">
-              Based on your last analysis on{" "}
+            <p className="text-sm text-foreground/60">
+              Based on analysis from{" "}
               {new Date(lastAnalysisDate).toLocaleDateString()}
             </p>
           )}
         </div>
 
-        <div className="flex flex-col gap-2">
+        {/* Actions */}
+        <div className="flex shrink-0 flex-col gap-2">
           <Link href={`/r/${reportShareId}`}>
-            <Button size="sm">View full report</Button>
+            <Button size="md">View full report</Button>
           </Link>
           <Button
             size="sm"
@@ -110,6 +121,6 @@ export function RecommendationBanner({
           </Button>
         </div>
       </div>
-    </Card>
+    </div>
   );
 }

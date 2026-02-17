@@ -1,4 +1,3 @@
-import { Card } from "@/components/Card";
 import type { CalendarDay } from "@/lib/schemas";
 
 interface Props {
@@ -8,11 +7,11 @@ interface Props {
 }
 
 function priceColor(price: number, min: number, max: number): string {
-  if (max === min) return "bg-accent/5 text-foreground";
+  if (max === min) return "text-foreground";
   const ratio = (price - min) / (max - min);
-  if (ratio < 0.33) return "bg-emerald-50 text-emerald-700";
-  if (ratio < 0.66) return "bg-amber-50 text-amber-700";
-  return "bg-rose-50 text-rose-700";
+  if (ratio < 0.33) return "text-emerald-700";
+  if (ratio < 0.66) return "text-amber-700";
+  return "text-foreground font-bold";
 }
 
 export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
@@ -25,26 +24,26 @@ export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
   const maxP = Math.max(...prices);
 
   return (
-    <Card>
-      <div className="mb-4 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">14-day pricing outlook</h3>
-        <div className="flex gap-1 rounded-lg border border-border p-0.5">
+    <div className="rounded-2xl border border-border bg-white p-6 sm:p-8">
+      <div className="mb-6 flex items-center justify-between">
+        <h3 className="text-xl font-bold tracking-tight">14-day outlook</h3>
+        <div className="inline-flex gap-1 rounded-xl border border-border bg-gray-100/80 p-1">
           <button
             onClick={() => onModeChange("refundable")}
-            className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+            className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
               pricingMode === "refundable"
-                ? "bg-foreground text-white"
-                : "text-muted hover:text-foreground"
+                ? "bg-white text-foreground shadow-sm"
+                : "text-foreground/60 hover:text-foreground"
             }`}
           >
             Refundable
           </button>
           <button
             onClick={() => onModeChange("nonRefundable")}
-            className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
+            className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
               pricingMode === "nonRefundable"
-                ? "bg-foreground text-white"
-                : "text-muted hover:text-foreground"
+                ? "bg-white text-foreground shadow-sm"
+                : "text-foreground/60 hover:text-foreground"
             }`}
           >
             Non-refundable
@@ -52,58 +51,56 @@ export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
         </div>
       </div>
 
-      <div className="overflow-x-auto">
-        <div className="flex gap-1.5" style={{ minWidth: days.length * 60 }}>
-          {days.map((day) => {
-            const price =
-              pricingMode === "refundable"
-                ? day.refundablePrice
-                : day.nonRefundablePrice;
-            const colorClass = priceColor(day.basePrice, minP, maxP);
+      <div className="space-y-1">
+        {days.map((day) => {
+          const price =
+            pricingMode === "refundable"
+              ? day.refundablePrice
+              : day.nonRefundablePrice;
+          const colorClass = priceColor(day.basePrice, minP, maxP);
 
-            // Parse date for display
-            const d = new Date(day.date + "T00:00:00");
-            const dayNum = d.getDate();
-            const monthShort = d.toLocaleString("en-US", { month: "short" });
+          const d = new Date(day.date + "T00:00:00");
+          const dayName = d.toLocaleString("en-US", { weekday: "short" });
+          const monthDay = d.toLocaleString("en-US", {
+            month: "short",
+            day: "numeric",
+          });
 
-            return (
-              <div
-                key={day.date}
-                className={`flex min-w-[54px] flex-col items-center rounded-xl border px-2 py-2 ${
-                  day.isWeekend ? "border-accent/30" : "border-border/60"
-                }`}
-              >
-                <span className="text-[10px] font-medium text-muted">
-                  {day.dayOfWeek}
+          return (
+            <div
+              key={day.date}
+              className={`flex items-center justify-between rounded-xl px-4 py-3 ${
+                day.isWeekend ? "bg-gray-50" : ""
+              }`}
+            >
+              <div className="flex items-center gap-4">
+                <span className="w-10 text-sm font-semibold text-foreground">
+                  {dayName}
                 </span>
-                <span className="text-[10px] text-muted">
-                  {monthShort} {dayNum}
-                </span>
-                <span
-                  className={`mt-1 rounded-md px-1.5 py-0.5 text-xs font-semibold ${colorClass}`}
-                >
-                  ${price}
-                </span>
+                <span className="text-sm text-foreground/60">{monthDay}</span>
               </div>
-            );
-          })}
-        </div>
+              <span className={`text-lg font-bold tracking-tight ${colorClass}`}>
+                ${price}
+              </span>
+            </div>
+          );
+        })}
       </div>
 
-      <div className="mt-3 flex items-center justify-center gap-4 text-xs text-muted">
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2.5 w-2.5 rounded bg-emerald-50 border border-emerald-200" />
+      <div className="mt-6 flex items-center justify-center gap-6 text-sm text-foreground/60">
+        <span className="flex items-center gap-2">
+          <span className="inline-block h-3 w-3 rounded-full bg-emerald-600" />
           Lower
         </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2.5 w-2.5 rounded bg-amber-50 border border-amber-200" />
+        <span className="flex items-center gap-2">
+          <span className="inline-block h-3 w-3 rounded-full bg-amber-600" />
           Average
         </span>
-        <span className="flex items-center gap-1">
-          <span className="inline-block h-2.5 w-2.5 rounded bg-rose-50 border border-rose-200" />
+        <span className="flex items-center gap-2">
+          <span className="inline-block h-3 w-3 rounded-full bg-gray-400" />
           Higher
         </span>
       </div>
-    </Card>
+    </div>
   );
 }

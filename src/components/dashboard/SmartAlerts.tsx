@@ -1,4 +1,3 @@
-import { Card } from "@/components/Card";
 import type {
   ReportSummary,
   CompsSummary,
@@ -111,28 +110,26 @@ export function SmartAlerts({
 
   if (alerts.length === 0) {
     return (
-      <Card>
-        <p className="text-sm text-muted">
+      <div className="rounded-2xl border border-border bg-white p-6">
+        <p className="text-base text-foreground/60">
           No alerts right now. Your pricing looks good!
         </p>
-      </Card>
+      </div>
     );
   }
 
   return (
-    <div className="space-y-2">
+    <div className="rounded-2xl border border-border bg-white divide-y divide-border">
       {alerts.map((alert) => (
-        <Card key={alert.id} className="py-3">
-          <div className="flex items-start gap-3">
-            <span
-              className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${DOT_COLORS[alert.color]}`}
-            />
-            <div>
-              <p className="text-sm font-medium">{alert.title}</p>
-              <p className="mt-0.5 text-xs text-muted">{alert.description}</p>
-            </div>
+        <div key={alert.id} className="flex items-start gap-4 px-6 py-5">
+          <span
+            className={`mt-1.5 h-3 w-3 shrink-0 rounded-full ${DOT_COLORS[alert.color]}`}
+          />
+          <div>
+            <p className="text-base font-semibold">{alert.title}</p>
+            <p className="mt-1 text-sm text-foreground/60">{alert.description}</p>
           </div>
-        </Card>
+        </div>
       ))}
     </div>
   );

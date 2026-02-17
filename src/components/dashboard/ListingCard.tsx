@@ -102,7 +102,7 @@ export function ListingCard({
   onRename,
   onSaveDateDefaults,
 }: Props) {
-  const [isRenaming, setIsRenaming] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [renameSaving, setRenameSaving] = useState(false);
   const [renameError, setRenameError] = useState("");
@@ -110,7 +110,6 @@ export function ListingCard({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   // Date settings
-  const [dateOpen, setDateOpen] = useState(false);
   const [dateMode, setDateMode] = useState<DateMode>(
     listing.default_date_mode ?? "next_30"
   );
@@ -127,16 +126,19 @@ export function ListingCard({
   const range =
     latest?.result_summary?.nightlyMin !== undefined &&
     latest?.result_summary?.nightlyMax !== undefined
-      ? `$${latest.result_summary.nightlyMin} - $${latest.result_summary.nightlyMax}`
+      ? `$${latest.result_summary.nightlyMin} – $${latest.result_summary.nightlyMax}`
       : "No report yet";
 
   const attrs = listing.input_attributes;
 
   useEffect(() => {
-    if (!isRenaming) return;
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, [isRenaming]);
+    if (!editOpen) return;
+    const t = setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+    return () => clearTimeout(t);
+  }, [editOpen]);
 
   useEffect(() => {
     if (!showRenameSuccess) return;
@@ -180,30 +182,18 @@ export function ListingCard({
     return { startDate: customStart, endDate: customEnd };
   }
 
-  function startRename() {
-    setRenameError("");
-    setDraftName(displayTitle);
-    setIsRenaming(true);
-  }
-
-  function cancelRename() {
-    setIsRenaming(false);
-    setDraftName(displayTitle);
-    setRenameError("");
-  }
-
   async function commitRename() {
     if (renameSaving) return;
     const next = draftName.trim();
     if (!next || next === displayTitle) {
-      cancelRename();
+      setDraftName(displayTitle);
+      setRenameError("");
       return;
     }
     try {
       setRenameSaving(true);
       setRenameError("");
       await onRename(listing.id, next);
-      setIsRenaming(false);
       setShowRenameSuccess(true);
     } catch {
       setRenameError("Could not update name.");
@@ -219,76 +209,16 @@ export function ListingCard({
 
   return (
     <div
-      className={`py-4 px-3 cursor-pointer transition-colors hover:bg-gray-50/50 ${
-        isActive ? "border-l-2 border-l-accent pl-2.5" : ""
+      className={`px-5 py-5 cursor-pointer transition-colors hover:bg-gray-50/50 ${
+        isActive ? "border-l-3 border-l-accent pl-4" : ""
       }`}
     >
       <div onClick={onSelect}>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           {/* Left: info */}
-          <div className="min-w-0 flex-1 space-y-0.5">
-            <div className="flex items-center gap-2">
-              {isRenaming ? (
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={draftName}
-                  onChange={(e) => setDraftName(e.target.value)}
-                  onClick={(e) => e.stopPropagation()}
-                  onBlur={() => {
-                    void commitRename();
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void commitRename();
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      cancelRename();
-                    }
-                  }}
-                  aria-label="Rename listing title"
-                  className="w-full max-w-xs rounded-lg border border-border bg-white px-2 py-0.5 text-sm font-semibold outline-none focus:border-accent"
-                />
-              ) : (
-                <h3 className="truncate text-sm font-semibold">
-                  {displayTitle}
-                </h3>
-              )}
-              {!isRenaming && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    startRename();
-                  }}
-                  className="shrink-0 text-xs text-muted underline-offset-2 hover:text-foreground hover:underline"
-                  aria-label={`Rename ${displayTitle}`}
-                >
-                  Rename
-                </button>
-              )}
-              {showRenameSuccess && (
-                <span
-                  className="text-xs font-medium text-emerald-700"
-                  role="status"
-                  aria-live="polite"
-                >
-                  Updated
-                </span>
-              )}
-            </div>
-            {renameError && (
-              <p
-                className="text-xs text-rose-600"
-                role="status"
-                aria-live="polite"
-              >
-                {renameError}
-              </p>
-            )}
-            <p className="text-xs text-muted">
+          <div className="min-w-0 flex-1 space-y-1">
+            <h3 className="truncate text-base font-semibold">{displayTitle}</h3>
+            <p className="text-sm text-foreground/60">
               {attrs.propertyType
                 ? (PROPERTY_TYPE_SHORT[attrs.propertyType] ?? attrs.propertyType)
                 : ""}
@@ -297,21 +227,21 @@ export function ListingCard({
               {(attrs.bedrooms ?? 0) !== 1 ? "s" : ""} ·{" "}
               {attrs.bathrooms ?? "?"} bath
               {(attrs.bathrooms ?? 0) !== 1 ? "s" : ""}
-              <span className="mx-1.5 text-border">|</span>
-              <span className="font-medium text-foreground">{range}</span>
+            </p>
+            <p className="text-sm">
+              <span className="font-semibold text-foreground">{range}</span>
               {listing.latestLinkedAt && (
-                <>
-                  <span className="mx-1.5 text-border">|</span>
+                <span className="ml-3 text-foreground/50">
                   Analyzed{" "}
                   {new Date(listing.latestLinkedAt).toLocaleDateString()}
-                </>
+                </span>
               )}
             </p>
           </div>
 
           {/* Right: actions */}
           <div
-            className="flex shrink-0 items-center gap-1.5"
+            className="flex shrink-0 items-center gap-2"
             onClick={(e) => e.stopPropagation()}
           >
             {latest?.share_id && (
@@ -330,93 +260,144 @@ export function ListingCard({
             <Button size="sm" variant="ghost" onClick={onDelete}>
               Delete
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setEditOpen((v) => {
+                  const next = !v;
+                  if (next) {
+                    setRenameError("");
+                    setDraftName(displayTitle);
+                  }
+                  return next;
+                });
+              }}
+            >
+              {editOpen ? "Close edit" : "Edit"}
+            </Button>
           </div>
         </div>
       </div>
 
       {/* ── Inline date settings ────────────────────────────── */}
-      <div className="mt-2" onClick={(e) => e.stopPropagation()}>
-        <button
-          type="button"
-          onClick={() => setDateOpen((v) => !v)}
-          className="text-xs font-medium text-muted hover:text-foreground"
-        >
-          {dateOpen ? "Hide date settings" : "Date settings"}
-        </button>
-
-        {dateOpen && (
-          <div className="mt-2 space-y-3 rounded-lg border border-border bg-white p-3">
-            {/* Mode toggle */}
-            <div className="flex gap-1 rounded-lg border border-border p-0.5">
-              <button
-                type="button"
-                onClick={() => handleDateModeChange("next_30")}
-                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                  dateMode === "next_30"
-                    ? "bg-foreground text-white"
-                    : "text-muted hover:text-foreground"
-                }`}
-              >
-                Next 30 days
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDateModeChange("custom")}
-                className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
-                  dateMode === "custom"
-                    ? "bg-foreground text-white"
-                    : "text-muted hover:text-foreground"
-                }`}
-              >
-                Custom range
-              </button>
+      {editOpen && (
+        <div className="mt-3" onClick={(e) => e.stopPropagation()}>
+          <div className="space-y-4 rounded-xl border border-border bg-white p-4">
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-foreground">Rename</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onBlur={() => {
+                    void commitRename();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void commitRename();
+                    }
+                  }}
+                  aria-label="Rename listing title"
+                  className="w-full max-w-sm rounded-lg border border-border bg-white px-3 py-2 text-base font-semibold outline-none focus:border-accent"
+                />
+                {showRenameSuccess && (
+                  <span
+                    className="text-sm font-medium text-emerald-700"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    Updated
+                  </span>
+                )}
+              </div>
+              {renameError && (
+                <p
+                  className="text-sm text-rose-600"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {renameError}
+                </p>
+              )}
             </div>
 
-            {/* Custom date pickers */}
-            {dateMode === "custom" && (
-              <div className="flex flex-wrap items-center gap-3">
-                <label className="space-y-1">
-                  <span className="text-xs text-muted">Start</span>
-                  <input
-                    type="date"
-                    value={customStart}
-                    onChange={(e) => handleCustomStartChange(e.target.value)}
-                    className="block rounded-lg border border-border px-2.5 py-1.5 text-xs outline-none focus:border-accent"
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className="text-xs text-muted">End</span>
-                  <input
-                    type="date"
-                    value={customEnd}
-                    onChange={(e) => handleCustomEndChange(e.target.value)}
-                    min={customStart}
-                    className="block rounded-lg border border-border px-2.5 py-1.5 text-xs outline-none focus:border-accent"
-                  />
-                </label>
+            <div className="space-y-3">
+              <p className="text-sm font-semibold text-foreground">
+                Date settings
+              </p>
+              <div className="inline-flex gap-1 rounded-xl border border-border bg-gray-100/80 p-1">
+                <button
+                  type="button"
+                  onClick={() => handleDateModeChange("next_30")}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                    dateMode === "next_30"
+                      ? "bg-white text-foreground shadow-sm"
+                      : "text-foreground/60 hover:text-foreground"
+                  }`}
+                >
+                  Next 30 days
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDateModeChange("custom")}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                    dateMode === "custom"
+                      ? "bg-white text-foreground shadow-sm"
+                      : "text-foreground/60 hover:text-foreground"
+                  }`}
+                >
+                  Custom range
+                </button>
               </div>
-            )}
 
-            {/* Run analysis button */}
-            <Button
-              size="sm"
-              onClick={handleRunClick}
-              disabled={isRunning}
-            >
+              {dateMode === "custom" && (
+                <div className="flex flex-wrap items-center gap-4">
+                  <label className="space-y-1">
+                    <span className="text-sm font-medium text-foreground/60">
+                      Start
+                    </span>
+                    <input
+                      type="date"
+                      value={customStart}
+                      onChange={(e) => handleCustomStartChange(e.target.value)}
+                      className="block rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-sm font-medium text-foreground/60">
+                      End
+                    </span>
+                    <input
+                      type="date"
+                      value={customEnd}
+                      onChange={(e) => handleCustomEndChange(e.target.value)}
+                      min={customStart}
+                      className="block rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+
+            <Button size="md" onClick={handleRunClick} disabled={isRunning}>
               {isRunning ? "Queued..." : "Run analysis"}
             </Button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* ── Expanded report history ─────────────────────────── */}
       {isExpanded && (
-        <div className="mt-3 border-t border-border pt-3">
-          <p className="mb-2 text-xs font-medium">Report history</p>
+        <div className="mt-4 border-t border-border pt-4">
+          <p className="mb-3 text-sm font-semibold">Report history</p>
           {historyLoading ? (
-            <p className="text-xs text-muted">Loading...</p>
+            <p className="text-sm text-foreground/60">Loading...</p>
           ) : historyRows.length === 0 ? (
-            <p className="text-xs text-muted">No reports yet.</p>
+            <p className="text-sm text-foreground/60">No reports yet.</p>
           ) : (
             <div className="space-y-1">
               {historyRows.map((row) => {
@@ -426,13 +407,13 @@ export function ListingCard({
                   <Link
                     key={row.id}
                     href={`/r/${report.share_id}`}
-                    className="flex items-center justify-between rounded-lg px-2 py-1.5 text-xs hover:bg-gray-100"
+                    className="flex items-center justify-between rounded-xl px-3 py-2.5 text-sm hover:bg-gray-100"
                   >
-                    <span className="text-muted">
+                    <span className="text-foreground/60">
                       {new Date(row.created_at).toLocaleDateString()} (
                       {row.trigger})
                     </span>
-                    <span className="font-medium">
+                    <span className="font-semibold">
                       {report.result_summary?.nightlyMedian
                         ? `$${report.result_summary.nightlyMedian}/night`
                         : report.status}

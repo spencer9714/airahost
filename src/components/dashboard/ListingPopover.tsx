@@ -30,7 +30,6 @@ export function ListingPopover({
   useEffect(() => {
     if (open) {
       setQuery("");
-      // Small delay to let the DOM render before focusing
       const t = setTimeout(() => inputRef.current?.focus(), 0);
       return () => clearTimeout(t);
     }
@@ -57,7 +56,7 @@ export function ListingPopover({
   return (
     <div
       ref={ref}
-      className="absolute right-0 top-full z-50 mt-2 w-72 rounded-xl border border-border bg-white p-2 shadow-lg"
+      className="absolute right-0 top-full z-50 mt-2 w-80 rounded-xl border border-border bg-white p-3 shadow-lg"
     >
       <input
         ref={inputRef}
@@ -65,11 +64,11 @@ export function ListingPopover({
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder="Search listings..."
-        className="mb-2 w-full rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+        className="mb-2 w-full rounded-lg border border-border px-4 py-2.5 text-base outline-none focus:border-accent"
       />
-      <div className="max-h-48 overflow-y-auto">
+      <div className="max-h-56 overflow-y-auto">
         {filtered.length === 0 ? (
-          <p className="px-3 py-2 text-sm text-muted">No listings found</p>
+          <p className="px-4 py-3 text-base text-foreground/60">No listings found</p>
         ) : (
           filtered.map((l) => (
             <button
@@ -79,10 +78,10 @@ export function ListingPopover({
                 onSelect(l.id);
                 onClose();
               }}
-              className={`w-full rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+              className={`w-full rounded-lg px-4 py-3 text-left text-base transition-colors ${
                 selectedId === l.id
-                  ? "bg-gray-100 font-medium text-foreground"
-                  : "text-muted hover:bg-gray-50 hover:text-foreground"
+                  ? "bg-gray-100 font-semibold text-foreground"
+                  : "text-foreground/70 hover:bg-gray-50 hover:text-foreground"
               }`}
             >
               {l.name}

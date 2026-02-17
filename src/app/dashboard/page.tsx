@@ -128,8 +128,9 @@ export default function DashboardPage() {
       const loadedListings = (data.listings ?? []) as ListingRow[];
       setListings(loadedListings);
       setRecentReports((data.recentReports ?? []) as RecentReportRow[]);
-      // Auto-select: prefer most recently analyzed listing, then first saved
-      if (!activeListingId && loadedListings.length > 0) {
+      // Auto-select only once (or after delete reset): prefer most recently analyzed listing.
+      setActiveListingId((prev) => {
+        if (prev || loadedListings.length === 0) return prev;
         const withReports = loadedListings
           .filter(
             (l) =>
@@ -140,14 +141,14 @@ export default function DashboardPage() {
             const bDate = b.latestLinkedAt ?? "";
             return bDate.localeCompare(aDate);
           });
-        setActiveListingId(withReports[0]?.id ?? loadedListings[0].id);
-      }
+        return withReports[0]?.id ?? loadedListings[0].id;
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load dashboard");
     } finally {
       setLoading(false);
     }
-  }, [router, activeListingId]);
+  }, [router]);
 
   useEffect(() => {
     const supabase = getSupabaseBrowser();
@@ -326,48 +327,50 @@ export default function DashboardPage() {
   if (!authReady || loading) {
     return (
       <div className="mx-auto max-w-5xl px-6 py-10">
-        <p className="text-sm text-muted">Loading dashboard...</p>
+        <p className="text-base text-foreground/60">Loading dashboard...</p>
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-8 px-6 py-10">
+    <div className="mx-auto max-w-5xl space-y-10 px-6 py-10">
       {/* Header */}
-      <section className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <section className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="text-sm text-muted">Dashboard</p>
-          <h1 className="text-3xl font-bold">
+          <p className="text-sm font-medium uppercase tracking-wide text-foreground/50">
+            Dashboard
+          </p>
+          <h1 className="text-3xl font-bold tracking-tight">
             Welcome back, {userName || userEmail}
           </h1>
-          <p className="mt-1 text-sm text-muted">
+          <p className="mt-1 text-base text-foreground/60">
             Track your listings and optimize pricing. You currently manage{" "}
             {listingCountText}.
           </p>
         </div>
         <Link href="/tool?from=dashboard">
-          <Button size="sm">New analysis</Button>
+          <Button size="md">New analysis</Button>
         </Link>
       </section>
 
       {error && (
-        <Card>
-          <p className="text-sm text-warning">{error}</p>
-        </Card>
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-6 py-4">
+          <p className="text-base text-rose-800">{error}</p>
+        </div>
       )}
 
       {/* ═══ Section A: Today's Recommendation ═══ */}
       {activeListing && activeSummary && activeReport && (
-        <section className="space-y-5 rounded-2xl bg-gray-50/80 p-5 sm:p-6">
+        <section className="space-y-6">
           {/* Title row */}
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h2 className="text-lg font-semibold">
+              <h2 className="text-2xl font-bold tracking-tight">
                 Today&apos;s recommendation
               </h2>
-              <p className="text-sm text-muted">
+              <p className="mt-1 text-base text-foreground/60">
                 For{" "}
-                <span className="font-medium text-foreground">
+                <span className="font-semibold text-foreground">
                   {activeListing.name}
                 </span>
               </p>
@@ -377,7 +380,7 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => setListingPopoverOpen((v) => !v)}
-                  className="text-sm text-muted transition-colors hover:text-foreground"
+                  className="text-sm font-medium text-foreground/50 transition-colors hover:text-foreground"
                 >
                   Change listing
                 </button>
@@ -439,7 +442,7 @@ export default function DashboardPage() {
           {/* Smart Alerts */}
           {activeSummary && (
             <div>
-              <h3 className="mb-3 text-base font-semibold">Alerts</h3>
+              <h3 className="mb-4 text-xl font-bold tracking-tight">Alerts</h3>
               <SmartAlerts
                 summary={activeSummary}
                 compsSummary={activeSummary.compsSummary ?? null}
@@ -452,23 +455,23 @@ export default function DashboardPage() {
 
       {/* ═══ Section B: Saved Listings ═══ */}
       <section className="space-y-4">
-        <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold">Saved Listings</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-2xl font-bold tracking-tight">Saved Listings</h2>
           {listings.length > 0 && (
-            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-medium text-muted">
+            <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-semibold text-foreground/60">
               {listings.length}
             </span>
           )}
         </div>
         {listings.length === 0 ? (
           <Card className="text-center">
-            <p className="text-sm text-muted">
+            <p className="text-base text-foreground/60">
               No saved listings yet. Add your first listing to start tracking
               pricing performance.
             </p>
           </Card>
         ) : (
-          <Card>
+          <div className="rounded-2xl border border-border bg-white">
             <div className="divide-y divide-border">
               {listings.map((listing) => (
                 <ListingCard
@@ -491,38 +494,38 @@ export default function DashboardPage() {
                 />
               ))}
             </div>
-          </Card>
+          </div>
         )}
       </section>
 
       {/* Recent Reports */}
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold">Recent Reports</h2>
-        <Card>
-          {recentReports.length === 0 ? (
-            <p className="text-sm text-muted">No reports yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {recentReports.slice(0, 5).map((item) => (
-                <Link
-                  key={`${item.listingId}-${item.report.id}`}
-                  href={`/r/${item.report.share_id}`}
-                  className="flex items-center justify-between rounded-xl border border-border px-3 py-2 text-sm hover:bg-gray-50"
-                >
-                  <span>
-                    {new Date(item.linkedAt).toLocaleDateString()} -{" "}
-                    {item.listingName}
-                  </span>
-                  <span className="font-medium">
-                    {item.report.result_summary?.nightlyMedian
-                      ? `$${item.report.result_summary.nightlyMedian}/night`
-                      : item.report.status}
-                  </span>
-                </Link>
-              ))}
-            </div>
-          )}
-        </Card>
+      <section className="space-y-4">
+        <h2 className="text-2xl font-bold tracking-tight">Recent Reports</h2>
+        {recentReports.length === 0 ? (
+          <div className="rounded-2xl border border-border bg-white px-6 py-5">
+            <p className="text-base text-foreground/60">No reports yet.</p>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-border bg-white divide-y divide-border">
+            {recentReports.slice(0, 5).map((item) => (
+              <Link
+                key={`${item.listingId}-${item.report.id}`}
+                href={`/r/${item.report.share_id}`}
+                className="flex items-center justify-between px-6 py-4 text-base hover:bg-gray-50 transition-colors first:rounded-t-2xl last:rounded-b-2xl"
+              >
+                <span className="text-foreground/70">
+                  {new Date(item.linkedAt).toLocaleDateString()} –{" "}
+                  {item.listingName}
+                </span>
+                <span className="font-semibold">
+                  {item.report.result_summary?.nightlyMedian
+                    ? `$${item.report.result_summary.nightlyMedian}/night`
+                    : item.report.status}
+                </span>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
