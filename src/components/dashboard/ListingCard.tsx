@@ -241,7 +241,7 @@ export function ListingCard({
 
           {/* Right: actions */}
           <div
-            className="flex shrink-0 items-center gap-2"
+            className="flex flex-wrap items-center gap-1.5"
             onClick={(e) => e.stopPropagation()}
           >
             {latest?.share_id && (

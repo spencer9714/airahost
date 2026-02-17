@@ -244,10 +244,10 @@ export default function ToolPage() {
 
       <div className="flex flex-col gap-8 lg:flex-row">
         {/* Left — Form */}
-        <div className="flex-1 space-y-6">
+        <div className="min-w-0 flex-1 space-y-6">
           {/* Step 1 */}
           <Card
-            className={step === 1 ? "ring-2 ring-accent/20" : "opacity-80"}
+            className={`overflow-hidden ${step === 1 ? "ring-2 ring-accent/20" : "opacity-80"}`}
           >
             <button
               className="mb-4 flex w-full items-center gap-3 text-left"
@@ -420,7 +420,7 @@ export default function ToolPage() {
 
           {/* Step 2 */}
           <Card
-            className={step === 2 ? "ring-2 ring-accent/20" : "opacity-80"}
+            className={`overflow-hidden ${step === 2 ? "ring-2 ring-accent/20" : "opacity-80"}`}
           >
             <button
               className="mb-4 flex w-full items-center gap-3 text-left"
@@ -431,24 +431,28 @@ export default function ToolPage() {
             </button>
 
             {step === 2 && (
-              <div className="space-y-5">
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
-                  <Field label="Start date">
-                    <input
-                      type="date"
-                      value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
-                      className="input min-w-0"
-                    />
-                  </Field>
-                  <Field label="End date">
-                    <input
-                      type="date"
-                      value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
-                      className="input min-w-0"
-                    />
-                  </Field>
+              <div className="min-w-0 space-y-5">
+                <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
+                  <div className="min-w-0">
+                    <Field label="Start date">
+                      <input
+                        type="date"
+                        value={startDate}
+                        onChange={(e) => setStartDate(e.target.value)}
+                        className="input min-w-0"
+                      />
+                    </Field>
+                  </div>
+                  <div className="min-w-0">
+                    <Field label="End date">
+                      <input
+                        type="date"
+                        value={endDate}
+                        onChange={(e) => setEndDate(e.target.value)}
+                        className="input min-w-0"
+                      />
+                    </Field>
+                  </div>
                 </div>
                 <p className="text-sm text-muted">
                   {dateRange > 0
@@ -468,7 +472,7 @@ export default function ToolPage() {
 
           {/* Step 3 */}
           <Card
-            className={step === 3 ? "ring-2 ring-accent/20" : "opacity-80"}
+            className={`overflow-hidden ${step === 3 ? "ring-2 ring-accent/20" : "opacity-80"}`}
           >
             <button
               className="mb-4 flex w-full items-center gap-3 text-left"

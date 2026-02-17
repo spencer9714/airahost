@@ -10,8 +10,6 @@ import { RecommendationBanner } from "@/components/dashboard/RecommendationBanne
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
-import { ListingTabs } from "@/components/dashboard/ListingTabs";
-import { ListingPopover } from "@/components/dashboard/ListingPopover";
 import type {
   PropertyType,
   CalendarDay,
@@ -110,7 +108,7 @@ export default function DashboardPage() {
   const [pricingMode, setPricingMode] = useState<
     "refundable" | "nonRefundable"
   >("refundable");
-  const [listingPopoverOpen, setListingPopoverOpen] = useState(false);
+
 
   const loadDashboardData = useCallback(async () => {
     setLoading(true);
@@ -321,7 +319,6 @@ export default function DashboardPage() {
 
   function handleListingSelect(id: string) {
     setActiveListingId(id);
-    setListingPopoverOpen(false);
   }
 
   if (!authReady || loading) {
@@ -362,46 +359,25 @@ export default function DashboardPage() {
       {/* ═══ Section A: Today's Recommendation ═══ */}
       {activeListing && activeSummary && activeReport && (
         <section className="space-y-6">
-          {/* Title row */}
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2 className="text-2xl font-bold tracking-tight">
-                Today&apos;s recommendation
-              </h2>
-              <p className="mt-1 text-base text-foreground/60">
-                For{" "}
-                <span className="font-semibold text-foreground">
-                  {activeListing.name}
-                </span>
-              </p>
-            </div>
+          {/* Title row + listing selector */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="text-2xl font-bold tracking-tight">
+              Today&apos;s recommendation
+            </h2>
             {readyListings.length > 1 && (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setListingPopoverOpen((v) => !v)}
-                  className="text-sm font-medium text-foreground/50 transition-colors hover:text-foreground"
-                >
-                  Change listing
-                </button>
-                <ListingPopover
-                  open={listingPopoverOpen}
-                  onClose={() => setListingPopoverOpen(false)}
-                  listings={readyListings}
-                  selectedId={activeListing.id}
-                  onSelect={handleListingSelect}
-                />
-              </div>
+              <select
+                value={activeListing.id}
+                onChange={(e) => handleListingSelect(e.target.value)}
+                className="min-w-0 max-w-xs rounded-xl border border-border bg-white px-4 py-2.5 text-base font-semibold text-foreground outline-none focus:border-accent"
+              >
+                {readyListings.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
             )}
           </div>
-
-          {/* Listing tabs */}
-          <ListingTabs
-            listings={readyListings}
-            selectedId={activeListing.id}
-            onChange={handleListingSelect}
-            onMoreClick={() => setListingPopoverOpen(true)}
-          />
 
           {/* Recommendation card */}
           <RecommendationBanner
@@ -471,7 +447,7 @@ export default function DashboardPage() {
             </p>
           </Card>
         ) : (
-          <div className="rounded-2xl border border-border bg-white">
+          <div className="overflow-hidden rounded-2xl border border-border bg-white">
             <div className="divide-y divide-border">
               {listings.map((listing) => (
                 <ListingCard

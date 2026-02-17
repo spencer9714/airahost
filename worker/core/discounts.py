@@ -22,7 +22,6 @@ def apply_discount(
     """
     weekly_pct = policy.get("weeklyDiscountPct", 0)
     monthly_pct = policy.get("monthlyDiscountPct", 0)
-    refundable = policy.get("refundable", True)
     non_ref_pct = policy.get("nonRefundableDiscountPct", 0)
     stacking = policy.get("stackingMode", "compound")
     max_total = policy.get("maxTotalDiscountPct", 40)
@@ -34,7 +33,9 @@ def apply_discount(
     elif stay_length >= 7 and weekly_pct > 0:
         length_discount = weekly_pct / 100
 
-    non_ref_discount = 0.0 if refundable else non_ref_pct / 100
+    # Always compute non-refundable discount so both prices are available
+    # for comparison in the UI, regardless of the user's cancellation preference.
+    non_ref_discount = non_ref_pct / 100
 
     # Apply stacking mode
     if stacking == "best_only":

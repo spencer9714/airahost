@@ -65,9 +65,9 @@ function applyDiscount(
     lengthDiscount = policy.weeklyDiscountPct / 100;
   }
 
-  const nonRefDiscount = policy.refundable
-    ? 0
-    : policy.nonRefundableDiscountPct / 100;
+  // Always compute non-refundable discount so the UI can show both prices
+  // for comparison, regardless of the user's cancellation preference.
+  const nonRefDiscount = policy.nonRefundableDiscountPct / 100;
 
   let refundableDiscount: number;
   let nonRefundableDiscount: number;
