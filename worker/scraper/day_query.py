@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import statistics
 import time
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from worker.scraper.comparable_collector import (
 from worker.scraper.target_extractor import ListingSpec
 
 logger = logging.getLogger("worker.scraper.day_query")
+ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
 
 # ── Configurable constants ───────────────────────────────────────
 
@@ -61,6 +63,7 @@ class DayResult:
     is_sampled: bool = True                          # False if interpolated
     is_weekend: bool = False
     price_distribution: Dict[str, Any] = field(default_factory=dict)
+    top_comps: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -114,6 +117,32 @@ def estimate_base_price_for_date(
     Execute a 1-night Airbnb search for date_i -> date_i+1.
     Collect cards, filter by similarity to target, compute price distribution.
     """
+    def _safe_num(v: Any, fallback: Optional[float]) -> float:
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(fallback, (int, float)):
+            return float(fallback)
+        return 0.0
+
+    def _to_comparable_payload(spec: ListingSpec, score: float) -> Dict[str, Any]:
+        room_match = ROOM_ID_RE.search(spec.url or "")
+        comp_id = room_match.group(1) if room_match else (spec.url or f"comp-{int(time.time() * 1000)}")
+        return {
+            "id": comp_id,
+            "title": spec.title or "Comparable listing",
+            "propertyType": spec.property_type or target.property_type or "entire_home",
+            "accommodates": int(_safe_num(spec.accommodates, target.accommodates or 1)),
+            "bedrooms": int(_safe_num(spec.bedrooms, target.bedrooms or 1)),
+            "baths": round(_safe_num(spec.baths, target.baths or 1), 1),
+            "nightlyPrice": round(_safe_num(spec.nightly_price, None), 2),
+            "currency": spec.currency or "USD",
+            "similarity": round(float(score), 3),
+            "rating": round(float(spec.rating), 2) if isinstance(spec.rating, (int, float)) else None,
+            "reviews": int(spec.reviews) if isinstance(spec.reviews, (int, float)) else None,
+            "location": target.location or None,
+            "url": spec.url or None,
+        }
+
     checkin_str = date_i.isoformat()
     next_date = date_i + timedelta(days=1)
     checkout_str = next_date.isoformat()
@@ -173,6 +202,8 @@ def estimate_base_price_for_date(
 
         prices = [c.nightly_price for c, _ in comps_scored if c.nightly_price]
         comps_used = rec_debug.get("picked_n", 0)
+        top_comps_scored = comps_scored[: min(max(3, top_k), len(comps_scored))]
+        top_comps = [_to_comparable_payload(c, s) for c, s in top_comps_scored]
 
         # Determine flags
         flags: List[str] = []
@@ -211,6 +242,7 @@ def estimate_base_price_for_date(
             is_sampled=True,
             is_weekend=is_weekend,
             price_distribution=dist,
+            top_comps=top_comps,
         )
 
     except Exception as exc:

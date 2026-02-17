@@ -14,7 +14,9 @@
       "Bash(node -e:*)",
       "Bash(powershell:*)",
       "Bash(cmd /c \"rmdir /s /q \"\"c:\\\\Users\\\\Spencer\\\\OneDrive\\\\文件\\\\GitHub\\\\ariahost\\\\.next\"\" 2>nul & mkdir \"\"c:\\\\temp\\\\ariahost-next\"\" 2>nul & mklink /J \"\"c:\\\\Users\\\\Spencer\\\\OneDrive\\\\文件\\\\GitHub\\\\ariahost\\\\.next\"\" \"\"c:\\\\temp\\\\ariahost-next\"\"\")",
-      "Bash(cmd /c:*)"
+      "Bash(cmd /c:*)",
+      "Bash(git log:*)",
+      "Bash(wc:*)"
     ]
   }
 }

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useState, useMemo, useCallback, useRef, use } from "react";
 import Link from "next/link";
@@ -9,7 +9,7 @@ import { getSupabaseBrowser } from "@/lib/supabase";
 import type { PricingReport, CalendarDay } from "@/lib/schemas";
 import { generatePricingReport } from "@/core/pricingCore";
 
-// ── Demo report (unchanged) ───────────────────────────────────
+// Demo report (unchanged)
 function getDemoReport(): PricingReport {
   const result = generatePricingReport({
     listing: {
@@ -46,6 +46,12 @@ function getDemoReport(): PricingReport {
       bathrooms: 2,
       maxGuests: 6,
       amenities: ["wifi", "kitchen", "washer", "dryer", "free_parking", "bbq"],
+      lastMinuteStrategy: {
+        mode: "auto",
+        aggressiveness: 50,
+        floor: 0.65,
+        cap: 1.05,
+      },
     },
     inputDateStart: "2026-03-01",
     inputDateEnd: "2026-03-31",
@@ -63,7 +69,7 @@ function getDemoReport(): PricingReport {
   };
 }
 
-// ── Polling config ────────────────────────────────────────────
+// Polling config
 const POLL_INTERVAL_MS = 2_000;
 const SLOW_THRESHOLD_MS = 120_000; // 2 minutes
 
@@ -88,12 +94,10 @@ export default function ResultsPage({
   // Auth state
   const [isSignedIn, setIsSignedIn] = useState<boolean | null>(null);
 
-  // Market tracking
-  const [trackEmail, setTrackEmail] = useState("");
-  const [trackWeekly, setTrackWeekly] = useState(true);
-  const [trackUnderMarket, setTrackUnderMarket] = useState(true);
-  const [trackSubmitted, setTrackSubmitted] = useState(false);
-  const [trackLoading, setTrackLoading] = useState(false);
+  // Save-to-dashboard state
+  const [isReportSaved, setIsReportSaved] = useState<boolean | null>(null);
+  const [saveLoading, setSaveLoading] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const fetchReport = useCallback(async () => {
     try {
@@ -153,30 +157,65 @@ export default function ResultsPage({
     });
   }, []);
 
-  async function handleTrackSubmit() {
+  async function handleSaveToDashboard() {
     if (!report) return;
-    setTrackLoading(true);
+    setSaveLoading(true);
+    setSaveError("");
     try {
-      const res = await fetch("/api/track-market", {
+      const res = await fetch(`/api/reports/${report.id}/save`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: trackEmail,
-          address: report.inputAddress,
-          notifyWeekly: trackWeekly,
-          notifyUnderMarket: trackUnderMarket,
-        }),
       });
-      if (!res.ok) throw new Error("Failed");
-      setTrackSubmitted(true);
-    } catch {
-      /* ignore for MVP */
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || "Failed to save report");
+      }
+      setIsReportSaved(true);
+    } catch (err) {
+      setSaveError((err as Error).message);
     } finally {
-      setTrackLoading(false);
+      setSaveLoading(false);
     }
   }
 
-  // ── Queued / Running state ──────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkSavedStatus() {
+      if (!report?.id || isSignedIn !== true) {
+        setIsReportSaved(null);
+        return;
+      }
+
+      try {
+        setSaveError("");
+        const res = await fetch(`/api/reports/${report.id}/save`, {
+          method: "GET",
+          cache: "no-store",
+        });
+        if (res.status === 401) {
+          if (!cancelled) setIsReportSaved(false);
+          return;
+        }
+        if (!res.ok) {
+          throw new Error("Failed to check saved status");
+        }
+        const data = await res.json();
+        if (!cancelled) setIsReportSaved(Boolean(data?.saved));
+      } catch {
+        if (!cancelled) {
+          setIsReportSaved(false);
+        }
+      }
+    }
+
+    checkSavedStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [report?.id, isSignedIn]);
+
+
+  // Queued / Running state
   if (
     report &&
     (report.status === "queued" || report.status === "running") &&
@@ -218,7 +257,7 @@ export default function ResultsPage({
     );
   }
 
-  // ── Error state ─────────────────────────────────────────────
+  // Error state
   if (report && report.status === "error") {
     return (
       <div className="mx-auto max-w-5xl px-6 py-20 text-center">
@@ -241,7 +280,7 @@ export default function ResultsPage({
     );
   }
 
-  // ── Initial loading ─────────────────────────────────────────
+  // Initial loading
   if (loading) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
@@ -253,7 +292,7 @@ export default function ResultsPage({
     );
   }
 
-  // ── Not found ───────────────────────────────────────────────
+  // Not found
   if (error || !report || !report.resultSummary) {
     return (
       <div className="mx-auto max-w-5xl px-6 py-20 text-center">
@@ -263,21 +302,61 @@ export default function ResultsPage({
     );
   }
 
-  // ── Ready — show results ────────────────────────────────────
+  // Ready: show results
   const s = report.resultSummary;
-  const cal = report.resultCalendar ?? [];
   const dp = report.discountPolicy;
+  const strategyUsed = report.inputAttributes?.lastMinuteStrategy ?? {
+    mode: "auto" as const,
+    aggressiveness: 50,
+    floor: 0.65,
+    cap: 1.05,
+  };
+  const dynamicRows = (report.resultCalendar ?? []).filter(
+    (d) =>
+      d.dynamicAdjustment &&
+      typeof d.dynamicAdjustment.timeMultiplier === "number" &&
+      typeof d.dynamicAdjustment.finalMultiplier === "number" &&
+      typeof d.dynamicAdjustment.demandScore === "number"
+  );
+  const dynamicSummary =
+    dynamicRows.length > 0
+      ? (() => {
+          const timeMin = Math.min(
+            ...dynamicRows.map((d) => d.dynamicAdjustment!.timeMultiplier)
+          );
+          const timeMax = Math.max(
+            ...dynamicRows.map((d) => d.dynamicAdjustment!.timeMultiplier)
+          );
+          const finalMin = Math.min(
+            ...dynamicRows.map((d) => d.dynamicAdjustment!.finalMultiplier)
+          );
+          const finalMax = Math.max(
+            ...dynamicRows.map((d) => d.dynamicAdjustment!.finalMultiplier)
+          );
+          const avgDemandScore =
+            dynamicRows.reduce(
+              (sum, d) => sum + d.dynamicAdjustment!.demandScore,
+              0
+            ) / dynamicRows.length;
+          return { timeMin, timeMax, finalMin, finalMax, avgDemandScore };
+        })()
+      : null;
+  const toPct = (m: number) => {
+    const pct = Math.round((m - 1) * 100);
+    return `${pct > 0 ? "+" : ""}${pct}%`;
+  };
+  const pctRange = (min: number, max: number) => `${toPct(min)} to ${toPct(max)}`;
   const stayLengthAverages =
     s.stayLengthAverages && s.stayLengthAverages.length > 0
       ? s.stayLengthAverages
       : [
           {
-            stayLength: Math.min(7, cal.length || 7),
+            stayLength: Math.min(7, (report.resultCalendar?.length ?? 0) || 7),
             avgNightly: s.weeklyStayAvgNightly,
             lengthDiscountPct: 0,
           },
           {
-            stayLength: Math.min(28, cal.length || 28),
+            stayLength: Math.min(28, (report.resultCalendar?.length ?? 0) || 28),
             avgNightly: s.monthlyStayAvgNightly,
             lengthDiscountPct: 0,
           },
@@ -292,7 +371,7 @@ export default function ResultsPage({
       <p className="mb-1 text-sm text-muted">Revenue report for</p>
       <h1 className="mb-8 text-2xl font-bold">{report.inputAddress}</h1>
 
-      {/* Section 1 — Revenue Opportunity */}
+      {/* Section 1 - Revenue Opportunity */}
       <Card className="mb-6 border-accent/20 bg-accent/[0.02]">
         <p className="text-sm font-medium text-accent">Revenue Opportunity</p>
         <p className="mt-2 text-xl font-semibold">{s.insightHeadline}</p>
@@ -310,13 +389,13 @@ export default function ResultsPage({
         ) : null}
       </Card>
 
-      {/* Section 2 — Market Snapshot */}
+      {/* Section 2 - Market Snapshot */}
       <h2 className="mb-4 text-lg font-semibold">Market snapshot</h2>
       <div className="mb-8 grid gap-4 sm:grid-cols-3">
         <Card>
           <p className="text-sm text-muted">Nightly range</p>
           <p className="mt-1 text-2xl font-bold">
-            ${s.nightlyMin} – ${s.nightlyMax}
+            ${s.nightlyMin} - ${s.nightlyMax}
           </p>
           <p className="mt-1 text-sm text-muted">Median: ${s.nightlyMedian}</p>
         </Card>
@@ -326,7 +405,7 @@ export default function ResultsPage({
           <p className="mt-1 text-sm text-muted">Estimated for this area</p>
         </Card>
         <Card>
-          <p className="text-sm text-muted">Pricing strategy</p>
+          <p className="text-sm text-muted">Weekday vs weekend</p>
           <div className="mt-1 flex items-baseline gap-3">
             <div>
               <p className="text-xl font-bold">${s.weekdayAvg}</p>
@@ -358,140 +437,165 @@ export default function ResultsPage({
         </Card>
       )}
 
-      {/* Section 2.5 — How We Estimated (transparency) */}
-      {(report.targetSpec || report.resultSummary?.targetSpec) && (
+      {/* Section 2.5 - How We Estimated (transparency) */}
+      {(
+        report.targetSpec ||
+        report.resultSummary?.targetSpec ||
+        report.compsSummary ||
+        report.resultSummary?.compsSummary ||
+        report.comparableListings ||
+        report.resultSummary?.comparableListings
+      ) && (
         <HowWeEstimated report={report} />
       )}
 
-      {/* Section 3 — Price Calendar */}
+      {/* Section 3 - Price Calendar */}
       <PriceCalendar
-        calendar={cal}
+        calendar={report.resultCalendar ?? []}
         calendarView={calendarView}
         onViewChange={setCalendarView}
       />
 
-      {/* Section 4 — Discount Explanation */}
+      {/* Section 4 - Discount Explanation */}
       <h2 className="mb-4 text-lg font-semibold">
         How your discounts work
       </h2>
       <Card className="mb-8">
-        <div className="space-y-3 text-sm leading-relaxed text-muted">
-          <p>
-            Your weekly discount is{" "}
-            <strong className="text-foreground">{dp.weeklyDiscountPct}%</strong>{" "}
-            and your monthly discount is{" "}
-            <strong className="text-foreground">
-              {dp.monthlyDiscountPct}%
-            </strong>
-            .
-          </p>
-          <p>
-            Cancellation policy:{" "}
-            <strong className="text-foreground">
-              {dp.refundable ? "Refundable" : "Non-refundable"}
-            </strong>
-            {!dp.refundable && (
-              <>
-                {" "}
-                with an additional{" "}
-                <strong className="text-foreground">
-                  {dp.nonRefundableDiscountPct}%
-                </strong>{" "}
-                discount
-              </>
-            )}
-            .
-          </p>
-          <p>
-            Stacking mode:{" "}
-            <strong className="text-foreground capitalize">
-              {dp.stackingMode.replace("_", " ")}
-            </strong>{" "}
-            — max total discount capped at{" "}
-            <strong className="text-foreground">
-              {dp.maxTotalDiscountPct}%
-            </strong>
-            .
-          </p>
-          <div className="mt-4 rounded-xl bg-gray-50 p-4">
-            <p className="font-medium text-foreground">Example</p>
-            {stayLengthAverages.map((point) => (
-              <p key={point.stayLength} className="mt-1">
-                For a {point.stayLength}-night stay, average nightly after discounts is{" "}
-                <strong className="text-foreground">${point.avgNightly}</strong>
-                {point.lengthDiscountPct > 0 ? (
-                  <> (includes {point.lengthDiscountPct}% length-of-stay discount).</>
-                ) : (
-                  <> (no length-of-stay discount).</>
-                )}
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border bg-gray-50/80 p-4">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <p className="text-base font-semibold text-foreground">
+                Last-minute pricing strategy
               </p>
-            ))}
+              <span className="rounded-full border border-border bg-white px-2.5 py-1 text-xs font-medium text-foreground">
+                {strategyUsed.mode === "auto" ? "Auto" : "Custom"}
+              </span>
+            </div>
+
+            {dynamicSummary ? (
+              <div className="space-y-2">
+                <StatRow
+                  label="Time-to-check-in impact"
+                  value={pctRange(dynamicSummary.timeMin, dynamicSummary.timeMax)}
+                />
+                <StatRow
+                  label="Demand context"
+                  value={`Score: ${dynamicSummary.avgDemandScore.toFixed(2)} | Occupancy: ${s.occupancyPct}%`}
+                />
+                <StatRow
+                  label="Final adjustment"
+                  value={pctRange(dynamicSummary.finalMin, dynamicSummary.finalMax)}
+                />
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground font-medium">
+                Detailed last-minute breakdown is unavailable for this report.
+              </p>
+            )}
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="rounded-xl border border-border bg-gray-50/80 p-4">
+              <p className="mb-3 text-base font-semibold text-foreground">
+                Length-of-stay discounts
+              </p>
+              <div className="space-y-2">
+                <StatRow label="Weekly" value={`${dp.weeklyDiscountPct}%`} badge />
+                <StatRow label="Monthly" value={`${dp.monthlyDiscountPct}%`} badge />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border bg-gray-50/80 p-4">
+              <p className="mb-3 text-base font-semibold text-foreground">
+                Booking policy
+              </p>
+              <div className="space-y-2">
+                <StatRow
+                  label="Cancellation"
+                  value={dp.refundable ? "Refundable" : "Non-refundable"}
+                  badge
+                />
+                <StatRow
+                  label="Stacking mode"
+                  value={dp.stackingMode.replace("_", " ")}
+                  badge
+                  capitalize
+                />
+                <StatRow
+                  label="Max discount cap"
+                  value={`${dp.maxTotalDiscountPct}%`}
+                  badge
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-border bg-gray-50/80 p-4">
+            <p className="mb-3 text-base font-semibold text-foreground">
+              Example pricing impact
+            </p>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2">
+                <p className="text-sm text-muted">
+                  1-night stay (no length-of-stay discount)
+                </p>
+                <p className="text-sm font-semibold text-foreground tabular-nums">
+                  ${stayLengthAverages.find((x) => x.stayLength === 1)?.avgNightly ?? s.selectedRangeAvgNightly ?? s.nightlyMedian}
+                </p>
+              </div>
+              <div className="flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2">
+                <p className="text-sm text-muted">
+                  7-night stay (includes weekly discount)
+                </p>
+                <p className="text-sm font-semibold text-foreground tabular-nums">
+                  ${stayLengthAverages.find((x) => x.stayLength === 7)?.avgNightly ?? s.weeklyStayAvgNightly}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       </Card>
-
-      {/* Section 5 — Market Tracking */}
-      <h2 className="mb-4 text-lg font-semibold">Track your market</h2>
-      <Card>
-        {trackSubmitted ? (
-          <div className="py-4 text-center">
-            <p className="text-lg font-semibold text-success">
-              You&apos;re all set!
-            </p>
-            <p className="mt-2 text-sm text-muted">
-              We&apos;ll send updates to {trackEmail}.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-4">
+      {/* Section 5 - Track your market */}
+      {isSignedIn === false && (
+        <div className="mb-8">
+          <h2 className="mb-4 text-lg font-semibold">Track your market</h2>
+          <Card className="border-accent/20 bg-accent/[0.02]">
             <p className="text-sm text-muted">
-              Stay ahead of pricing changes in your market. We&apos;ll notify
-              you so you can adjust your pricing with confidence.
+              Save this report to your dashboard and track pricing over time.
             </p>
-
-            <div>
-              <label className="mb-1.5 block text-sm font-medium">
-                Email address
-              </label>
-              <input
-                type="email"
-                placeholder="you@example.com"
-                value={trackEmail}
-                onChange={(e) => setTrackEmail(e.target.value)}
-                className="w-full rounded-xl border border-border px-4 py-2.5 text-sm outline-none transition-colors focus:border-accent"
-              />
+            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+              <Link href="/login?next=/dashboard">
+                <Button size="sm">Sign up free</Button>
+              </Link>
+              <Link href="/login?next=/dashboard" className="self-start">
+                <Button size="sm" variant="secondary">
+                  Sign in
+                </Button>
+              </Link>
             </div>
+          </Card>
+        </div>
+      )}
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:gap-6">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={trackWeekly}
-                  onChange={(e) => setTrackWeekly(e.target.checked)}
-                  className="accent-accent"
-                />
-                Email me weekly updates
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={trackUnderMarket}
-                  onChange={(e) => setTrackUnderMarket(e.target.checked)}
-                  className="accent-accent"
-                />
-                Alert me if I&apos;m under market
-              </label>
+      {isSignedIn === true && isReportSaved === false && (
+        <div className="mb-8">
+          <h2 className="mb-4 text-lg font-semibold">Track your market</h2>
+          <Card>
+            <p className="text-base font-semibold text-foreground">
+              Save to your dashboard
+            </p>
+            <p className="mt-1 text-sm text-muted">
+              Keep this report and rerun analysis anytime.
+            </p>
+            {saveError && <p className="mt-3 text-sm text-rose-600">{saveError}</p>}
+            <div className="mt-4">
+              <Button onClick={handleSaveToDashboard} disabled={saveLoading}>
+                {saveLoading ? "Saving..." : "Save to dashboard"}
+              </Button>
             </div>
-
-            <Button
-              onClick={handleTrackSubmit}
-              disabled={!trackEmail.includes("@") || trackLoading}
-            >
-              {trackLoading ? "Saving..." : "Start tracking"}
-            </Button>
-          </div>
-        )}
-      </Card>
+          </Card>
+        </div>
+      )}
 
       {/* Meta */}
       <p className="mt-8 text-center text-xs text-muted">
@@ -502,7 +606,40 @@ export default function ResultsPage({
   );
 }
 
-// ── Price Calendar Component ────────────────────────────────────
+function StatRow({
+  label,
+  value,
+  badge = false,
+  capitalize = false,
+}: {
+  label: string;
+  value: string;
+  badge?: boolean;
+  capitalize?: boolean;
+}) {
+  const valueClass = "text-sm font-semibold text-foreground";
+
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-sm font-medium text-muted-foreground">{label}</p>
+      {badge ? (
+        <span
+          className={`rounded-full border border-border bg-white px-2.5 py-1 text-sm font-semibold text-foreground ${
+            capitalize ? "capitalize" : ""
+          }`}
+        >
+          {value}
+        </span>
+      ) : (
+        <p className={`${valueClass} tabular-nums ${capitalize ? "capitalize" : ""}`}>
+          {value}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Price Calendar component
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -525,7 +662,7 @@ function PriceCalendar({
   calendarView: "base" | "effective";
   onViewChange: (v: "base" | "effective") => void;
 }) {
-  // Build a lookup map: "YYYY-MM-DD" → CalendarDay
+  // Build a lookup map: "YYYY-MM-DD" -> CalendarDay
   const dayMap = useMemo(() => {
     const m = new Map<string, CalendarDay>();
     for (const d of calendar) m.set(d.date, d);
@@ -557,7 +694,7 @@ function PriceCalendar({
   const firstDow = new Date(Date.UTC(current.year, current.month, 1)).getUTCDay();
   const daysInMonth = new Date(Date.UTC(current.year, current.month + 1, 0)).getUTCDate();
 
-  // Build grid: array of weeks × 7 days, each cell is date number or null
+  // Build grid: array of weeks x 7 days; each cell is a date number or null.
   const weeks: (number | null)[][] = [];
   let week: (number | null)[] = new Array(firstDow).fill(null);
   for (let d = 1; d <= daysInMonth; d++) {
@@ -766,3 +903,7 @@ function PriceCalendar({
     </div>
   );
 }
+
+
+
+

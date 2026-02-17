@@ -218,6 +218,35 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleRenameListing(listingId: string, nextName: string) {
+    const trimmed = nextName.trim();
+    if (!trimmed) return;
+
+    const previousListings = listings;
+    const previousRecent = recentReports;
+
+    setListings((prev) =>
+      prev.map((l) => (l.id === listingId ? { ...l, name: trimmed } : l))
+    );
+    setRecentReports((prev) =>
+      prev.map((r) =>
+        r.listingId === listingId ? { ...r, listingName: trimmed } : r
+      )
+    );
+
+    const res = await fetch(`/api/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: trimmed }),
+    });
+
+    if (!res.ok) {
+      setListings(previousListings);
+      setRecentReports(previousRecent);
+      throw new Error("Failed to rename listing");
+    }
+  }
+
   // ── Derived state ──────────────────────────────────────────────
   const activeListing = useMemo(
     () => listings.find((l) => l.id === activeListingId) ?? null,
@@ -343,6 +372,7 @@ export default function DashboardPage() {
                 isExpanded={expandedListingId === listing.id}
                 historyLoading={historyLoading}
                 historyRows={historyRows}
+                onRename={handleRenameListing}
               />
             ))}
           </div>

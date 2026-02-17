@@ -48,12 +48,21 @@ html {
 /* Form inputs */
 .input {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   border-radius: 0.75rem;
   border: 1px solid var(--border);
-  padding: 0.625rem 1rem;
+  padding: 0.625rem 0.75rem;
   font-size: 0.875rem;
   outline: none;
   transition: border-color 0.2s;
+}
+
+@media (min-width: 640px) {
+  .input {
+    padding: 0.625rem 1rem;
+  }
 }
 
 .input:focus {

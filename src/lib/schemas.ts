@@ -73,6 +73,14 @@ export const discountPolicySchema = z.object({
   maxTotalDiscountPct: z.number().min(0).max(80).default(40),
 });
 
+export const lastMinuteStrategyModeEnum = z.enum(["auto", "manual"]);
+export const lastMinuteStrategyPreferenceSchema = z.object({
+  mode: lastMinuteStrategyModeEnum.default("auto"),
+  aggressiveness: z.number().int().min(0).max(100).default(50),
+  floor: z.number().min(0.65).max(0.9).default(0.65),
+  cap: z.number().min(1.0).max(1.1).default(1.05),
+});
+
 // ── Input Mode ──────────────────────────────────────────────────
 
 export const inputModeEnum = z.enum(["url", "criteria"]);
@@ -84,6 +92,7 @@ export const createReportRequestSchema = z.object({
   listing: listingInputSchema,
   dates: dateInputSchema,
   discountPolicy: discountPolicySchema,
+  lastMinuteStrategy: lastMinuteStrategyPreferenceSchema.optional(),
   listingUrl: z.string().url().optional(),
   saveToListings: z
     .object({
@@ -98,6 +107,8 @@ export type InputMode = z.infer<typeof inputModeEnum>;
 export type ListingInput = z.infer<typeof listingInputSchema>;
 export type DateInput = z.infer<typeof dateInputSchema>;
 export type DiscountPolicy = z.infer<typeof discountPolicySchema>;
+export type LastMinuteStrategyMode = z.infer<typeof lastMinuteStrategyModeEnum>;
+export type LastMinuteStrategyPreference = z.infer<typeof lastMinuteStrategyPreferenceSchema>;
 export type PropertyType = z.infer<typeof propertyTypeEnum>;
 export type Amenity = z.infer<typeof amenityEnum>;
 export type DiscountStackingMode = z.infer<typeof discountStackingModeEnum>;
@@ -111,6 +122,20 @@ export interface CalendarDay {
   basePrice: number;
   refundablePrice: number;
   nonRefundablePrice: number;
+  dynamicAdjustment?: {
+    demandScore: number;
+    confidence: "low" | "medium" | "high";
+    timeMultiplier: number;
+    demandAdjustment: number;
+    finalMultiplier: number;
+    reasons: string[];
+  };
+  // Last-minute discount transparency (newer reports)
+  baseDailyPrice?: number | null;
+  lastMinuteMultiplier?: number | null;
+  priceAfterTimeAdjustment?: number | null;
+  effectiveDailyPriceRefundable?: number | null;
+  effectiveDailyPriceNonRefundable?: number | null;
   flags?: string[]; // e.g. "peak", "low_demand", "missing_data", "interpolated"
 }
 
@@ -164,6 +189,22 @@ export interface PriceDistribution {
   currency: string;
 }
 
+export interface ComparableListing {
+  id: string;
+  title: string;
+  propertyType: string;
+  accommodates: number;
+  bedrooms: number;
+  baths: number;
+  nightlyPrice: number;
+  currency: string;
+  similarity: number; // 0–1
+  rating: number | null;
+  reviews: number | null;
+  location: string | null;
+  url: string | null;
+}
+
 export interface RecommendedPrice {
   nightly: number | null;
   weekdayEstimate: number | null;
@@ -198,6 +239,7 @@ export interface ReportSummary {
   compsSummary?: CompsSummary;
   priceDistribution?: PriceDistribution;
   recommendedPrice?: RecommendedPrice;
+  comparableListings?: ComparableListing[];
 }
 
 export interface PricingReport {
@@ -207,7 +249,11 @@ export interface PricingReport {
   status: "queued" | "running" | "ready" | "error";
   coreVersion: string;
   inputAddress: string;
-  inputAttributes: ListingInput;
+  inputAttributes: ListingInput & {
+    inputMode?: InputMode;
+    listingUrl?: string | null;
+    lastMinuteStrategy?: LastMinuteStrategyPreference;
+  };
   inputDateStart: string;
   inputDateEnd: string;
   discountPolicy: DiscountPolicy;
@@ -221,6 +267,7 @@ export interface PricingReport {
   compsSummary?: CompsSummary | null;
   priceDistribution?: PriceDistribution | null;
   recommendedPrice?: RecommendedPrice | null;
+  comparableListings?: ComparableListing[] | null;
 }
 
 // ── Saved Listings ─────────────────────────────────────────────

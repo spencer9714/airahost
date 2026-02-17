@@ -4,12 +4,15 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
+import { SegmentedControl } from "@/components/ui/SegmentedControl";
+import { SliderField } from "@/components/ui/SliderField";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import type {
   PropertyType,
   Amenity,
   DiscountStackingMode,
   InputMode,
+  LastMinuteStrategyMode,
 } from "@/lib/schemas";
 
 const PROPERTY_TYPES: { value: PropertyType; label: string }[] = [
@@ -125,6 +128,10 @@ export default function ToolPage() {
   const [stackingMode, setStackingMode] =
     useState<DiscountStackingMode>("compound");
   const [maxTotalDiscount, setMaxTotalDiscount] = useState(40);
+  const [lastMinuteMode, setLastMinuteMode] =
+    useState<LastMinuteStrategyMode>("auto");
+  const [lastMinuteAggressiveness, setLastMinuteAggressiveness] = useState(50);
+  const [lastMinuteFloor, setLastMinuteFloor] = useState(0.65);
 
   // Submit
   const [loading, setLoading] = useState(false);
@@ -181,6 +188,12 @@ export default function ToolPage() {
             stackingMode,
             maxTotalDiscountPct: maxTotalDiscount,
           },
+          lastMinuteStrategy: {
+            mode: lastMinuteMode,
+            aggressiveness: lastMinuteAggressiveness,
+            floor: lastMinuteFloor,
+            cap: 1.05,
+          },
           listingUrl: inputMode === "url" ? listingUrl : undefined,
           saveToListings:
             isSignedIn && saveToListings
@@ -223,9 +236,9 @@ export default function ToolPage() {
   );
 
   return (
-    <div className="mx-auto max-w-5xl px-6 py-10">
-      <h1 className="mb-2 text-3xl font-bold">Analyze your listing</h1>
-      <p className="mb-8 text-muted">
+    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
+      <h1 className="mb-2 text-2xl font-bold sm:text-3xl">Analyze your listing</h1>
+      <p className="mb-6 text-sm text-muted sm:mb-8 sm:text-base">
         Tell us about your property and pricing strategy.
       </p>
 
@@ -247,10 +260,10 @@ export default function ToolPage() {
             {step === 1 && (
               <div className="space-y-5">
                 {/* Mode toggle */}
-                <div className="flex gap-2 rounded-xl bg-gray-100 p-1">
+                <div className="flex gap-1 rounded-xl bg-gray-100 p-1 sm:gap-2">
                   <button
                     onClick={() => setInputMode("url")}
-                    className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
+                    className={`flex-1 rounded-lg px-2 py-2 text-xs font-medium transition-all sm:px-4 sm:text-sm ${
                       inputMode === "url"
                         ? "bg-white text-foreground shadow-sm"
                         : "text-muted hover:text-foreground"
@@ -260,7 +273,7 @@ export default function ToolPage() {
                   </button>
                   <button
                     onClick={() => setInputMode("criteria")}
-                    className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
+                    className={`flex-1 rounded-lg px-2 py-2 text-xs font-medium transition-all sm:px-4 sm:text-sm ${
                       inputMode === "criteria"
                         ? "bg-white text-foreground shadow-sm"
                         : "text-muted hover:text-foreground"
@@ -272,14 +285,14 @@ export default function ToolPage() {
 
                 {inputMode === "url" ? (
                   /* Mode A: URL input */
-                  <div className="space-y-3">
+                  <div className="space-y-3 overflow-hidden">
                     <Field label="Airbnb listing URL">
                       <input
                         type="url"
-                        placeholder="https://www.airbnb.com/rooms/12345678"
+                        placeholder="https://airbnb.com/rooms/123..."
                         value={listingUrl}
                         onChange={(e) => setListingUrl(e.target.value)}
-                        className="input"
+                        className="input min-w-0"
                       />
                     </Field>
                     <p className="text-xs text-muted">
@@ -318,7 +331,7 @@ export default function ToolPage() {
                       </div>
                     </Field>
 
-                    <div className="grid grid-cols-3 gap-4">
+                    <div className="grid grid-cols-3 gap-2 sm:gap-4">
                       <Field label="Bedrooms">
                         <Stepper
                           value={bedrooms}
@@ -419,13 +432,13 @@ export default function ToolPage() {
 
             {step === 2 && (
               <div className="space-y-5">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
                   <Field label="Start date">
                     <input
                       type="date"
                       value={startDate}
                       onChange={(e) => setStartDate(e.target.value)}
-                      className="input"
+                      className="input min-w-0"
                     />
                   </Field>
                   <Field label="End date">
@@ -433,7 +446,7 @@ export default function ToolPage() {
                       type="date"
                       value={endDate}
                       onChange={(e) => setEndDate(e.target.value)}
-                      className="input"
+                      className="input min-w-0"
                     />
                   </Field>
                 </div>
@@ -532,58 +545,119 @@ export default function ToolPage() {
 
                 {showAdvanced3 && (
                   <div className="space-y-4 rounded-xl bg-gray-50 p-4">
-                    <Field label="Discount stacking mode">
-                      <div className="flex flex-wrap gap-2">
-                        {(
-                          [
-                            {
-                              value: "compound" as const,
-                              label: "Compound",
-                              desc: "Discounts multiply",
-                            },
-                            {
-                              value: "best_only" as const,
-                              label: "Best only",
-                              desc: "Largest wins",
-                            },
-                            {
-                              value: "additive" as const,
-                              label: "Additive",
-                              desc: "Discounts add up",
-                            },
-                          ] as const
-                        ).map((m) => (
-                          <button
-                            key={m.value}
-                            onClick={() => setStackingMode(m.value)}
-                            className={`rounded-xl border px-4 py-2 text-sm transition-all ${
-                              stackingMode === m.value
-                                ? "border-accent bg-accent/5 text-accent"
-                                : "border-border hover:border-foreground/30"
+                    <div className="border-t border-border/70 pt-4">
+                      <div className="space-y-4 rounded-xl border border-border bg-white p-5">
+                        <div>
+                          <p className="text-base font-semibold text-foreground">
+                            Advanced pricing strategy
+                          </p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            Automatically adjust prices as dates approach if nights remain unbooked.
+                          </p>
+                        </div>
+
+                        <Field label="Discount stacking mode">
+                          <div className="flex flex-wrap gap-2">
+                            {(
+                              [
+                                {
+                                  value: "compound" as const,
+                                  label: "Compound",
+                                  desc: "Discounts multiply",
+                                },
+                                {
+                                  value: "best_only" as const,
+                                  label: "Best only",
+                                  desc: "Largest wins",
+                                },
+                                {
+                                  value: "additive" as const,
+                                  label: "Additive",
+                                  desc: "Discounts add up",
+                                },
+                              ] as const
+                            ).map((m) => (
+                              <button
+                                key={m.value}
+                                onClick={() => setStackingMode(m.value)}
+                                className={`rounded-xl border px-4 py-2 text-sm transition-all ${
+                                  stackingMode === m.value
+                                    ? "border-accent bg-accent/5 text-accent"
+                                    : "border-border hover:border-foreground/30"
+                                }`}
+                              >
+                                <span className="font-medium">{m.label}</span>
+                                <span className="ml-1 text-xs text-muted-foreground">
+                                  ({m.desc})
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </Field>
+
+                        <Field label={`Max total discount cap: ${maxTotalDiscount}%`}>
+                          <input
+                            type="range"
+                            min={0}
+                            max={80}
+                            value={maxTotalDiscount}
+                            onChange={(e) =>
+                              setMaxTotalDiscount(Number(e.target.value))
+                            }
+                            className="w-full accent-accent"
+                          />
+                        </Field>
+
+                        <div className="border-t border-border/70 pt-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-foreground">
+                              Last-minute pricing strategy
+                            </p>
+                            <SegmentedControl
+                              value={lastMinuteMode}
+                              onChange={setLastMinuteMode}
+                              options={[
+                                { label: "Auto (Recommended)", value: "auto" },
+                                { label: "Customize", value: "manual" },
+                              ]}
+                            />
+                          </div>
+
+                          <div
+                            className={`overflow-hidden transition-all duration-300 ease-out ${
+                              lastMinuteMode === "manual"
+                                ? "max-h-96 opacity-100"
+                                : "max-h-0 opacity-0"
                             }`}
                           >
-                            <span className="font-medium">{m.label}</span>
-                            <span className="ml-1 text-xs text-muted">
-                              ({m.desc})
-                            </span>
-                          </button>
-                        ))}
+                            <div className="space-y-4 pt-4">
+                              <SliderField
+                                label="Discount aggressiveness"
+                                value={lastMinuteAggressiveness}
+                                min={0}
+                                max={100}
+                                step={1}
+                                displayValue={`${lastMinuteAggressiveness}`}
+                                helperText="Higher = larger last-minute discounts if dates remain unbooked"
+                                onChange={setLastMinuteAggressiveness}
+                              />
+                              <SliderField
+                                label="Minimum price floor"
+                                value={lastMinuteFloor}
+                                min={0.65}
+                                max={0.9}
+                                step={0.01}
+                                displayValue={lastMinuteFloor.toFixed(2)}
+                                helperText="Never discount below this level"
+                                onChange={(v) =>
+                                  setLastMinuteFloor(Number(v.toFixed(2)))
+                                }
+                              />
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                    </Field>
-                    <Field
-                      label={`Max total discount cap: ${maxTotalDiscount}%`}
-                    >
-                      <input
-                        type="range"
-                        min={0}
-                        max={80}
-                        value={maxTotalDiscount}
-                        onChange={(e) =>
-                          setMaxTotalDiscount(Number(e.target.value))
-                        }
-                        className="w-full accent-accent"
-                      />
-                    </Field>
+                    </div>
                   </div>
                 )}
 
@@ -706,6 +780,14 @@ export default function ToolPage() {
                   label="Cancellation"
                   value={refundable ? "Refundable" : "Non-refundable"}
                 />
+                <SummaryRow
+                  label="Last-minute strategy"
+                  value={
+                    lastMinuteMode === "auto"
+                      ? "Auto (recommended)"
+                      : `Custom (Agg ${lastMinuteAggressiveness}, Floor ${lastMinuteFloor.toFixed(2)})`
+                  }
+                />
               </div>
             </Card>
           </div>
@@ -746,18 +828,18 @@ function Stepper({
   step?: number;
 }) {
   return (
-    <div className="flex items-center gap-3">
+    <div className="flex items-center gap-1.5 sm:gap-3">
       <button
         onClick={() => onChange(Math.max(min, value - step))}
-        className="flex h-9 w-9 items-center justify-center rounded-full border border-border text-lg transition-colors hover:border-foreground/40"
+        className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-base transition-colors hover:border-foreground/40 sm:h-9 sm:w-9 sm:text-lg"
         disabled={value <= min}
       >
         -
       </button>
-      <span className="w-8 text-center font-medium">{value}</span>
+      <span className="w-6 text-center text-sm font-medium sm:w-8 sm:text-base">{value}</span>
       <button
         onClick={() => onChange(Math.min(max, value + step))}
-        className="flex h-9 w-9 items-center justify-center rounded-full border border-border text-lg transition-colors hover:border-foreground/40"
+        className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-base transition-colors hover:border-foreground/40 sm:h-9 sm:w-9 sm:text-lg"
         disabled={value >= max}
       >
         +

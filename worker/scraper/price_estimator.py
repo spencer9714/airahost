@@ -94,6 +94,36 @@ def _build_daily_transparent_result(
 
     total_comps_collected = sum(r.get("comps_collected", 0) for r in all_day_results)
     total_comps_used = sum(r.get("comps_used", 0) for r in all_day_results)
+    comparable_index: Dict[str, Dict[str, Any]] = {}
+    for day_result in all_day_results:
+        for comp in day_result.get("top_comps", []) or []:
+            comp_id = str(comp.get("id") or comp.get("url") or "").strip()
+            if not comp_id:
+                continue
+            score = float(comp.get("similarity") or 0.0)
+            if comp_id not in comparable_index:
+                comparable_index[comp_id] = {
+                    "item": dict(comp),
+                    "score_sum": score,
+                    "count": 1,
+                }
+            else:
+                comparable_index[comp_id]["score_sum"] += score
+                comparable_index[comp_id]["count"] += 1
+
+    comparable_listings: List[Dict[str, Any]] = []
+    for state in comparable_index.values():
+        item = dict(state["item"])
+        avg_score = state["score_sum"] / max(1, state["count"])
+        item["similarity"] = round(avg_score, 3)
+        comparable_listings.append(item)
+    comparable_listings.sort(
+        key=lambda row: (
+            -float(row.get("similarity") or 0.0),
+            float(row.get("nightlyPrice") or 0.0),
+        )
+    )
+    comparable_listings = comparable_listings[:20]
 
     # Price distribution from aggregated daily medians
     price_dist: Dict[str, Any] = {
@@ -156,6 +186,7 @@ def _build_daily_transparent_result(
             "discountApplied": 0.0,
             "notes": "",
         },
+        "comparableListings": comparable_listings,
         "debug": {
             "source": source,
             "extractionWarnings": extraction_warnings,
@@ -291,6 +322,7 @@ def run_scrape(
                     "compsSummary": None,
                     "priceDistribution": None,
                     "recommendedPrice": None,
+                    "comparableListings": None,
                     "debug": {
                         "source": "scrape",
                         "error": "Cannot determine location from listing page.",
@@ -379,6 +411,7 @@ def run_scrape(
                     "is_sampled": dr.is_sampled,
                     "is_weekend": dr.is_weekend,
                     "price_distribution": dr.price_distribution,
+                    "top_comps": dr.top_comps,
                     "error": dr.error,
                 })
 
@@ -503,6 +536,7 @@ def run_criteria_search(
             "compsSummary": None,
             "priceDistribution": None,
             "recommendedPrice": None,
+            "comparableListings": None,
             "debug": {
                 "source": "criteria",
                 "error": f"CDP unavailable: {cdp_reason}",
@@ -562,6 +596,7 @@ def run_criteria_search(
                     "compsSummary": {"collected": 0, "afterFiltering": 0, "usedForPricing": 0, "filterStage": "empty", "topSimilarity": None, "avgSimilarity": None},
                     "priceDistribution": None,
                     "recommendedPrice": None,
+                    "comparableListings": None,
                     "debug": {
                         "source": "criteria",
                         "error": "No listings found in search results",
@@ -646,6 +681,7 @@ def _empty_transparent(source: str, error: str) -> Dict[str, Any]:
         "compsSummary": None,
         "priceDistribution": None,
         "recommendedPrice": None,
+        "comparableListings": None,
         "debug": {
             "source": source,
             "error": error,

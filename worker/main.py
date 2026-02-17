@@ -36,6 +36,7 @@ from worker.core.discounts import (
     average_refundable_price_for_stay,
     build_stay_length_averages,
 )
+from worker.core.dynamic_pricing import compute_dynamic_pricing_adjustment
 # mock_core removed — scrape failures now mark jobs as error
 
 # ---------------------------------------------------------------------------
@@ -208,7 +209,28 @@ def _build_scrape_calendar(
 
     start = dt.strptime(start_date, "%Y-%m-%d").replace(tzinfo=tz.utc)
     end = dt.strptime(end_date, "%Y-%m-%d").replace(tzinfo=tz.utc)
+    today = dt.now(tz.utc).date()
     total_days = max(1, (end - start).days)
+
+    def _policy_num(*keys: str) -> Optional[float]:
+        for key in keys:
+            if key in discount_policy and discount_policy.get(key) is not None:
+                try:
+                    return float(discount_policy[key])
+                except Exception:
+                    continue
+        return None
+
+    def _cap_price(price_value: int, floor_value: Optional[float], ceiling_value: Optional[float]) -> int:
+        out = float(price_value)
+        if floor_value is not None:
+            out = max(out, float(floor_value))
+        if ceiling_value is not None:
+            out = min(out, float(ceiling_value))
+        return round(out)
+
+    min_price_floor = _policy_num("minPriceFloor", "min_price_floor")
+    max_price_ceiling = _policy_num("maxPriceCeiling", "max_price_ceiling")
 
     # Build a date -> daily_result lookup
     dr_map: Dict[str, Dict] = {}
@@ -225,35 +247,89 @@ def _build_scrape_calendar(
 
     overall_median = round(_stats.median(valid_prices))
 
-    # Build calendar days using per-day prices
-    calendar = []
+    # Build calendar inputs used by the unified dynamic adjustment pipeline.
+    calendar_inputs = []
     for i in range(total_days):
+        d = start + td(days=i)
+        ds = d.strftime("%Y-%m-%d")
+        dr = dr_map.get(ds)
+        raw_base = dr.get("median_price") if dr else None
+        base_daily_price = round(raw_base) if raw_base is not None else None
+        calendar_inputs.append(
+            {
+                "date": d.date(),
+                "baseDailyPrice": base_daily_price,
+                "compsUsed": int((dr or {}).get("comps_used") or 0),
+                "priceDistribution": (dr or {}).get("price_distribution") or {},
+                "flags": list((dr or {}).get("flags") or []),
+            }
+        )
+
+    dynamic_rows = compute_dynamic_pricing_adjustment(today, calendar_inputs)
+
+    # Build calendar days with discounts after dynamic layer.
+    calendar = []
+    for i, dynamic in enumerate(dynamic_rows):
         d = start + td(days=i)
         ds = d.strftime("%Y-%m-%d")
         dow = d.weekday()
         is_weekend = dow >= 4  # Fri, Sat
 
-        dr = dr_map.get(ds)
-        if dr and dr.get("median_price") is not None:
-            base_price = round(dr["median_price"])
-        else:
-            base_price = overall_median
+        base_daily_price = dynamic.get("baseDailyPrice")
+        price_after_time_adjustment = dynamic.get("priceAfterTimeAdjustment")
+        flags = list(dynamic.get("flags") or [])
 
-        disc = apply_discount(base_price, total_days, discount_policy)
+        if price_after_time_adjustment is not None:
+            disc = apply_discount(price_after_time_adjustment, total_days, discount_policy)
+            effective_refundable = _cap_price(
+                disc["refundablePrice"],
+                min_price_floor,
+                max_price_ceiling,
+            )
+            effective_non_refundable = _cap_price(
+                disc["nonRefundablePrice"],
+                min_price_floor,
+                max_price_ceiling,
+            )
+            legacy_base_price = price_after_time_adjustment
+            legacy_refundable = effective_refundable
+            legacy_non_refundable = effective_non_refundable
+        else:
+            # Keep legacy fields numeric for backward-compatible UI rendering.
+            legacy_base_price = overall_median
+            legacy_disc = apply_discount(legacy_base_price, total_days, discount_policy)
+            legacy_refundable = _cap_price(
+                legacy_disc["refundablePrice"],
+                min_price_floor,
+                max_price_ceiling,
+            )
+            legacy_non_refundable = _cap_price(
+                legacy_disc["nonRefundablePrice"],
+                min_price_floor,
+                max_price_ceiling,
+            )
+            effective_refundable = None
+            effective_non_refundable = None
 
         entry: Dict[str, Any] = {
             "date": ds,
             "dayOfWeek": DAY_NAMES[dow],
             "isWeekend": is_weekend,
-            "basePrice": base_price,
-            "refundablePrice": disc["refundablePrice"],
-            "nonRefundablePrice": disc["nonRefundablePrice"],
+            # Legacy keys retained.
+            "basePrice": legacy_base_price,
+            "refundablePrice": legacy_refundable,
+            "nonRefundablePrice": legacy_non_refundable,
+            # Unified dynamic-adjustment fields.
+            "baseDailyPrice": base_daily_price,
+            "dynamicAdjustment": dynamic.get("dynamicAdjustment"),
+            "lastMinuteMultiplier": (dynamic.get("dynamicAdjustment") or {}).get(
+                "timeMultiplier"
+            ),
+            "priceAfterTimeAdjustment": price_after_time_adjustment,
+            "effectiveDailyPriceRefundable": effective_refundable,
+            "effectiveDailyPriceNonRefundable": effective_non_refundable,
+            "flags": flags,
         }
-
-        # Add flags from day result
-        if dr and dr.get("flags"):
-            entry["flags"] = dr["flags"]
-
         calendar.append(entry)
 
     # Summary
@@ -526,6 +602,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             summary["compsSummary"] = transparent_result.get("compsSummary")
             summary["priceDistribution"] = transparent_result.get("priceDistribution")
             summary["recommendedPrice"] = transparent_result.get("recommendedPrice")
+            summary["comparableListings"] = transparent_result.get("comparableListings")
 
         # Write results
         db_helpers.complete_job(

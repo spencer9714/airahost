@@ -2,6 +2,7 @@ import { Card } from "@/components/Card";
 import type { CompsSummary, PriceDistribution } from "@/lib/schemas";
 
 const STAGE_BADGES: Record<string, { label: string; color: string }> = {
+  day_by_day: { label: "Live market data", color: "bg-sky-50 text-sky-700" },
   strict: { label: "Strict match", color: "bg-emerald-50 text-emerald-700" },
   medium: { label: "Medium match", color: "bg-amber-50 text-amber-700" },
   fallback_all: { label: "Broad match", color: "bg-rose-50 text-rose-700" },
@@ -72,7 +73,7 @@ export function CompsDistributionCard({
     <Card>
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-sm font-semibold text-muted">
-          Comparable listings
+          Pricing data quality
         </h3>
         <span
           className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${badge.color}`}

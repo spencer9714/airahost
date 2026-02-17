@@ -377,7 +377,10 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
     if bedrooms is None:
         warnings.append("Could not extract bedroom count")
 
-    # Property type
+    # Property type — scan top ~80 lines of body text
+    top_slice = "\n".join(
+        ln.strip() for ln in (body_text.splitlines()[:80]) if ln.strip()
+    )
     for ln in top_slice.splitlines():
         if any(k in ln.lower() for k in ["entire", "private room", "shared room"]) or any(
             k in ln for k in ["整套", "獨立房間", "合住房間"]

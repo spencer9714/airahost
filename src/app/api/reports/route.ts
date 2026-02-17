@@ -50,6 +50,7 @@ export async function POST(req: NextRequest) {
       listing,
       dates,
       discountPolicy,
+      lastMinuteStrategy,
       listingUrl,
       saveToListings,
     } = parsed.data;
@@ -124,6 +125,12 @@ export async function POST(req: NextRequest) {
       ...listing,
       inputMode,
       listingUrl: listingUrl || null,
+      lastMinuteStrategy: lastMinuteStrategy ?? {
+        mode: "auto",
+        aggressiveness: 50,
+        floor: 0.65,
+        cap: 1.05,
+      },
     };
 
     const report = {
@@ -154,6 +161,7 @@ export async function POST(req: NextRequest) {
           date_start: dates.startDate,
           date_end: dates.endDate,
           discount_policy: discountPolicy,
+          last_minute_strategy: enrichedInputAttributes.lastMinuteStrategy,
         },
         created_at: new Date().toISOString(),
       },
