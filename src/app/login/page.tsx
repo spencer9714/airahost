@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
+import { sendGAEvent } from '@next/third-parties/google'
 
 export default function LoginPage() {
   return (
@@ -64,6 +65,15 @@ function LoginContent() {
       if (signInError) {
         setError(signInError.message);
       } else {
+        sendGAEvent('event', 'login', { 
+          method: 'Google' // or 'Email', etc.
+        })
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user?.id != null){
+          sendGAEvent('config', 'G-BQDLEE3VSF', {
+            userid: user.id
+          })
+        }
         router.push(next);
         router.refresh();
       }
