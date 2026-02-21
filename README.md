@@ -64,7 +64,6 @@ worker/
 supabase/
   migrations/        # SQL migration files (001, 002, 003)
 docs/
-  ARCHITECTURE.md    # System architecture + data model
   PROJECT_MEMORY.md  # Full project context for development
   openapi.yaml       # API specification
 ```

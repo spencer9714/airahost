@@ -293,11 +293,20 @@ evenly-spaced dates and interpolate the rest.
 
 ---
 
-## 9. Next Iteration Backlog
+## 9. Remaining Work
+
+### Observability + Guardrails
+- [ ] Standardize debug payload shape across all scrape modes
+- [ ] Add health check endpoint for worker/CDP readiness
+- [ ] Surface "no comps found" reason in debug and user-safe message
+
+### Testing
+- [ ] Unit tests for `daterange_nights`, `compute_sample_dates`, `interpolate_missing_days`
+- [ ] Integration test: submit 7-night URL report, verify per-day price variation
+- [ ] E2E test: full flow from `/tool` to `/r/{shareId}`
 
 ### Data Quality
 - [ ] Improve scraper reliability (handle CAPTCHAs, anti-bot)
-- [ ] Add real market data sources beyond Airbnb search
 - [ ] Geocoding + address normalization
 - [ ] Comp-set quality scoring
 
@@ -305,18 +314,15 @@ evenly-spaced dates and interpolate the rest.
 - [ ] Email service integration (Resend / SendGrid)
 - [ ] Weekly market digest emails
 - [ ] Under-market price alerts
-- [ ] Unsubscribe flow
 
-### Growth
-- [ ] SEO optimization (meta tags, OG images)
-- [ ] Share report via social media
-- [ ] Report comparison feature
-- [ ] Multi-listing portfolio support
+---
 
-### Tech Debt
-- [ ] Error boundaries on client pages
-- [ ] E2E tests (Playwright)
-- [ ] Unit tests for pricing core + worker
-- [ ] Input sanitization for address field
-- [ ] Accessibility audit (WCAG 2.1 AA)
-- [ ] Horizontal worker scaling (multiple instances)
+## 10. Failure Modes & Fixes
+
+- **CDP not reachable:** Worker marks job as error with "Service is busy" message. Start Chrome with `--remote-debugging-port=9222`.
+- **Stale jobs stuck in running:** Heartbeat + stale window reclaims via `claim_pricing_report`.
+- **No comps found:** Day marked as `missing_data`, interpolated from neighbors. If all days fail, job marked as error.
+- **Supabase RLS errors:** Validate policies; route uses auth-context client for user tables.
+- **Vercel env missing:** Set `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` in Vercel dashboard.
+
+---
