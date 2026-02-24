@@ -513,6 +513,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     return
 
             except ValueError as exc:
+                logger.exception(f"[{report_id}] ValueError in URL mode")
                 _fail(str(exc), str(exc))
                 return
 
@@ -565,6 +566,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     return
 
             except ValueError as exc:
+                logger.exception(f"[{report_id}] ValueError in criteria mode")
                 _fail(str(exc), str(exc))
                 return
 
