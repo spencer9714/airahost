@@ -1,5 +1,5 @@
 export const metadata = {
-  title: 'Report',
+  title: 'Your Report',
 }
 
 export default function ReportLayout({

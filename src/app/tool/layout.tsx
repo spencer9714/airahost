@@ -1,5 +1,5 @@
 export const metadata = {
-  title: 'Pricing',
+  title: 'Analyze your listing',
 }
 
 export default function ToolLayout({
