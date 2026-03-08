@@ -1,3 +1,7 @@
+export const metadata = {
+  title: 'Report',
+}
+
 export default function ReportLayout({
   children,
 }: {
