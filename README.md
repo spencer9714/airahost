@@ -28,12 +28,12 @@ The demo report (`/r/demo`) uses a deterministic pricing engine. Real reports re
 The worker scrapes Airbnb via Playwright CDP for real pricing data.
 
 1. Start Chrome with remote debugging:
-   ````powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=$env:USERPROFILE\chrome-cdp-profile
-   ```
-2. Copy `worker/.env.example` to `worker/.env` and fill in credentials
-3. Install Python dependencies: `pip install -r worker/requirements.txt`
-4. Run: `python -m worker.main`
+```powershel
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:USERPROFILE\chrome-cdp-profile"
+```
+3. Copy `worker/.env.example` to `worker/.env` and fill in credentials
+4. Install Python dependencies: `pip install -r worker/requirements.txt`
+5. Run: `python -m worker.main`
 
 See `worker/README.md` for 24/7 operation via NSSM.
 
