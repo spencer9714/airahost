@@ -54,8 +54,9 @@ Before pushing code, you should verify these steps on your machine to avoid brea
 ### A. Testing the Frontend (Next.js)
 
 1.  Navigate to repo root: `cd airahost/`
-2.  **Lint**: `npm run lint`
-3.  **Build**:
+2.  **Install Deps**: `npm ci`
+3.  **Lint**: `npm run lint`
+4.  **Build**:
     ```bash
     # Mac/Linux
     NEXT_PUBLIC_SUPABASE_URL="https://mock.url" \
