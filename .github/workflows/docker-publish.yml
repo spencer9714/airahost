@@ -39,7 +39,7 @@ jobs:
           images: ghcr.io/${{ env.REPO_LOWER }}/worker
           tags: |
             type=raw,value=latest
-            type=sha
+            type=raw,value=${{ github.event.workflow_run.head_sha }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
