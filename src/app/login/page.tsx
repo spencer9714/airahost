@@ -83,6 +83,7 @@ function LoginContent() {
 
   return (
     <div className="mx-auto max-w-md px-6 py-16">
+      <title>login</title>
       <h1 className="mb-2 text-center text-3xl font-bold">
         {mode === "signin" ? "Welcome back" : "Create account"}
       </h1>
