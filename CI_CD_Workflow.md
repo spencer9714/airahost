@@ -8,7 +8,7 @@ The pipeline consists of three sequential workflows:
 
 ```mermaid
 graph TD
-    A[Push to main] -->|Trigger| B(CI Workflow)
+    A[Push to main or PR to main] -->|Trigger| B(CI Workflow)
     B -->|Success| C(Docker Publish Workflow)
     C -->|Success| D(Deploy Workflow)
 
@@ -30,16 +30,20 @@ graph TD
 
 ### Workflows
 
-1.  **`ci.yml`**: Runs on every push.
-    *   **Frontend**: Installs deps, runs ESLint, attempts a build.
-    *   **Worker**: Installs Python deps, runs `flake8` (linting), runs `pytest` (unit tests).
-2.  **`docker-publish.yml`**: Runs only after `ci.yml` succeeds on `main`.
+1.  **`ci.yml`**: Runs on:
+    * `push` to `main`
+    * `pull_request` targeting `main`
+    * Frontend job: installs deps, runs ESLint, attempts a build.
+    * Worker job: installs Python deps, installs Playwright Chromium, runs `flake8`, runs `pytest`.
+2.  **`docker-publish.yml`**: Runs only after `ci.yml` succeeds for a `push` on `main`.
     *   Builds the Python worker Docker image.
-    *   Publishes it to GitHub Container Registry (ghcr.io) tagged with the commit SHA.
+    *   Publishes it to GitHub Container Registry (ghcr.io) with:
+        * `latest`
+        * full commit SHA (`github.event.workflow_run.head_sha`)
 3.  **`deploy.yml`**: Runs only after `docker-publish.yml` succeeds.
     *   Copies `deploy.sh` to the production server.
     *   Connects via SSH and executes `deploy.sh`.
-    *   **`deploy.sh`**: Logs into Docker, pulls the specific SHA image, stops the old container, and starts the new one.
+    *   **`deploy.sh`**: Logs into GHCR, pulls the specific full-SHA image, stops the old container, and starts the new one.
 
 ---
 
@@ -49,7 +53,7 @@ Before pushing code, you should verify these steps on your machine to avoid brea
 
 ### A. Testing the Frontend (Next.js)
 
-1.  Navigate to root: `cd ariahost/`
+1.  Navigate to repo root: `cd airahost/`
 2.  **Lint**: `npm run lint`
 3.  **Build**:
     ```bash
@@ -62,10 +66,11 @@ Before pushing code, you should verify these steps on your machine to avoid brea
 
 ### B. Testing the Worker (Python)
 
-1.  Navigate to worker: `cd ariahost/worker`
+1.  Navigate to worker: `cd airahost/worker`
 2.  **Install Deps**: `pip install -r requirements.txt pytest flake8`
-3.  **Lint**: `flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics`
-4.  **Test**:
+3.  **Install Playwright Browser**: `playwright install chromium`
+4.  **Lint**: `flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics`
+5.  **Test**:
     ```bash
     # Mac/Linux
     export PYTHONPATH=..:$PYTHONPATH
@@ -80,7 +85,7 @@ Before pushing code, you should verify these steps on your machine to avoid brea
 
 Ensure your `Dockerfile` works and the directory structure is correct.
 
-1.  Navigate to root: `cd ariahost/`
+1.  Navigate to repo root: `cd airahost/`
 2.  **Build**:
     ```bash
     docker build -t airahost-worker:local -f worker/Dockerfile ./worker
@@ -102,8 +107,10 @@ You can simulate the deployment script logic locally if you have Docker installe
 
 1.  **Set Env Vars** (Mock values):
     ```bash
-    export IMAGE_NAME="airahost-worker"
-    export IMAGE_TAG="local"
+    export GITHUB_REPOSITORY="your-org/airahost"
+    export GITHUB_SHA="your-full-commit-sha"
+    export GITHUB_TOKEN="ghp_xxx"
+    export GITHUB_ACTOR="your-github-username"
     export CONTAINER_NAME="airahost-worker-test"
     export SUPABASE_URL="mock"
     export SUPABASE_SERVICE_ROLE_KEY="mock"
@@ -112,6 +119,13 @@ You can simulate the deployment script logic locally if you have Docker installe
 
 2.  **Run logic manually**:
     ```bash
+    IMAGE_NAME="ghcr.io/${GITHUB_REPOSITORY,,}/worker"
+    IMAGE_TAG="${GITHUB_SHA}"
+
+    # Login and pull (same as deploy.sh behavior)
+    echo "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+    docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+
     # Stop old
     docker stop "$CONTAINER_NAME" || true
     docker rm "$CONTAINER_NAME" || true
@@ -136,3 +150,5 @@ The pipeline relies on these GitHub Repository Secrets:
 -   `DEPLOY_USERNAME`: SSH Username.
 -   `DEPLOY_SSH_KEY`: Private SSH Key.
 -   `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CDP_URL`: App config.
+
+`GITHUB_TOKEN` is provided automatically by GitHub Actions at runtime and is used by publish/deploy to access GHCR.
