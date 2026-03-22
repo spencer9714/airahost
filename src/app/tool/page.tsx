@@ -306,7 +306,7 @@ export default function ToolPage() {
                     <Field label="Address">
                       <input
                         type="text"
-                        placeholder="e.g. 123 Main St, City, State or 台北市信義區松山路123號"
+                        placeholder="e.g. 123 Main St, City, State"
                         value={address}
                         onChange={(e) => setAddress(e.target.value)}
                         className="input"
