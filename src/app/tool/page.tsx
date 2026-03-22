@@ -715,7 +715,7 @@ export default function ToolPage() {
                     loading ||
                     (inputMode === "url"
                       ? !listingUrl.includes("airbnb.com/rooms/")
-                      : address.trim().length < 2)
+                      : address.trim().length < 5)
                   }
                   className="w-full"
                   size="lg"
