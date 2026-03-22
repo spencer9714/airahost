@@ -30,7 +30,7 @@ export const amenityEnum = z.enum([
 ]);
 
 export const listingInputSchema = z.object({
-  address: z.string().min(2, "Please enter a city or ZIP code"),
+  address: z.string().min(5, "Please enter a valid address"),
   propertyType: propertyTypeEnum,
   bedrooms: z.number().int().min(0).max(20),
   bathrooms: z.number().min(0.5).max(20).multipleOf(0.5),

@@ -455,6 +455,49 @@ def run_scrape(
 
 
 # ---------------------------------------------------------------------------
+# Address preprocessing helper
+# ---------------------------------------------------------------------------
+
+
+def _extract_search_location(address: str) -> tuple:
+    """
+    Extract a search-friendly location string from a full property address.
+
+    Airbnb search works best with city/neighborhood names rather than full
+    street addresses.  This function strips the street-level detail and
+    returns the most useful search token, plus a confidence indicator.
+
+    Returns:
+        (search_location: str, confidence: str)  — confidence is "high" | "medium" | "low"
+    """
+    addr = address.strip()
+
+    # ZIP / postal code (digits only, 3–6 chars): use directly
+    if re.match(r"^\d{3,6}$", addr):
+        return addr, "high"
+
+    # Taiwanese address: extract city + district
+    # e.g. "台北市信義區松山路123號" → "台北市信義區"
+    tw_match = re.search(r"([^\s,]+?(?:市|縣)(?:[^\s,]+?(?:區|鄉|鎮|市))?)", addr)
+    if tw_match:
+        return tw_match.group(1), "high"
+
+    # Comma-separated: "123 Main St, New York, NY 10001" → "New York, NY"
+    parts = [p.strip() for p in addr.split(",") if p.strip()]
+    if len(parts) >= 2:
+        # Skip leading street component (starts with a digit or looks like a house number)
+        start = 1 if re.match(r"^\d", parts[0]) else 0
+        city_parts = parts[start:]
+        # Drop trailing bare ZIP/postal codes
+        city_parts = [p for p in city_parts if not re.match(r"^\d{3,6}$", p.strip())]
+        if city_parts:
+            return ", ".join(city_parts[:2]), "high"
+
+    # Single token or no recognisable structure: use as-is
+    return addr, "medium"
+
+
+# ---------------------------------------------------------------------------
 # Criteria-based search (Mode B)
 # ---------------------------------------------------------------------------
 
@@ -489,11 +532,19 @@ def run_criteria_search(
     timings: Dict[str, int] = {}
     base_origin = "https://www.airbnb.com"
 
-    # Detect whether address is a ZIP code (digits only, 3–6 chars)
-    search_location = address.strip()
+    # Extract a search-friendly location from the full address
+    search_location, addr_confidence = _extract_search_location(address)
     is_zip = bool(re.match(r"^\d{3,6}$", search_location))
     search_mode = "zip" if is_zip else "city"
-    logger.info(f"[criteria] search_mode={search_mode}, location={search_location!r}")
+    logger.info(
+        f"[criteria] address={address!r} → search_location={search_location!r} "
+        f"(mode={search_mode}, confidence={addr_confidence})"
+    )
+    if addr_confidence == "low":
+        logger.warning(
+            f"[criteria] Low confidence extracting search location from address={address!r}. "
+            "Results may be inaccurate."
+        )
 
     # Build a synthetic target spec from user criteria
     user_spec = ListingSpec(
@@ -511,7 +562,9 @@ def run_criteria_search(
 
     query_criteria = {
         "locationBasis": search_location,
+        "rawAddress": address,
         "searchMode": search_mode,
+        "addressConfidence": addr_confidence,
         "searchAdults": adults,
         "checkin": checkin,
         "checkout": checkout,
