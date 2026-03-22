@@ -106,7 +106,9 @@ export default function ToolPage() {
   const [listingUrl, setListingUrl] = useState("");
 
   // Step 1 — Listing
-  const [address, setAddress] = useState("");
+  const [street, setStreet] = useState("");
+  const [city, setCity] = useState("");
+  const [zip, setZip] = useState("");
   const [propertyType, setPropertyType] = useState<PropertyType>("entire_home");
   const [bedrooms, setBedrooms] = useState(1);
   const [bathrooms, setBathrooms] = useState(1);
@@ -227,12 +229,16 @@ export default function ToolPage() {
     (new Date(endDate).getTime() - new Date(startDate).getTime()) /
       (1000 * 60 * 60 * 24)
   );
+  const criteriaInvalid =
+    (!city.trim() && !zip.trim()) ||
+    (street.trim().length > 0 && street.trim().length < 3);
+
   const resolvedListingAddress = useMemo(
     () =>
       inputMode === "url"
         ? buildListingAddressFromUrl(listingUrl, propertyType)
-        : address,
-    [inputMode, listingUrl, propertyType, address]
+        : [street.trim(), city.trim(), zip.trim()].filter(Boolean).join(", "),
+    [inputMode, listingUrl, propertyType, street, city, zip]
   );
 
   return (
@@ -303,16 +309,41 @@ export default function ToolPage() {
                 ) : (
                   /* Mode B: Criteria input */
                   <>
-                    <Field label="Address">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Field label="City *">
+                        <input
+                          type="text"
+                          placeholder="e.g. New York, Taipei"
+                          value={city}
+                          onChange={(e) => setCity(e.target.value)}
+                          className="input"
+                        />
+                      </Field>
+                      <Field label="ZIP / Postal code *">
+                        <input
+                          type="text"
+                          placeholder="e.g. 10001, 100"
+                          value={zip}
+                          onChange={(e) => setZip(e.target.value)}
+                          className="input"
+                        />
+                      </Field>
+                    </div>
+                    {!city.trim() && !zip.trim() && (
+                      <p className="text-xs text-warning">
+                        Please enter at least a city or ZIP code.
+                      </p>
+                    )}
+                    <Field label="Street address (optional)">
                       <input
                         type="text"
-                        placeholder="e.g. 123 Main St, City, State"
-                        value={address}
-                        onChange={(e) => setAddress(e.target.value)}
+                        placeholder="e.g. 123 Main St"
+                        value={street}
+                        onChange={(e) => setStreet(e.target.value)}
                         className="input"
                       />
                       <p className="mt-1 text-xs text-muted">
-                        Enter your property&apos;s full address. We&apos;ll find comparable listings on Airbnb.
+                        Adding a street address helps find more precise comparable listings.
                       </p>
                     </Field>
 
@@ -411,7 +442,7 @@ export default function ToolPage() {
                   disabled={
                     inputMode === "url"
                       ? !listingUrl.includes("airbnb.com/rooms/")
-                      : address.trim().length < 5
+                      : criteriaInvalid
                   }
                   className="w-full"
                 >
@@ -715,7 +746,7 @@ export default function ToolPage() {
                     loading ||
                     (inputMode === "url"
                       ? !listingUrl.includes("airbnb.com/rooms/")
-                      : address.trim().length < 5)
+                      : criteriaInvalid)
                   }
                   className="w-full"
                   size="lg"
@@ -745,9 +776,19 @@ export default function ToolPage() {
                 ) : (
                   <>
                     <SummaryRow
-                      label="Address"
-                      value={address || "Not entered yet"}
+                      label="City"
+                      value={city || "—"}
                     />
+                    <SummaryRow
+                      label="ZIP"
+                      value={zip || "—"}
+                    />
+                    {street && (
+                      <SummaryRow
+                        label="Street"
+                        value={street}
+                      />
+                    )}
                     <SummaryRow
                       label="Type"
                       value={
