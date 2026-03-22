@@ -102,7 +102,7 @@ export default function ToolPage() {
   const [step, setStep] = useState(1);
 
   // Step 1 — Input mode
-  const [inputMode, setInputMode] = useState<InputMode>("criteria");
+  const [inputMode, setInputMode] = useState<InputMode>("criteria-by-city");
   const [listingUrl, setListingUrl] = useState("");
 
   // Step 1 — Listing
@@ -227,6 +227,7 @@ export default function ToolPage() {
     (new Date(endDate).getTime() - new Date(startDate).getTime()) /
       (1000 * 60 * 60 * 24)
   );
+  const isCriteriaMode = inputMode === "criteria-by-city" || inputMode === "criteria-by-zip" || inputMode === "criteria";
   const resolvedListingAddress = useMemo(
     () =>
       inputMode === "url"
@@ -272,9 +273,9 @@ export default function ToolPage() {
                     I have a listing URL
                   </button>
                   <button
-                    onClick={() => setInputMode("criteria")}
+                    onClick={() => !isCriteriaMode && setInputMode("criteria-by-city")}
                     className={`flex-1 rounded-lg px-2 py-2 text-xs font-medium transition-all sm:px-4 sm:text-sm ${
-                      inputMode === "criteria"
+                      isCriteriaMode
                         ? "bg-white text-foreground shadow-sm"
                         : "text-muted hover:text-foreground"
                     }`}
@@ -303,15 +304,54 @@ export default function ToolPage() {
                 ) : (
                   /* Mode B: Criteria input */
                   <>
-                    <Field label="Address">
-                      <input
-                        type="text"
-                        placeholder="123 Main St, City, State"
-                        value={address}
-                        onChange={(e) => setAddress(e.target.value)}
-                        className="input"
-                      />
-                    </Field>
+                    {/* City / ZIP sub-toggle */}
+                    <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
+                      <button
+                        onClick={() => { setInputMode("criteria-by-city"); setAddress(""); }}
+                        className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                          inputMode === "criteria-by-city" || inputMode === "criteria"
+                            ? "bg-white text-foreground shadow-sm"
+                            : "text-muted hover:text-foreground"
+                        }`}
+                      >
+                        City
+                      </button>
+                      <button
+                        onClick={() => { setInputMode("criteria-by-zip"); setAddress(""); }}
+                        className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                          inputMode === "criteria-by-zip"
+                            ? "bg-white text-foreground shadow-sm"
+                            : "text-muted hover:text-foreground"
+                        }`}
+                      >
+                        ZIP code
+                      </button>
+                    </div>
+
+                    {inputMode === "criteria-by-zip" ? (
+                      <Field label="ZIP / Postal code">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="e.g. 100, 10001, 90210"
+                          value={address}
+                          onChange={(e) => setAddress(e.target.value)}
+                          className="input"
+                        />
+                        <p className="mt-1 text-xs text-muted">Enter the ZIP or postal code of your property area</p>
+                      </Field>
+                    ) : (
+                      <Field label="City">
+                        <input
+                          type="text"
+                          placeholder="e.g. Taipei, New York, Rome"
+                          value={address}
+                          onChange={(e) => setAddress(e.target.value)}
+                          className="input"
+                        />
+                        <p className="mt-1 text-xs text-muted">Enter the city where your property is located</p>
+                      </Field>
+                    )}
 
                     <Field label="Property type">
                       <div className="flex flex-wrap gap-2">
@@ -408,7 +448,7 @@ export default function ToolPage() {
                   disabled={
                     inputMode === "url"
                       ? !listingUrl.includes("airbnb.com/rooms/")
-                      : address.length < 5
+                      : address.trim().length < 2
                   }
                   className="w-full"
                 >
@@ -737,7 +777,7 @@ export default function ToolPage() {
                 ) : (
                   <>
                     <SummaryRow
-                      label="Address"
+                      label={inputMode === "criteria-by-zip" ? "ZIP code" : "City"}
                       value={address || "Not entered yet"}
                     />
                     <SummaryRow

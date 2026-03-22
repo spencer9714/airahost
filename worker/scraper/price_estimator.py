@@ -489,11 +489,17 @@ def run_criteria_search(
     timings: Dict[str, int] = {}
     base_origin = "https://www.airbnb.com"
 
+    # Detect whether address is a ZIP code (digits only, 3–6 chars)
+    search_location = address.strip()
+    is_zip = bool(re.match(r"^\d{3,6}$", search_location))
+    search_mode = "zip" if is_zip else "city"
+    logger.info(f"[criteria] search_mode={search_mode}, location={search_location!r}")
+
     # Build a synthetic target spec from user criteria
     user_spec = ListingSpec(
         url="",
         title="User property",
-        location=address,
+        location=search_location,
         accommodates=attributes.get("maxGuests"),
         bedrooms=attributes.get("bedrooms"),
         beds=attributes.get("bedrooms"),  # approximate beds = bedrooms
@@ -504,7 +510,8 @@ def run_criteria_search(
     adults = min(attributes.get("maxGuests", 2), 16)
 
     query_criteria = {
-        "locationBasis": address,
+        "locationBasis": search_location,
+        "searchMode": search_mode,
         "searchAdults": adults,
         "checkin": checkin,
         "checkout": checkout,
@@ -557,7 +564,7 @@ def run_criteria_search(
         try:
             # Pass 1: Search Airbnb for the area to find an anchor listing
             search_url = build_search_url(
-                base_origin, address, checkin, checkout, adults
+                base_origin, search_location, checkin, checkout, adults
             )
             logger.info(f"[criteria] Search URL: {search_url}")
 
@@ -590,6 +597,12 @@ def run_criteria_search(
             candidates = [c for c in candidates if c.url and c.nightly_price]
 
             if not candidates:
+                no_results_hint = (
+                    f"No listings found for ZIP code '{search_location}'. "
+                    "Try using the city name instead."
+                    if is_zip else
+                    f"No listings found in search results for '{search_location}'."
+                )
                 return [], {
                     "targetSpec": None,
                     "queryCriteria": query_criteria,
@@ -599,7 +612,8 @@ def run_criteria_search(
                     "comparableListings": None,
                     "debug": {
                         "source": "criteria",
-                        "error": "No listings found in search results",
+                        "error": no_results_hint,
+                        "searchMode": search_mode,
                         "extractionWarnings": [],
                         "timingsMs": timings,
                     },

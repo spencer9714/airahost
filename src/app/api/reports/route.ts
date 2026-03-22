@@ -65,10 +65,10 @@ export async function POST(req: NextRequest) {
       }
 
       const attrs = (listing.input_attributes ?? {}) as Record<string, unknown>;
-      const fallbackInputMode =
-        attrs.inputMode === "url" || attrs.inputMode === "criteria"
-          ? attrs.inputMode
-          : "criteria";
+      const VALID_INPUT_MODES = ["url", "criteria", "criteria-by-city", "criteria-by-zip"];
+      const fallbackInputMode = VALID_INPUT_MODES.includes(attrs.inputMode as string)
+        ? (attrs.inputMode as string)
+        : "criteria";
       const inputMode = listingUrl ? "url" : fallbackInputMode;
       const discountPolicy = listing.default_discount_policy ?? {};
       const address = listing.input_address;

@@ -524,9 +524,9 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 return
 
-        elif input_mode == "criteria":
+        elif input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
             # Mode B: Criteria search — find best matching listing, then scrape comps
-            logger.info(f"[{report_id}] Mode B (criteria search): {address}")
+            logger.info(f"[{report_id}] Mode B (criteria search, mode={input_mode}): {address}")
             try:
                 from worker.scraper.price_estimator import run_criteria_search
 
