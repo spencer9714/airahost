@@ -10,9 +10,40 @@ Extracted from price_estimator.py for modularity.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from worker.scraper.target_extractor import ListingSpec
+
+# ── URL matching for preferred comparable ─────────────────────────
+
+_ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+
+
+def extract_airbnb_room_id(url: str) -> Optional[str]:
+    """Extract the numeric room ID from an Airbnb listing URL."""
+    m = _ROOM_ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def comp_urls_match(url_a: str, url_b: str) -> bool:
+    """
+    Return True if two URLs refer to the same Airbnb listing.
+
+    Matching strategy (in priority order):
+    1. Airbnb room ID extraction — most reliable
+    2. Normalized URL comparison (strip query params / trailing slash)
+    """
+    if not url_a or not url_b:
+        return False
+    id_a = extract_airbnb_room_id(url_a)
+    id_b = extract_airbnb_room_id(url_b)
+    if id_a and id_b:
+        return id_a == id_b
+    # Fallback: normalise and compare
+    def _norm(u: str) -> str:
+        return u.strip().rstrip("/").split("?")[0].lower()
+    return _norm(url_a) == _norm(url_b)
 
 
 def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:

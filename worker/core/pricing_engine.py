@@ -13,8 +13,13 @@ from __future__ import annotations
 import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
-from worker.core.similarity import similarity_score
+from worker.core.similarity import comp_urls_match, similarity_score
 from worker.scraper.target_extractor import ListingSpec
+
+# ── Preferred comp boost constants ───────────────────────────────
+
+_PINNED_MULTIPLIER: float = 2.0   # boost factor applied to similarity score
+_PINNED_MAX_SCORE: float = 0.98   # hard cap to prevent complete price distortion
 
 
 def _weighted_median(
@@ -40,20 +45,32 @@ def recommend_price(
     *,
     top_k: int = 15,
     new_listing_discount: float = 0.10,
+    preferred_comp_urls: Optional[List[str]] = None,
 ) -> Tuple[Optional[float], Dict[str, Any]]:
-    """Pick top-K similar comps and compute a recommended nightly price."""
+    """Pick top-K similar comps and compute a recommended nightly price.
+
+    If preferred_comp_urls is provided and a comp matches any of those URLs,
+    its similarity score is boosted by _PINNED_MULTIPLIER (capped at
+    _PINNED_MAX_SCORE) so it has dominant influence on the weighted median.
+    If no comp matches, the result is identical to the unpinned calculation.
+    """
     comps = [c for c in comps if c.nightly_price and c.nightly_price > 0]
     if not comps:
         return None, {"reason": "No comparable prices collected."}
 
-    ranked = sorted(
-        comps, key=lambda c: similarity_score(target, c), reverse=True
-    )
+    def _effective_score(c: ListingSpec) -> float:
+        base = similarity_score(target, c)
+        if preferred_comp_urls and c.url:
+            if any(comp_urls_match(c.url, pref) for pref in preferred_comp_urls):
+                return min(base * _PINNED_MULTIPLIER, _PINNED_MAX_SCORE)
+        return base
+
+    ranked = sorted(comps, key=_effective_score, reverse=True)
     picked = ranked[: max(3, top_k)]
 
     prices = [c.nightly_price for c in picked if c.nightly_price]
     weights = [
-        max(0.05, similarity_score(target, c))
+        max(0.05, _effective_score(c))
         for c in picked
         if c.nightly_price
     ]

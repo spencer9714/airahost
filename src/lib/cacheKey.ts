@@ -11,6 +11,17 @@ export function computeCacheKey(
   listingUrl?: string,
   inputMode: string = "criteria"
 ): string {
+  // Use the first enabled comp in preferredComps as the benchmark URL for cache keying.
+  // This ensures different benchmark URLs produce different cache entries.
+  const preferredCompsArr = Array.isArray(attributes.preferredComps)
+    ? (attributes.preferredComps as Array<Record<string, unknown>>)
+    : [];
+  const firstEnabledComp = preferredCompsArr.find(
+    (c) => c.enabled !== false && typeof c.listingUrl === "string" && c.listingUrl
+  );
+  const preferredCompListingUrl =
+    typeof firstEnabledComp?.listingUrl === "string" ? firstEnabledComp.listingUrl : "";
+
   const payload: Record<string, unknown> = {
     address,
     bathrooms: attributes.bathrooms || 0,
@@ -22,6 +33,7 @@ export function computeCacheKey(
     maxTotalDiscountPct: discountPolicy.maxTotalDiscountPct || 40,
     monthlyDiscountPct: discountPolicy.monthlyDiscountPct || 0,
     nonRefundableDiscountPct: discountPolicy.nonRefundableDiscountPct || 0,
+    preferred_comp_listing_url: preferredCompListingUrl,
     propertyType: attributes.propertyType || "",
     refundable: discountPolicy.refundable ?? true,
     stackingMode: discountPolicy.stackingMode || "compound",

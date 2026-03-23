@@ -29,6 +29,7 @@ type ListingData = {
     bathrooms?: number;
     maxGuests?: number;
     beds?: number;
+    preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
   };
   default_date_mode?: DateMode;
   default_start_date?: string | null;
@@ -130,6 +131,9 @@ export function ListingCard({
       : "No report yet";
 
   const attrs = listing.input_attributes;
+  const activeBenchmark = (attrs.preferredComps ?? []).find(
+    (c) => c.enabled !== false && c.listingUrl
+  ) ?? null;
 
   useEffect(() => {
     if (!editOpen) return;
@@ -217,7 +221,14 @@ export function ListingCard({
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           {/* Left: info */}
           <div className="min-w-0 flex-1 space-y-1">
-            <h3 className="truncate text-base font-semibold">{displayTitle}</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="truncate text-base font-semibold">{displayTitle}</h3>
+              {activeBenchmark && (
+                <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                  Benchmark active
+                </span>
+              )}
+            </div>
             <p className="text-sm text-foreground/60">
               {attrs.propertyType
                 ? (PROPERTY_TYPE_SHORT[attrs.propertyType] ?? attrs.propertyType)
@@ -237,6 +248,20 @@ export function ListingCard({
                 </span>
               )}
             </p>
+            {activeBenchmark && (
+              <p className="truncate text-xs text-amber-700">
+                Anchored to:{" "}
+                <a
+                  href={activeBenchmark.listingUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:underline"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {activeBenchmark.listingUrl}
+                </a>
+              </p>
+            )}
           </div>
 
           {/* Right: actions */}

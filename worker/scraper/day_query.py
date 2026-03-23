@@ -26,7 +26,11 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from worker.core.pricing_engine import recommend_price
-from worker.core.similarity import filter_similar_candidates, similarity_score
+from worker.core.similarity import (
+    comp_urls_match,
+    filter_similar_candidates,
+    similarity_score,
+)
 from worker.scraper.comparable_collector import (
     build_search_url,
     parse_card_to_spec,
@@ -36,6 +40,10 @@ from worker.scraper.target_extractor import ListingSpec
 
 logger = logging.getLogger("worker.scraper.day_query")
 ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+
+# Boost applied to the display similarity of the pinned comp in top_comps list
+_PINNED_DISPLAY_MULTIPLIER: float = 2.0
+_PINNED_DISPLAY_MAX_SCORE: float = 0.98
 
 # ── Configurable constants ───────────────────────────────────────
 
@@ -112,6 +120,7 @@ def estimate_base_price_for_date(
     max_cards: int = DAY_MAX_CARDS,
     rate_limit_seconds: float = 1.0,
     top_k: int = 10,
+    preferred_comps: Optional[List[Dict[str, Any]]] = None,
 ) -> DayResult:
     """
     Execute a 1-night Airbnb search for date_i -> date_i+1.
@@ -192,12 +201,40 @@ def estimate_base_price_for_date(
         comps_scored = [(c, similarity_score(target, c)) for c in filtered_comps]
         comps_scored.sort(key=lambda x: x[1], reverse=True)
 
+        # Build list of enabled preferred comp URLs for boost logic.
+        # The pricing boost is handled inside recommend_price via preferred_comp_urls.
+        pref_urls: List[str] = []
+        if preferred_comps:
+            for pc in preferred_comps:
+                if pc.get("enabled", True):
+                    u = str(pc.get("listingUrl") or "").strip()
+                    if u:
+                        pref_urls.append(u)
+
+        if pref_urls:
+            boosted: List[Tuple[ListingSpec, float]] = []
+            pinned_hit = False
+            for c, s in comps_scored:
+                if c.url and any(comp_urls_match(c.url, pu) for pu in pref_urls):
+                    boosted_s = min(s * _PINNED_DISPLAY_MULTIPLIER, _PINNED_DISPLAY_MAX_SCORE)
+                    boosted.append((c, boosted_s))
+                    pinned_hit = True
+                    logger.info(
+                        f"[day_query] Pinned comp hit on {date_i}: {c.url} "
+                        f"(display score {s:.3f} → {boosted_s:.3f})"
+                    )
+                else:
+                    boosted.append((c, s))
+            if pinned_hit:
+                comps_scored = sorted(boosted, key=lambda x: x[1], reverse=True)
+
         # No new_listing_discount per-day — discount applied at calendar level
         rec_price, rec_debug = recommend_price(
             target,
             [c for c, _ in comps_scored],
             top_k=top_k,
             new_listing_discount=0.0,
+            preferred_comp_urls=pref_urls if pref_urls else None,
         )
 
         prices = [c.nightly_price for c, _ in comps_scored if c.nightly_price]

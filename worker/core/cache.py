@@ -31,6 +31,17 @@ def compute_cache_key(
     Compute a stable cache key from report inputs.
     Canonical JSON ensures deterministic ordering.
     """
+    # Use the first enabled comp in preferredComps as the benchmark URL for cache keying.
+    preferred_comp_listing_url = ""
+    preferred_comps_raw = attributes.get("preferredComps")
+    if isinstance(preferred_comps_raw, list):
+        for pc in preferred_comps_raw:
+            if isinstance(pc, dict) and pc.get("enabled", True):
+                url = str(pc.get("listingUrl") or "").strip()
+                if url:
+                    preferred_comp_listing_url = url
+                    break
+
     payload = {
         "inputMode": input_mode,
         "listing_url": listing_url or "",
@@ -45,6 +56,7 @@ def compute_cache_key(
         "monthlyDiscountPct": discount_policy.get("monthlyDiscountPct", 0),
         "refundable": discount_policy.get("refundable", True),
         "nonRefundableDiscountPct": discount_policy.get("nonRefundableDiscountPct", 0),
+        "preferred_comp_listing_url": preferred_comp_listing_url,
         "stackingMode": discount_policy.get("stackingMode", "compound"),
         "maxTotalDiscountPct": discount_policy.get("maxTotalDiscountPct", 40),
     }

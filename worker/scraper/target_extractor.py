@@ -472,3 +472,105 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
     )
 
     return spec, warnings
+
+
+# ---------------------------------------------------------------------------
+# Benchmark price extraction — direct listing page visit with dates
+# ---------------------------------------------------------------------------
+
+_NIGHTLY_PRICE_RES = [
+    re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s*/\s*night", re.I),
+    re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s+per\s+night", re.I),
+    re.compile(r"(\d{1,4}(?:,\d{3})?)\s+USD\s*/\s*night", re.I),
+]
+
+
+def extract_nightly_price_from_listing_page(
+    page,
+    listing_url: str,
+    checkin: str,
+    checkout: str,
+) -> Optional[float]:
+    """
+    Navigate to a listing page with check-in/check-out dates appended and
+    extract the displayed nightly price from the booking widget.
+
+    Returns the nightly price (float), or None if extraction fails.
+    This is used by the benchmark-first pipeline to get the pinned comp's
+    own price without relying on it appearing in search results.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(listing_url)
+    # Reconstruct with only check_in / check_out — drop any pre-existing params.
+    url_with_dates = (
+        f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        f"?check_in={checkin}&check_out={checkout}&adults=2"
+    )
+
+    try:
+        page.goto(url_with_dates, wait_until="domcontentloaded", timeout=15000)
+        page.wait_for_timeout(1200)
+    except Exception as exc:
+        logger.warning(f"[benchmark] Failed to navigate to benchmark page: {exc}")
+        return None
+
+    body = ""
+    try:
+        body = page.inner_text("body", timeout=8000)
+    except Exception:
+        logger.warning("[benchmark] Failed to read body text from listing page")
+        return None
+
+    if not body:
+        return None
+
+    # Search the first 8 000 characters where booking widget typically renders.
+    search_area = body[:8000]
+    for pat in _NIGHTLY_PRICE_RES:
+        for m in pat.finditer(search_area):
+            try:
+                price = float(m.group(1).replace(",", ""))
+                if 10 <= price <= 10000:
+                    logger.info(
+                        f"[benchmark] Extracted nightly price ${price} "
+                        f"from listing page: {listing_url}"
+                    )
+                    return price
+            except Exception:
+                continue
+
+    # DOM-based fallback via JavaScript evaluation
+    try:
+        price_text: str = page.evaluate(
+            """() => {
+              const candidates = [
+                document.querySelector('[data-testid="book-it-default"]'),
+                document.querySelector('[data-testid="price-block"]'),
+                document.querySelector('._tyxjp1'),
+                ...Array.from(document.querySelectorAll('span[class*="price"]')),
+              ].filter(Boolean);
+              for (const el of candidates) {
+                const t = (el.innerText || el.textContent || '').trim();
+                if (t) return t;
+              }
+              return '';
+            }"""
+        )
+        if price_text:
+            for pat in _NIGHTLY_PRICE_RES:
+                m = pat.search(price_text)
+                if m:
+                    price = float(m.group(1).replace(",", ""))
+                    if 10 <= price <= 10000:
+                        logger.info(
+                            f"[benchmark] Extracted nightly price ${price} via DOM: {listing_url}"
+                        )
+                        return price
+    except Exception:
+        pass
+
+    logger.warning(
+        f"[benchmark] Could not extract nightly price from listing page: {listing_url}"
+    )
+    return None

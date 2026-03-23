@@ -85,6 +85,21 @@ export const lastMinuteStrategyPreferenceSchema = z.object({
 
 export const inputModeEnum = z.enum(["url", "criteria", "criteria-by-city", "criteria-by-zip"]);
 
+// ── Preferred Comparables ────────────────────────────────────────
+
+export const preferredCompSchema = z.object({
+  listingUrl: z.string().url("Please enter a valid Airbnb listing URL"),
+  name: z.string().max(100).optional(),
+  note: z.string().max(500).optional(),
+  enabled: z.boolean().default(true),
+});
+
+/** A list of up to 10 preferred comparable listings. */
+export const preferredCompsSchema = z.array(preferredCompSchema).max(10);
+
+export type PreferredComp = z.infer<typeof preferredCompSchema>;
+export type PreferredComps = z.infer<typeof preferredCompsSchema>;
+
 // ── Full Report Request ─────────────────────────────────────────
 
 export const createReportRequestSchema = z.object({
@@ -94,6 +109,7 @@ export const createReportRequestSchema = z.object({
   discountPolicy: discountPolicySchema,
   lastMinuteStrategy: lastMinuteStrategyPreferenceSchema.optional(),
   listingUrl: z.string().url().optional(),
+  preferredComps: preferredCompsSchema.optional(),
   saveToListings: z
     .object({
       enabled: z.boolean().default(false),
@@ -213,6 +229,29 @@ export interface RecommendedPrice {
   notes: string;
 }
 
+// ── Benchmark Transparency ───────────────────────────────────────
+
+export interface BenchmarkInfo {
+  benchmarkUsed: boolean;
+  benchmarkUrl: string;
+  /** "search_hit" | "direct_page" | "failed" */
+  benchmarkFetchStatus: string;
+  benchmarkFetchMethod: string;
+  avgBenchmarkPrice: number | null;
+  avgMarketPrice: number | null;
+  /** Raw market offset vs benchmark, in percent (e.g. +10.5 or -6.2) */
+  marketAdjustmentPct: number | null;
+  appliedMarketWeight: number;
+  maxAdjCap: number;
+  fallbackReason: string | null;
+  fetchStats: {
+    searchHits: number;
+    directFetches: number;
+    failed: number;
+    totalDays: number;
+  };
+}
+
 // ── Summary & Report ────────────────────────────────────────────
 
 export interface ReportSummary {
@@ -240,6 +279,7 @@ export interface ReportSummary {
   priceDistribution?: PriceDistribution;
   recommendedPrice?: RecommendedPrice;
   comparableListings?: ComparableListing[];
+  benchmarkInfo?: BenchmarkInfo;
 }
 
 export interface PricingReport {
@@ -253,6 +293,7 @@ export interface PricingReport {
     inputMode?: InputMode;
     listingUrl?: string | null;
     lastMinuteStrategy?: LastMinuteStrategyPreference;
+    preferredComps?: PreferredComps | null;
   };
   inputDateStart: string;
   inputDateEnd: string;
@@ -268,6 +309,7 @@ export interface PricingReport {
   priceDistribution?: PriceDistribution | null;
   recommendedPrice?: RecommendedPrice | null;
   comparableListings?: ComparableListing[] | null;
+  benchmarkInfo?: BenchmarkInfo | null;
 }
 
 // ── Saved Listings ─────────────────────────────────────────────
@@ -290,6 +332,7 @@ export const updateListingSchema = z.object({
   defaultDateMode: dateModeEnum.optional(),
   defaultStartDate: z.string().nullable().optional(),
   defaultEndDate: z.string().nullable().optional(),
+  preferredComps: preferredCompsSchema.nullable().optional(),
 });
 
 export interface SavedListing {
@@ -297,7 +340,7 @@ export interface SavedListing {
   userId: string;
   name: string;
   inputAddress: string;
-  inputAttributes: ListingInput;
+  inputAttributes: ListingInput & { preferredComps?: PreferredComps | null };
   defaultDiscountPolicy: DiscountPolicy | null;
   defaultDateMode: DateMode;
   defaultStartDate: string | null;
@@ -320,6 +363,7 @@ export const rerunListingSchema = z.object({
   discountPolicy: discountPolicySchema.optional(),
   inputMode: inputModeEnum.optional(),
   listingUrl: z.string().url().optional(),
+  preferredComps: preferredCompsSchema.optional(),
 });
 
 export const listingAnalysisSchema = z.object({

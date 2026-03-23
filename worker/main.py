@@ -421,6 +421,24 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         discount_policy = job.get("discount_policy") or {}
         listing_url = _get_listing_url(job)
         input_mode = attributes.get("inputMode", "criteria")
+        # Extract preferred comps list — only keep items that are enabled
+        preferred_comps_raw = attributes.get("preferredComps")
+        preferred_comps: Optional[list] = None
+        primary_benchmark_url: Optional[str] = None
+        if isinstance(preferred_comps_raw, list):
+            enabled = [
+                pc for pc in preferred_comps_raw
+                if isinstance(pc, dict) and pc.get("enabled", True)
+            ]
+            preferred_comps = enabled if enabled else None
+        if preferred_comps:
+            urls_preview = ", ".join(pc.get("listingUrl", "?") for pc in preferred_comps)
+            logger.info(f"[{job.get('id', '?')}] Preferred comps ({len(preferred_comps)}): {urls_preview}")
+            # The first enabled preferred comp is the primary benchmark
+            first_url = str(preferred_comps[0].get("listingUrl") or "").strip()
+            if first_url:
+                primary_benchmark_url = first_url
+                logger.info(f"[{job.get('id', '?')}] Primary benchmark URL: {primary_benchmark_url}")
         finalized_input_attributes = dict(attributes)
         finalized_input_attributes["inputMode"] = input_mode
         finalized_input_attributes["listingUrl"] = listing_url or None
@@ -469,7 +487,57 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 },
             )
 
-        if listing_url:
+        _mode_c_succeeded = False
+
+        if primary_benchmark_url and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
+            # Mode C: Benchmark-first — use pinned comp as primary anchor.
+            # Only for criteria modes; URL mode already has its own listing to scrape.
+            logger.info(
+                f"[{report_id}] Mode C (benchmark-first): {primary_benchmark_url}"
+            )
+            try:
+                from worker.scraper.price_estimator import run_benchmark_scrape
+
+                daily_results, transparent_result = run_benchmark_scrape(
+                    benchmark_url=primary_benchmark_url,
+                    checkin=start_date,
+                    checkout=end_date,
+                    cdp_url=CDP_URL,
+                    max_scroll_rounds=MAX_SCROLL_ROUNDS,
+                    max_cards=MAX_CARDS,
+                    max_runtime_seconds=MAX_RUNTIME_SECONDS,
+                    rate_limit_seconds=RATE_LIMIT_SECONDS,
+                    cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                )
+
+                valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
+                if daily_results and valid_prices:
+                    result = _build_scrape_calendar(
+                        daily_results, start_date, end_date, discount_policy, transparent_result,
+                    )
+                    if result[0] is not None and result[1] is not None:
+                        summary, calendar = result
+                        core_version = WORKER_VERSION + "+benchmark"
+                        _mode_c_succeeded = True
+                    else:
+                        logger.warning(
+                            f"[{report_id}] Benchmark pipeline returned no valid prices, "
+                            "falling back to criteria search"
+                        )
+                else:
+                    logger.warning(
+                        f"[{report_id}] Benchmark pipeline returned empty results, "
+                        "falling back to criteria search"
+                    )
+
+            except Exception as exc:
+                logger.warning(
+                    f"[{report_id}] Benchmark pipeline failed ({exc}), "
+                    "falling back to criteria search"
+                )
+                transparent_result = None
+
+        if not _mode_c_succeeded and listing_url:
             # Mode A: URL scrape — user provided a listing URL
             logger.info(f"[{report_id}] Mode A (URL scrape): {listing_url}")
             try:
@@ -485,6 +553,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    preferred_comps=preferred_comps,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -524,7 +593,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 return
 
-        elif input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
+        elif not _mode_c_succeeded and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
             # Mode B: Criteria search — find best matching listing, then scrape comps
             logger.info(f"[{report_id}] Mode B (criteria search, mode={input_mode}): {address}")
             try:
@@ -541,6 +610,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    preferred_comps=preferred_comps,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -577,7 +647,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 return
 
-        else:
+        elif not _mode_c_succeeded:
             # No listing URL and no criteria — cannot proceed
             _fail(
                 "Please provide either a listing URL or search criteria.",
@@ -605,6 +675,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             summary["priceDistribution"] = transparent_result.get("priceDistribution")
             summary["recommendedPrice"] = transparent_result.get("recommendedPrice")
             summary["comparableListings"] = transparent_result.get("comparableListings")
+            if transparent_result.get("benchmarkInfo"):
+                summary["benchmarkInfo"] = transparent_result["benchmarkInfo"]
 
         # Write results
         db_helpers.complete_job(

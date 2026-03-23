@@ -29,10 +29,18 @@ type HistoryRow = {
   pricing_reports: ReportSnapshot | ReportSnapshot[] | null;
 };
 
+type PreferredComp = {
+  listingUrl: string;
+  name?: string;
+  note?: string;
+  enabled: boolean;
+};
+
 type ListingDetail = {
   id: string;
   name: string;
   input_address: string;
+  input_attributes?: { preferredComps?: PreferredComp[] | null };
 };
 
 type StatusFilter = "all" | "ready" | "error";
@@ -47,6 +55,12 @@ export default function ListingHistoryPage() {
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [rerunningId, setRerunningId] = useState<string | null>(null);
+
+  // Preferred comps state (list)
+  const [showPinnedComps, setShowPinnedComps] = useState(false);
+  const [pinnedCompsList, setPinnedCompsList] = useState<{ listingUrl: string; note: string }[]>([]);
+  const [pinnedCompSaving, setPinnedCompSaving] = useState(false);
+  const [pinnedCompMsg, setPinnedCompMsg] = useState("");
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -81,8 +95,16 @@ export default function ListingHistoryPage() {
       const listingData = await listingRes.json();
       const reportsData = await reportsRes.json();
 
-      setListing(listingData.listing ?? null);
+      const loadedListing: ListingDetail | null = listingData.listing ?? null;
+      setListing(loadedListing);
       setRows(reportsData.reports ?? []);
+      // Pre-fill preferred comps from saved listing
+      const savedComps = loadedListing?.input_attributes?.preferredComps;
+      if (savedComps?.length) {
+        setPinnedCompsList(savedComps.map((c) => ({ listingUrl: c.listingUrl, note: c.note ?? "" })));
+      } else {
+        setPinnedCompsList([]);
+      }
     } catch {
       setError("Failed to load listing history.");
     } finally {
@@ -139,6 +161,54 @@ export default function ListingHistoryPage() {
     }
   }
 
+  async function handleSavePinnedComps() {
+    const valid = pinnedCompsList.filter((c) => c.listingUrl.includes("airbnb.com/rooms/"));
+    setPinnedCompSaving(true);
+    setPinnedCompMsg("");
+    try {
+      const res = await fetch(`/api/listings/${listingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preferredComps: valid.map((c) => ({
+            listingUrl: c.listingUrl.trim(),
+            note: c.note.trim() || undefined,
+            enabled: true,
+          })),
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to save");
+      setPinnedCompMsg(`Saved ${valid.length} comparable${valid.length !== 1 ? "s" : ""}. Future re-runs will use these.`);
+      setShowPinnedComps(false);
+      await loadData();
+    } catch {
+      setPinnedCompMsg("Failed to save. Please try again.");
+    } finally {
+      setPinnedCompSaving(false);
+    }
+  }
+
+  async function handleRemovePinnedComps() {
+    setPinnedCompSaving(true);
+    setPinnedCompMsg("");
+    try {
+      const res = await fetch(`/api/listings/${listingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preferredComps: null }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      setPinnedCompsList([]);
+      setPinnedCompMsg("");
+      setShowPinnedComps(false);
+      await loadData();
+    } catch {
+      setPinnedCompMsg("Failed to remove. Please try again.");
+    } finally {
+      setPinnedCompSaving(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="mx-auto max-w-4xl px-6 py-10">
@@ -170,6 +240,161 @@ export default function ListingHistoryPage() {
           <p className="text-sm text-warning">{error}</p>
         </Card>
       )}
+
+      {/* Benchmark / Pinned comps card */}
+      {(() => {
+        const currentComps = listing?.input_attributes?.preferredComps ?? [];
+        const hasBenchmark = currentComps.length > 0;
+        const primaryBenchmark = currentComps[0] ?? null;
+        return (
+          <Card
+            className={hasBenchmark ? "border-amber-200 bg-amber-50/30" : ""}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold">
+                    {hasBenchmark ? "Pricing anchored to your benchmark" : "Benchmark listing"}
+                  </p>
+                  {hasBenchmark && (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                      Active
+                    </span>
+                  )}
+                </div>
+                {hasBenchmark ? (
+                  <div className="mt-1 space-y-1">
+                    <p className="text-xs font-medium text-muted">
+                      Primary benchmark ({currentComps.length} pinned):
+                    </p>
+                    {primaryBenchmark && (
+                      <p className="truncate text-xs text-accent">
+                        <a
+                          href={primaryBenchmark.listingUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:underline"
+                        >
+                          {primaryBenchmark.listingUrl}
+                        </a>
+                        {primaryBenchmark.note && (
+                          <span className="ml-1 italic text-muted">— {primaryBenchmark.note}</span>
+                        )}
+                      </p>
+                    )}
+                    {currentComps.length > 1 && (
+                      <p className="text-xs text-muted">
+                        +{currentComps.length - 1} more pinned comp{currentComps.length - 1 !== 1 ? "s" : ""}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-0.5 text-xs text-muted">
+                    Pin a benchmark listing to anchor re-run pricing to a specific comparable.
+                  </p>
+                )}
+                {pinnedCompMsg && (
+                  <p className="mt-1 text-xs text-accent">{pinnedCompMsg}</p>
+                )}
+              </div>
+              <div className="flex shrink-0 gap-1.5">
+                {hasBenchmark && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={handleRemovePinnedComps}
+                    disabled={pinnedCompSaving}
+                  >
+                    Clear all
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowPinnedComps(!showPinnedComps)}
+                >
+                  {hasBenchmark ? "Edit" : "Add benchmark"}
+                </Button>
+              </div>
+            </div>
+
+            {showPinnedComps && (
+              <div className="mt-4 space-y-3 border-t border-border pt-4">
+                <p className="text-xs text-muted">
+                  Paste Airbnb listing URLs. The first URL becomes the <strong>primary benchmark</strong> — its price anchors future re-runs. Additional URLs are used as supporting validation comps.
+                </p>
+                {pinnedCompsList.map((comp, idx) => (
+                  <div key={idx} className="flex gap-2">
+                    <div className="flex-1 space-y-1.5">
+                      <input
+                        type="url"
+                        placeholder="https://airbnb.com/rooms/123..."
+                        value={comp.listingUrl}
+                        onChange={(e) => {
+                          const next = [...pinnedCompsList];
+                          next[idx] = { ...next[idx], listingUrl: e.target.value };
+                          setPinnedCompsList(next);
+                        }}
+                        className="input w-full text-sm"
+                      />
+                      {comp.listingUrl && !comp.listingUrl.includes("airbnb.com/rooms/") && (
+                        <p className="text-xs text-warning">Must be a valid Airbnb listing URL.</p>
+                      )}
+                      <input
+                        type="text"
+                        placeholder="Optional note (e.g. same building)"
+                        value={comp.note}
+                        onChange={(e) => {
+                          const next = [...pinnedCompsList];
+                          next[idx] = { ...next[idx], note: e.target.value };
+                          setPinnedCompsList(next);
+                        }}
+                        className="input w-full text-sm"
+                        maxLength={500}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPinnedCompsList(pinnedCompsList.filter((_, i) => i !== idx))}
+                      className="self-start pt-2 text-xs text-muted hover:text-warning"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                {pinnedCompsList.length < 10 && (
+                  <button
+                    type="button"
+                    onClick={() => setPinnedCompsList([...pinnedCompsList, { listingUrl: "", note: "" }])}
+                    className="text-xs text-accent hover:underline"
+                  >
+                    + Add comparable
+                  </button>
+                )}
+                <div className="flex gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    onClick={handleSavePinnedComps}
+                    disabled={
+                      pinnedCompSaving ||
+                      pinnedCompsList.every((c) => !c.listingUrl.includes("airbnb.com/rooms/"))
+                    }
+                  >
+                    {pinnedCompSaving ? "Saving..." : "Save to listing"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setShowPinnedComps(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Card>
+        );
+      })()}
 
       {/* Filters */}
       <div className="flex items-center gap-2">

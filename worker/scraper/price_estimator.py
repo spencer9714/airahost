@@ -70,6 +70,7 @@ def _build_daily_transparent_result(
     source: str,
     extraction_warnings: List[str],
     discount_evidence: Optional[Dict[str, Any]] = None,
+    benchmark_info: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -187,6 +188,7 @@ def _build_daily_transparent_result(
             "notes": "",
         },
         "comparableListings": comparable_listings,
+        "benchmarkInfo": benchmark_info,
         "debug": {
             "source": source,
             "extractionWarnings": extraction_warnings,
@@ -221,6 +223,7 @@ def run_scrape(
     max_runtime_seconds: int = 180,
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
+    preferred_comps: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -380,6 +383,7 @@ def run_scrape(
                         max_cards=max_cards,
                         rate_limit_seconds=rate_limit_seconds,
                         top_k=top_k,
+                        preferred_comps=preferred_comps,
                     )
                     if result.median_price is not None:
                         break
@@ -455,6 +459,237 @@ def run_scrape(
 
 
 # ---------------------------------------------------------------------------
+# Benchmark-first scrape pipeline
+# ---------------------------------------------------------------------------
+
+
+def run_benchmark_scrape(
+    benchmark_url: str,
+    checkin: str,
+    checkout: str,
+    cdp_url: str = "http://127.0.0.1:9222",
+    adults: int = 2,
+    max_scroll_rounds: int = 12,
+    max_cards: int = 80,
+    max_runtime_seconds: int = 180,
+    rate_limit_seconds: float = 1.0,
+    cdp_connect_timeout_ms: int = 15000,
+    target_spec_override: Optional[ListingSpec] = None,
+) -> tuple:
+    """
+    Benchmark-first pipeline.
+
+    Uses the pinned comp (benchmark_url) as the primary pricing anchor.
+    Market comps from search are used only for a capped adjustment.
+
+    Returns (daily_results, transparent_result).
+    Fallback: if benchmark price fetch fails entirely, raises ValueError
+    so the caller can fall back to the standard run_scrape pipeline.
+    """
+    from playwright.sync_api import sync_playwright
+    from worker.core.benchmark import (
+        BENCHMARK_MAX_SAMPLE_QUERIES,
+        BenchmarkDayResult,
+        aggregate_benchmark_transparency,
+        benchmark_day_result_to_dict,
+        estimate_benchmark_price_for_date,
+    )
+
+    start_time = time.time()
+    timings: Dict[str, int] = {}
+    extraction_warnings: List[str] = []
+    base_origin = safe_domain_base(benchmark_url)
+
+    d_start = dt.strptime(checkin, "%Y-%m-%d").date()
+    d_end = dt.strptime(checkout, "%Y-%m-%d").date()
+    total_nights = (d_end - d_start).days
+    if total_nights < 1:
+        return [], _empty_transparent("benchmark", "Invalid date range")
+    if total_nights > MAX_NIGHTS:
+        raise ValueError(
+            f"Date range of {total_nights} nights exceeds maximum of {MAX_NIGHTS}."
+        )
+
+    all_nights = daterange_nights(d_start, d_end)
+
+    # Benchmark mode uses fewer sample queries
+    if total_nights <= SAMPLE_THRESHOLD:
+        sample_indices = list(range(total_nights))
+    else:
+        sample_indices = compute_sample_dates(total_nights, BENCHMARK_MAX_SAMPLE_QUERIES)
+
+    logger.info(
+        f"Benchmark pipeline: {benchmark_url} | {total_nights} nights, "
+        f"querying {len(sample_indices)} days"
+    )
+
+    cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
+    if not cdp_ok:
+        return [], _empty_transparent("benchmark", f"CDP unavailable: {cdp_reason}")
+
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp(cdp_url, timeout=cdp_connect_timeout_ms)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.new_page()
+
+        try:
+            # Step 1: Extract benchmark listing spec (location, capacity, etc.)
+            extract_start = time.time()
+            if target_spec_override is not None:
+                target = target_spec_override
+            else:
+                logger.info(f"[benchmark] Extracting spec from: {benchmark_url}")
+                target, warnings = extract_target_spec(page, benchmark_url)
+                extraction_warnings.extend(warnings)
+
+                # Location fallback (mirrors run_scrape)
+                if not target.location:
+                    loc_m = re.search(
+                        r"\bin\s+([A-Z][a-zA-Z\s,]+(?:,\s*[A-Z][a-zA-Z\s]+)?)",
+                        target.title,
+                    )
+                    if loc_m:
+                        target.location = loc_m.group(1).strip().rstrip(",.")
+                    else:
+                        tokens = [
+                            t.strip()
+                            for t in re.split(r"[-|•·]", target.title)
+                            if t.strip() and len(t.strip()) >= 3
+                        ]
+                        target.location = tokens[-1] if tokens else ""
+                    extraction_warnings.append(
+                        f"[benchmark] Location fallback from title: '{target.location}'"
+                    )
+
+                if not target.location:
+                    return [], _empty_transparent(
+                        "benchmark", "Cannot determine location from benchmark listing page."
+                    )
+
+            timings["extract_ms"] = round((time.time() - extract_start) * 1000)
+
+            effective_adults = adults
+            if target.accommodates and target.accommodates > 0:
+                effective_adults = min(int(target.accommodates), 16)
+
+            query_criteria = {
+                "locationBasis": target.location,
+                "searchAdults": effective_adults,
+                "checkin": checkin,
+                "checkout": checkout,
+                "totalNights": total_nights,
+                "sampledNights": len(sample_indices),
+                "queryMode": "benchmark_first",
+                "benchmarkUrl": benchmark_url,
+            }
+
+            # Step 2: Benchmark day-by-day queries
+            from worker.core.benchmark import BENCHMARK_SCROLL_ROUNDS, BENCHMARK_MAX_CARDS, BENCHMARK_TOP_K
+            sampled_results: List[BenchmarkDayResult] = []
+            day_loop_start = time.time()
+
+            for idx_pos, night_idx in enumerate(sample_indices):
+                elapsed = time.time() - start_time
+                remaining = max_runtime_seconds - elapsed
+                if remaining < 15:
+                    logger.warning(
+                        f"[benchmark] Timeout approaching, stopping after "
+                        f"{idx_pos}/{len(sample_indices)} queries"
+                    )
+                    break
+
+                date_i = all_nights[night_idx]
+                time.sleep(rate_limit_seconds)
+                result = estimate_benchmark_price_for_date(
+                    page,
+                    target,
+                    benchmark_url,
+                    base_origin,
+                    date_i,
+                    effective_adults,
+                    max_scroll_rounds=BENCHMARK_SCROLL_ROUNDS,
+                    max_cards=BENCHMARK_MAX_CARDS,
+                    rate_limit_seconds=rate_limit_seconds,
+                    top_k=BENCHMARK_TOP_K,
+                )
+                sampled_results.append(result)
+
+            timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
+
+            # Step 3: Interpolate
+            # Reuse standard interpolation — BenchmarkDayResult.median_price is the blended price
+            from worker.scraper.day_query import DayResult, interpolate_missing_days
+
+            def _to_day_result(r: BenchmarkDayResult) -> DayResult:
+                return DayResult(
+                    date=r.date,
+                    median_price=r.median_price,
+                    comps_collected=r.comps_collected,
+                    comps_used=r.comps_used,
+                    filter_stage=r.filter_stage,
+                    flags=r.flags,
+                    is_sampled=r.is_sampled,
+                    is_weekend=r.is_weekend,
+                    price_distribution=r.price_distribution,
+                    top_comps=r.top_comps,
+                    error=r.error,
+                )
+
+            interp_start = time.time()
+            all_day_objs = interpolate_missing_days(
+                [_to_day_result(r) for r in sampled_results], all_nights
+            )
+            timings["interpolation_ms"] = round((time.time() - interp_start) * 1000)
+
+            # Convert to dicts for the standard pipeline
+            all_day_results: List[Dict[str, Any]] = []
+            for dr in all_day_objs:
+                all_day_results.append({
+                    "date": dr.date,
+                    "median_price": dr.median_price,
+                    "comps_collected": dr.comps_collected,
+                    "comps_used": dr.comps_used,
+                    "filter_stage": dr.filter_stage,
+                    "flags": dr.flags,
+                    "is_sampled": dr.is_sampled,
+                    "is_weekend": dr.is_weekend,
+                    "price_distribution": dr.price_distribution,
+                    "top_comps": dr.top_comps,
+                    "error": dr.error,
+                })
+
+            timings["total_ms"] = round((time.time() - start_time) * 1000)
+
+            # Aggregate benchmark transparency
+            benchmark_info = aggregate_benchmark_transparency(benchmark_url, sampled_results)
+
+            transparent = _build_daily_transparent_result(
+                target=target,
+                query_criteria=query_criteria,
+                all_day_results=all_day_results,
+                timings_ms=timings,
+                source="benchmark",
+                extraction_warnings=extraction_warnings,
+                benchmark_info=benchmark_info,
+            )
+
+            logger.info(
+                f"[benchmark] Pipeline complete: {len(sampled_results)} queries, "
+                f"benchmarkUsed={benchmark_info['benchmarkUsed']}, "
+                f"avg_adj={benchmark_info['marketAdjustmentPct']}%, "
+                f"{timings['total_ms']}ms total"
+            )
+
+            return all_day_results, transparent
+
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Address preprocessing helper
 # ---------------------------------------------------------------------------
 
@@ -514,6 +749,7 @@ def run_criteria_search(
     max_runtime_seconds: int = 180,
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
+    preferred_comps: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Criteria-based search: search Airbnb for listings matching the user's
@@ -545,6 +781,11 @@ def run_criteria_search(
             f"[criteria] Low confidence extracting search location from address={address!r}. "
             "Results may be inaccurate."
         )
+
+    # Extract preferred comps from attributes if not explicitly passed
+    if preferred_comps is None:
+        raw = attributes.get("preferredComps")
+        preferred_comps = raw if isinstance(raw, list) else None
 
     # Build a synthetic target spec from user criteria
     user_spec = ListingSpec(
@@ -723,6 +964,7 @@ def run_criteria_search(
         max_runtime_seconds=int(remaining),
         rate_limit_seconds=rate_limit_seconds,
         cdp_connect_timeout_ms=cdp_connect_timeout_ms,
+        preferred_comps=preferred_comps,
     )
 
     # Merge criteria-specific info into the transparent result

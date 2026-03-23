@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createReportRequestSchema, listingAnalysisSchema } from "@/lib/schemas";
+import { createReportRequestSchema, listingAnalysisSchema, type PreferredComps } from "@/lib/schemas";
 import { generateShareId } from "@/lib/shareId";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
@@ -72,6 +72,8 @@ export async function POST(req: NextRequest) {
       const inputMode = listingUrl ? "url" : fallbackInputMode;
       const discountPolicy = listing.default_discount_policy ?? {};
       const address = listing.input_address;
+      // Carry preferred comps from the saved listing's stored attributes
+      const savedPreferredComps = (attrs.preferredComps as PreferredComps | undefined) ?? null;
       const admin = getSupabaseAdmin();
 
       const cacheKey = computeCacheKey(
@@ -110,7 +112,11 @@ export async function POST(req: NextRequest) {
         share_id: shareId,
         listing_id: listingId,
         input_address: address,
-        input_attributes: { ...listing.input_attributes, inputMode },
+        input_attributes: {
+          ...listing.input_attributes,
+          inputMode,
+          ...(savedPreferredComps?.length ? { preferredComps: savedPreferredComps } : {}),
+        },
         input_date_start: dateRange.startDate,
         input_date_end: dateRange.endDate,
         discount_policy: discountPolicy,
@@ -189,6 +195,7 @@ export async function POST(req: NextRequest) {
       discountPolicy,
       lastMinuteStrategy,
       listingUrl,
+      preferredComps,
       saveToListings,
     } = parsed.data;
     const shareId = generateShareId();
@@ -226,10 +233,23 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseAdmin();
 
-    // Compute cache key
+    const enrichedInputAttributes = {
+      ...listing,
+      inputMode,
+      listingUrl: listingUrl || null,
+      preferredComps: preferredComps ?? null,
+      lastMinuteStrategy: lastMinuteStrategy ?? {
+        mode: "auto",
+        aggressiveness: 50,
+        floor: 0.65,
+        cap: 1.05,
+      },
+    };
+
+    // Compute cache key using the exact attributes written to the report
     const cacheKey = computeCacheKey(
       listing.address,
-      listing as unknown as Record<string, unknown>,
+      enrichedInputAttributes as unknown as Record<string, unknown>,
       dates.startDate,
       dates.endDate,
       discountPolicy as unknown as Record<string, unknown>,
@@ -257,18 +277,6 @@ export async function POST(req: NextRequest) {
     }
 
     const isCacheHit = cachedSummary !== null;
-
-    const enrichedInputAttributes = {
-      ...listing,
-      inputMode,
-      listingUrl: listingUrl || null,
-      lastMinuteStrategy: lastMinuteStrategy ?? {
-        mode: "auto",
-        aggressiveness: 50,
-        floor: 0.65,
-        cap: 1.05,
-      },
-    };
 
     const report = {
       id: crypto.randomUUID(),
@@ -326,6 +334,11 @@ export async function POST(req: NextRequest) {
 
     if (saveToListings?.enabled && saveUserId) {
       const listingName = (saveToListings.name || "").trim() || listing.address;
+      // Include preferredComps in the saved listing's input_attributes
+      const listingInputAttrs: Record<string, unknown> = { ...enrichedInputAttributes };
+      if (preferredComps?.length) {
+        listingInputAttrs.preferredComps = preferredComps;
+      }
 
       const { data: listingRow, error: listingErr } = await supabase
         .from("saved_listings")
@@ -333,7 +346,7 @@ export async function POST(req: NextRequest) {
           user_id: saveUserId,
           name: listingName,
           input_address: listing.address,
-          input_attributes: enrichedInputAttributes,
+          input_attributes: listingInputAttrs,
           default_discount_policy: discountPolicy,
           last_used_at: new Date().toISOString(),
         })

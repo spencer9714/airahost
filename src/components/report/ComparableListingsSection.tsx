@@ -3,6 +3,22 @@
 import { useState, useMemo } from "react";
 import type { ComparableListing, CompsSummary } from "@/lib/schemas";
 
+// Match Airbnb room IDs extracted from URLs for pinned-comp detection.
+function extractRoomId(url: string): string | null {
+  const m = url.match(/\/rooms\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+function urlsMatchPinned(compUrl: string | null, pinnedUrls: string[]): boolean {
+  if (!compUrl) return false;
+  const compId = extractRoomId(compUrl);
+  for (const pUrl of pinnedUrls) {
+    if (compId && extractRoomId(pUrl) === compId) return true;
+    if (compUrl.split("?")[0].toLowerCase() === pUrl.split("?")[0].toLowerCase()) return true;
+  }
+  return false;
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
 function similarityBadgeClasses(similarity: number): string {
@@ -56,19 +72,36 @@ function SkeletonCard() {
 
 // ── Listing Card ────────────────────────────────────────────────
 
-function ComparableCard({ listing }: { listing: ComparableListing }) {
+function ComparableCard({
+  listing,
+  isPinned = false,
+}: {
+  listing: ComparableListing;
+  isPinned?: boolean;
+}) {
   const matchPct = Math.round(listing.similarity * 100);
   const badgeClasses = similarityBadgeClasses(listing.similarity);
 
   return (
-    <div className="rounded-xl border border-gray-100 p-4 transition hover:shadow-sm">
+    <div
+      className={`rounded-xl border p-4 transition hover:shadow-sm ${
+        isPinned ? "border-amber-300 bg-amber-50/40" : "border-gray-100"
+      }`}
+    >
       {/* Top row: title+specs LEFT, price+badge RIGHT */}
       <div className="flex items-start justify-between gap-4">
         {/* Left zone */}
         <div className="min-w-0 flex-1">
-          <p className="truncate text-base font-medium text-gray-900">
-            {listing.title}
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="truncate text-base font-medium text-gray-900">
+              {listing.title}
+            </p>
+            {isPinned && (
+              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                Pinned by you
+              </span>
+            )}
+          </div>
           <p className="mt-0.5 text-sm text-gray-600">
             {formatPropertyType(listing.propertyType)}
             {" · "}
@@ -130,6 +163,7 @@ interface ComparableListingsSectionProps {
   comps: CompsSummary | null | undefined;
   loading?: boolean;
   embedded?: boolean;
+  pinnedUrls?: string[];
 }
 
 export function ComparableListingsSection({
@@ -137,6 +171,7 @@ export function ComparableListingsSection({
   comps,
   loading = false,
   embedded = false,
+  pinnedUrls = [],
 }: ComparableListingsSectionProps) {
   const [sortBy, setSortBy] = useState<SortMode>("similarity");
   const [expanded, setExpanded] = useState(false);
@@ -250,7 +285,11 @@ export function ComparableListingsSection({
       {/* Cards */}
       <div className="space-y-3">
         {visible.map((listing) => (
-          <ComparableCard key={listing.id} listing={listing} />
+          <ComparableCard
+            key={listing.id}
+            listing={listing}
+            isPinned={urlsMatchPinned(listing.url ?? null, pinnedUrls)}
+          />
         ))}
       </div>
 
