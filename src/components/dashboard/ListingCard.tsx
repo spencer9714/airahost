@@ -131,9 +131,10 @@ export function ListingCard({
       : "No report yet";
 
   const attrs = listing.input_attributes;
-  const activeBenchmark = (attrs.preferredComps ?? []).find(
+  const activeBenchmarks = (attrs.preferredComps ?? []).filter(
     (c) => c.enabled !== false && c.listingUrl
-  ) ?? null;
+  );
+  const activeBenchmark = activeBenchmarks[0] ?? null;
 
   useEffect(() => {
     if (!editOpen) return;
@@ -248,18 +249,37 @@ export function ListingCard({
                 </span>
               )}
             </p>
-            {activeBenchmark && (
-              <p className="truncate text-xs text-amber-700">
-                Anchored to:{" "}
-                <a
-                  href={activeBenchmark.listingUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:underline"
+            {activeBenchmarks.length > 0 && (
+              <div className="space-y-0.5">
+                {activeBenchmarks.map((bm, idx) => (
+                  <p key={idx} className="truncate text-xs text-amber-700">
+                    <span className="mr-1 text-amber-500">{idx + 1}.</span>
+                    <a
+                      href={bm.listingUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {bm.listingUrl}
+                    </a>
+                    {idx === 0 && activeBenchmarks.length > 1 && (
+                      <span className="ml-1 text-[9px] text-amber-500">(primary)</span>
+                    )}
+                  </p>
+                ))}
+              </div>
+            )}
+            {!activeBenchmark && (
+              <p className="text-xs">
+                <Link
+                  href={`/dashboard/listings/${listing.id}`}
+                  className="font-medium text-amber-700 hover:underline"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  {activeBenchmark.listingUrl}
-                </a>
+                  + Add benchmark listing
+                </Link>
+                <span className="ml-1 text-foreground/40">— improves accuracy</span>
               </p>
             )}
           </div>

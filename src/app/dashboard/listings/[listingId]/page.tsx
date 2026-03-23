@@ -245,10 +245,9 @@ export default function ListingHistoryPage() {
       {(() => {
         const currentComps = listing?.input_attributes?.preferredComps ?? [];
         const hasBenchmark = currentComps.length > 0;
-        const primaryBenchmark = currentComps[0] ?? null;
         return (
           <Card
-            className={hasBenchmark ? "border-amber-200 bg-amber-50/30" : ""}
+            className={hasBenchmark ? "border-amber-200 bg-amber-50/30" : "border-amber-100 bg-amber-50/20"}
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -261,37 +260,44 @@ export default function ListingHistoryPage() {
                       Active
                     </span>
                   )}
+                  {!hasBenchmark && (
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                      Recommended
+                    </span>
+                  )}
                 </div>
                 {hasBenchmark ? (
                   <div className="mt-1 space-y-1">
                     <p className="text-xs font-medium text-muted">
-                      Primary benchmark ({currentComps.length} pinned):
+                      {currentComps.length} benchmark{currentComps.length !== 1 ? "s" : ""} pinned · first URL is primary anchor:
                     </p>
-                    {primaryBenchmark && (
-                      <p className="truncate text-xs text-accent">
+                    {currentComps.map((comp, idx) => (
+                      <p key={idx} className="truncate text-xs text-accent">
+                        <span className="mr-1 font-medium text-muted">{idx + 1}.</span>
                         <a
-                          href={primaryBenchmark.listingUrl}
+                          href={comp.listingUrl}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="hover:underline"
                         >
-                          {primaryBenchmark.listingUrl}
+                          {comp.listingUrl}
                         </a>
-                        {primaryBenchmark.note && (
-                          <span className="ml-1 italic text-muted">— {primaryBenchmark.note}</span>
+                        {idx === 0 && (
+                          <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold text-amber-800">primary</span>
+                        )}
+                        {comp.note && (
+                          <span className="ml-1 italic text-muted">— {comp.note}</span>
                         )}
                       </p>
-                    )}
-                    {currentComps.length > 1 && (
-                      <p className="text-xs text-muted">
-                        +{currentComps.length - 1} more pinned comp{currentComps.length - 1 !== 1 ? "s" : ""}
-                      </p>
-                    )}
+                    ))}
                   </div>
                 ) : (
-                  <p className="mt-0.5 text-xs text-muted">
-                    Pin a benchmark listing to anchor re-run pricing to a specific comparable.
-                  </p>
+                  <div className="mt-1">
+                    <p className="text-sm font-medium text-gray-800">The single best way to improve accuracy.</p>
+                    <p className="mt-0.5 text-xs text-muted">
+                      Paste the Airbnb listing you compete with most — we&apos;ll anchor your estimate to its real nightly rate.
+                    </p>
+                  </div>
                 )}
                 {pinnedCompMsg && (
                   <p className="mt-1 text-xs text-accent">{pinnedCompMsg}</p>
@@ -310,10 +316,10 @@ export default function ListingHistoryPage() {
                 )}
                 <Button
                   size="sm"
-                  variant="ghost"
+                  variant={hasBenchmark ? "ghost" : undefined}
                   onClick={() => setShowPinnedComps(!showPinnedComps)}
                 >
-                  {hasBenchmark ? "Edit" : "Add benchmark"}
+                  {hasBenchmark ? "Edit" : "Set benchmark listing"}
                 </Button>
               </div>
             </div>
@@ -321,7 +327,7 @@ export default function ListingHistoryPage() {
             {showPinnedComps && (
               <div className="mt-4 space-y-3 border-t border-border pt-4">
                 <p className="text-xs text-muted">
-                  Paste Airbnb listing URLs. The first URL becomes the <strong>primary benchmark</strong> — its price anchors future re-runs. Additional URLs are used as supporting validation comps.
+                  Paste the URL of the Airbnb listing you compete with most. The first URL becomes the <strong>primary benchmark</strong> — its nightly rate anchors all future re-runs for this listing. Additional URLs are used as supporting market comps.
                 </p>
                 {pinnedCompsList.map((comp, idx) => (
                   <div key={idx} className="flex gap-2">
@@ -368,7 +374,7 @@ export default function ListingHistoryPage() {
                     onClick={() => setPinnedCompsList([...pinnedCompsList, { listingUrl: "", note: "" }])}
                     className="text-xs text-accent hover:underline"
                   >
-                    + Add comparable
+                    + Add another listing
                   </button>
                 )}
                 <div className="flex gap-2 pt-1">

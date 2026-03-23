@@ -135,11 +135,10 @@ export default function ToolPage() {
   const [lastMinuteAggressiveness, setLastMinuteAggressiveness] = useState(50);
   const [lastMinuteFloor, setLastMinuteFloor] = useState(0.65);
 
-  // Preferred comparables (list)
-  const [showPreferredComps, setShowPreferredComps] = useState(false);
+  // Benchmark listing (formerly preferred comparables)
   const [preferredCompsList, setPreferredCompsList] = useState<
     { listingUrl: string; note: string }[]
-  >([]);
+  >([{ listingUrl: "", note: "" }]);
 
   // Submit
   const [loading, setLoading] = useState(false);
@@ -203,16 +202,17 @@ export default function ToolPage() {
             cap: 1.05,
           },
           listingUrl: inputMode === "url" ? listingUrl : undefined,
-          preferredComps:
-            showPreferredComps && preferredCompsList.length > 0
-              ? preferredCompsList
-                  .filter((c) => c.listingUrl.includes("airbnb.com/rooms/"))
-                  .map((c) => ({
-                    listingUrl: c.listingUrl.trim(),
-                    note: c.note.trim() || undefined,
-                    enabled: true,
-                  }))
-              : undefined,
+          preferredComps: preferredCompsList.some((c) =>
+            c.listingUrl.includes("airbnb.com/rooms/")
+          )
+            ? preferredCompsList
+                .filter((c) => c.listingUrl.includes("airbnb.com/rooms/"))
+                .map((c) => ({
+                  listingUrl: c.listingUrl.trim(),
+                  note: c.note.trim() || undefined,
+                  enabled: true,
+                }))
+            : undefined,
           saveToListings:
             isSignedIn && saveToListings
               ? {
@@ -715,78 +715,69 @@ export default function ToolPage() {
                   </div>
                 )}
 
-                {/* Preferred comparables (list) */}
-                <div className="rounded-xl border border-border bg-gray-50 p-4">
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between text-sm font-medium"
-                    onClick={() => setShowPreferredComps(!showPreferredComps)}
-                  >
-                    <span>
-                      Pin reference comparables
-                      {preferredCompsList.length > 0 && (
-                        <span className="ml-1.5 rounded-full bg-accent/10 px-2 py-0.5 text-xs text-accent">
-                          {preferredCompsList.length}
-                        </span>
-                      )}
+                {/* Benchmark listing */}
+                <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4">
+                  <div className="mb-1 flex items-center gap-2">
+                    <p className="text-sm font-semibold text-gray-900">Add your benchmark listing</p>
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                      Recommended
                     </span>
-                    <span className="text-muted">{showPreferredComps ? "▲" : "▼"}</span>
-                  </button>
-                  {showPreferredComps && (
-                    <div className="mt-3 space-y-3">
-                      <p className="text-xs text-muted">
-                        Paste Airbnb listing URLs you want the model to weight more heavily. Each pinned comp receives a 2× similarity boost.
-                      </p>
-                      {preferredCompsList.map((comp, idx) => (
-                        <div key={idx} className="flex gap-2">
-                          <div className="flex-1 space-y-1.5">
-                            <input
-                              type="url"
-                              placeholder="https://airbnb.com/rooms/123..."
-                              value={comp.listingUrl}
-                              onChange={(e) => {
-                                const next = [...preferredCompsList];
-                                next[idx] = { ...next[idx], listingUrl: e.target.value };
-                                setPreferredCompsList(next);
-                              }}
-                              className="input w-full text-sm"
-                            />
-                            {comp.listingUrl && !comp.listingUrl.includes("airbnb.com/rooms/") && (
-                              <p className="text-xs text-warning">Must be a valid Airbnb listing URL.</p>
-                            )}
-                            <input
-                              type="text"
-                              placeholder="Optional note (e.g. same building)"
-                              value={comp.note}
-                              onChange={(e) => {
-                                const next = [...preferredCompsList];
-                                next[idx] = { ...next[idx], note: e.target.value };
-                                setPreferredCompsList(next);
-                              }}
-                              className="input w-full text-sm"
-                              maxLength={500}
-                            />
-                          </div>
+                  </div>
+                  <p className="mb-3 text-xs text-gray-600">
+                    The single best way to improve accuracy. Paste the URL of the Airbnb listing you compete with most — we&apos;ll anchor your pricing estimate to its real nightly rate.
+                  </p>
+                  <div className="space-y-3">
+                    {preferredCompsList.map((comp, idx) => (
+                      <div key={idx} className="flex gap-2">
+                        <div className="flex-1 space-y-1.5">
+                          <input
+                            type="url"
+                            placeholder="https://airbnb.com/rooms/123... (the listing you compete with most)"
+                            value={comp.listingUrl}
+                            onChange={(e) => {
+                              const next = [...preferredCompsList];
+                              next[idx] = { ...next[idx], listingUrl: e.target.value };
+                              setPreferredCompsList(next);
+                            }}
+                            className="input w-full text-sm"
+                          />
+                          {comp.listingUrl && !comp.listingUrl.includes("airbnb.com/rooms/") && (
+                            <p className="text-xs text-warning">Must be a valid Airbnb listing URL (airbnb.com/rooms/...).</p>
+                          )}
+                          <input
+                            type="text"
+                            placeholder="Optional label (e.g. main competitor, same building)"
+                            value={comp.note}
+                            onChange={(e) => {
+                              const next = [...preferredCompsList];
+                              next[idx] = { ...next[idx], note: e.target.value };
+                              setPreferredCompsList(next);
+                            }}
+                            className="input w-full text-sm"
+                            maxLength={500}
+                          />
+                        </div>
+                        {preferredCompsList.length > 1 && (
                           <button
                             type="button"
                             onClick={() => setPreferredCompsList(preferredCompsList.filter((_, i) => i !== idx))}
-                            className="self-start text-xs text-muted hover:text-warning"
+                            className="self-start pt-2 text-xs text-muted hover:text-warning"
                           >
                             ✕
                           </button>
-                        </div>
-                      ))}
-                      {preferredCompsList.length < 10 && (
-                        <button
-                          type="button"
-                          onClick={() => setPreferredCompsList([...preferredCompsList, { listingUrl: "", note: "" }])}
-                          className="text-xs text-accent hover:underline"
-                        >
-                          + Add comparable
-                        </button>
-                      )}
-                    </div>
-                  )}
+                        )}
+                      </div>
+                    ))}
+                    {preferredCompsList.length < 10 && (
+                      <button
+                        type="button"
+                        onClick={() => setPreferredCompsList([...preferredCompsList, { listingUrl: "", note: "" }])}
+                        className="text-xs text-accent hover:underline"
+                      >
+                        + Add another listing
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {error && (
@@ -929,6 +920,14 @@ export default function ToolPage() {
                     lastMinuteMode === "auto"
                       ? "Auto (recommended)"
                       : `Custom (Agg ${lastMinuteAggressiveness}, Floor ${lastMinuteFloor.toFixed(2)})`
+                  }
+                />
+                <SummaryRow
+                  label="Benchmark"
+                  value={
+                    preferredCompsList.some((c) => c.listingUrl.includes("airbnb.com/rooms/"))
+                      ? "Added ✓"
+                      : "Not set"
                   }
                 />
               </div>

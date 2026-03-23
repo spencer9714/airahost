@@ -54,6 +54,12 @@ function BenchmarkBlock({ info }: { info: BenchmarkInfo }) {
       </div>
 
       {statusUsed && (
+        <p className="mt-2 text-xs font-medium text-emerald-700">
+          Your benchmark anchored this estimate — this is your most accurate report.
+        </p>
+      )}
+
+      {statusUsed && (
         <div className="mt-3 grid grid-cols-2 gap-3 border-t border-emerald-200 pt-3 sm:grid-cols-4">
           {info.avgBenchmarkPrice != null && (
             <div>
@@ -176,6 +182,12 @@ export function HowWeEstimated({ report }: { report: PricingReport }) {
             />
           </div>
         </details>
+      )}
+
+      {!benchmarkInfo && (
+        <p className="mt-4 rounded-xl border border-amber-100 bg-amber-50/50 px-4 py-3 text-xs text-amber-800">
+          <span className="font-semibold">Tip:</span> Add a benchmark listing to your next report — paste the Airbnb URL you compete with most for a more accurate, market-anchored estimate.
+        </p>
       )}
 
       {report.recommendedPrice?.notes &&
