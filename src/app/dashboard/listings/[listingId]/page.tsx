@@ -18,6 +18,19 @@ type ReportSnapshot = {
   result_summary: {
     nightlyMedian?: number;
     recommendedPrice?: RecommendedPrice;
+    comparableListings?: Array<unknown> | null;
+    benchmarkInfo?: {
+      benchmarkUsed?: boolean | null;
+      benchmarkFetchStatus?: string | null;
+      benchmarkMismatchLevel?: string | null;
+      conflictDetected?: boolean | null;
+      fetchStats?: {
+        totalDays?: number;
+        highConfidenceDays?: number;
+        mediumConfidenceDays?: number;
+        lowConfidenceDays?: number;
+      } | null;
+    } | null;
   } | null;
   error_message?: string | null;
 };
@@ -245,12 +258,14 @@ export default function ListingHistoryPage() {
       {(() => {
         const currentComps = listing?.input_attributes?.preferredComps ?? [];
         const hasBenchmark = currentComps.length > 0;
+        // Show edit form immediately when no benchmark is set; otherwise toggle
+        const editOpen = !hasBenchmark || showPinnedComps;
         return (
           <Card
             className={hasBenchmark ? "border-amber-200 bg-amber-50/30" : "border-amber-100 bg-amber-50/20"}
           >
             <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <p className="text-sm font-semibold">
                     {hasBenchmark ? "Pricing anchored to your benchmark" : "Benchmark listing"}
@@ -266,72 +281,77 @@ export default function ListingHistoryPage() {
                     </span>
                   )}
                 </div>
-                {hasBenchmark ? (
+                {hasBenchmark && !showPinnedComps && (
                   <div className="mt-1 space-y-1">
-                    <p className="text-xs font-medium text-muted">
-                      {currentComps.length} benchmark{currentComps.length !== 1 ? "s" : ""} pinned · first URL is primary anchor:
-                    </p>
                     {currentComps.map((comp, idx) => (
                       <p key={idx} className="truncate text-xs text-accent">
                         <span className="mr-1 font-medium text-muted">{idx + 1}.</span>
-                        <a
-                          href={comp.listingUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="hover:underline"
-                        >
+                        <a href={comp.listingUrl} target="_blank" rel="noopener noreferrer" className="hover:underline">
                           {comp.listingUrl}
                         </a>
                         {idx === 0 && (
                           <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold text-amber-800">primary</span>
                         )}
-                        {comp.note && (
-                          <span className="ml-1 italic text-muted">— {comp.note}</span>
-                        )}
+                        {comp.note && <span className="ml-1 italic text-muted">— {comp.note}</span>}
                       </p>
                     ))}
-                  </div>
-                ) : (
-                  <div className="mt-1">
-                    <p className="text-sm font-medium text-gray-800">The single best way to improve accuracy.</p>
-                    <p className="mt-0.5 text-xs text-muted">
-                      Paste the Airbnb listing you compete with most — we&apos;ll anchor your estimate to its real nightly rate.
-                    </p>
                   </div>
                 )}
                 {pinnedCompMsg && (
                   <p className="mt-1 text-xs text-accent">{pinnedCompMsg}</p>
                 )}
               </div>
-              <div className="flex shrink-0 gap-1.5">
-                {hasBenchmark && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleRemovePinnedComps}
-                    disabled={pinnedCompSaving}
-                  >
+              {hasBenchmark && !showPinnedComps && (
+                <div className="flex shrink-0 gap-1.5">
+                  <Button size="sm" variant="ghost" onClick={handleRemovePinnedComps} disabled={pinnedCompSaving}>
                     Clear all
                   </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant={hasBenchmark ? "ghost" : undefined}
-                  onClick={() => setShowPinnedComps(!showPinnedComps)}
-                >
-                  {hasBenchmark ? "Edit" : "Set benchmark listing"}
-                </Button>
-              </div>
+                  <Button size="sm" variant="ghost" onClick={() => setShowPinnedComps(true)}>
+                    Edit
+                  </Button>
+                </div>
+              )}
             </div>
 
-            {showPinnedComps && (
-              <div className="mt-4 space-y-3 border-t border-border pt-4">
-                <p className="text-xs text-muted">
-                  Paste the URL of the Airbnb listing you compete with most. The first URL becomes the <strong>primary benchmark</strong> — its nightly rate anchors all future re-runs for this listing. Additional URLs are used as supporting market comps.
-                </p>
+            {editOpen && (
+              <div className={hasBenchmark ? "mt-4 space-y-3 border-t border-border pt-4" : "mt-3 space-y-3"}>
+                {!hasBenchmark && (
+                  <p className="text-xs text-muted">
+                    The single best way to improve accuracy. Paste the Airbnb listing you compete with most — we&apos;ll anchor your estimate to its real nightly rate.
+                  </p>
+                )}
                 {pinnedCompsList.map((comp, idx) => (
-                  <div key={idx} className="flex gap-2">
-                    <div className="flex-1 space-y-1.5">
+                  <div key={idx} className={`rounded-lg border p-3 ${idx === 0 ? "border-amber-300 bg-amber-50/60" : "border-gray-200 bg-white"}`}>
+                    {pinnedCompsList.length > 1 && (
+                      <div className="mb-2 flex items-center justify-between">
+                        {idx === 0 ? (
+                          <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+                            ★ Primary benchmark
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = [...pinnedCompsList];
+                              const [picked] = next.splice(idx, 1);
+                              next.unshift(picked);
+                              setPinnedCompsList(next);
+                            }}
+                            className="rounded-full border border-gray-300 px-2 py-0.5 text-[10px] font-medium text-gray-500 hover:border-amber-400 hover:text-amber-700 transition-colors"
+                          >
+                            Set as primary
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setPinnedCompsList(pinnedCompsList.filter((_, i) => i !== idx))}
+                          className="text-xs text-muted hover:text-warning"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )}
+                    <div className="space-y-1.5">
                       <input
                         type="url"
                         placeholder="https://airbnb.com/rooms/123..."
@@ -359,13 +379,6 @@ export default function ListingHistoryPage() {
                         maxLength={500}
                       />
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setPinnedCompsList(pinnedCompsList.filter((_, i) => i !== idx))}
-                      className="self-start pt-2 text-xs text-muted hover:text-warning"
-                    >
-                      ✕
-                    </button>
                   </div>
                 ))}
                 {pinnedCompsList.length < 10 && (
@@ -386,15 +399,13 @@ export default function ListingHistoryPage() {
                       pinnedCompsList.every((c) => !c.listingUrl.includes("airbnb.com/rooms/"))
                     }
                   >
-                    {pinnedCompSaving ? "Saving..." : "Save to listing"}
+                    {pinnedCompSaving ? "Saving..." : "Save"}
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setShowPinnedComps(false)}
-                  >
-                    Cancel
-                  </Button>
+                  {hasBenchmark && (
+                    <Button size="sm" variant="ghost" onClick={() => setShowPinnedComps(false)}>
+                      Cancel
+                    </Button>
+                  )}
                 </div>
               </div>
             )}
@@ -439,6 +450,17 @@ export default function ListingHistoryPage() {
               const recommended =
                 report.result_summary?.recommendedPrice?.nightly;
               const median = report.result_summary?.nightlyMedian;
+              const benchmarkInfo = report.result_summary?.benchmarkInfo;
+              const comparableCount =
+                report.result_summary?.comparableListings?.length ?? 0;
+              const benchmarkUsed = benchmarkInfo?.benchmarkUsed === true;
+              const totalDays = benchmarkInfo?.fetchStats?.totalDays ?? 0;
+              const highDays = benchmarkInfo?.fetchStats?.highConfidenceDays ?? 0;
+              const lowDays = benchmarkInfo?.fetchStats?.lowConfidenceDays ?? 0;
+              const confidenceRate =
+                totalDays > 0 ? Math.round((highDays / totalDays) * 100) : null;
+              const lowConfidenceRate =
+                totalDays > 0 ? Math.round((lowDays / totalDays) * 100) : null;
 
               const statusColor =
                 report.status === "ready"
@@ -481,6 +503,54 @@ export default function ListingHistoryPage() {
                           }
                         )}
                       </p>
+                      {report.status === "ready" && (
+                        <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                          {benchmarkUsed && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                              Benchmark used
+                            </span>
+                          )}
+                          {benchmarkInfo?.benchmarkFetchStatus === "direct_page" && (
+                            <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-medium text-blue-700">
+                              Anchored via listing page
+                            </span>
+                          )}
+                          {benchmarkInfo?.benchmarkMismatchLevel === "strong_mismatch" && (
+                            <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-medium text-rose-700">
+                              Benchmark mismatch
+                            </span>
+                          )}
+                          {benchmarkInfo?.conflictDetected && (
+                            <span className="rounded-full bg-yellow-50 px-2 py-0.5 text-[10px] font-medium text-yellow-700">
+                              Market conflict
+                            </span>
+                          )}
+                          {comparableCount > 0 && (
+                            <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-700">
+                              {comparableCount} comps shown
+                            </span>
+                          )}
+                          {benchmarkUsed && confidenceRate != null && (
+                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                              Confidence {confidenceRate}%
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {report.status === "ready" && benchmarkUsed && confidenceRate != null && (
+                        <p className="text-xs text-muted">
+                          Benchmark confidence rate:{" "}
+                          <span className="font-medium text-foreground">{confidenceRate}%</span>
+                          {totalDays > 0 && (
+                            <>
+                              {" "}high-confidence days
+                              {lowConfidenceRate != null && lowConfidenceRate > 0 && (
+                                <span className="text-muted"> · {lowConfidenceRate}% low-confidence direct-page days</span>
+                              )}
+                            </>
+                          )}
+                        </p>
+                      )}
                       {report.status === "ready" && (
                         <p className="text-sm">
                           {recommended != null && (
