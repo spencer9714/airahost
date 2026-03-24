@@ -47,21 +47,8 @@ interface Props {
     dates: { startDate: string; endDate: string }
   ) => Promise<void>;
   onDelete: () => void;
-  onViewDetails: () => void;
   onViewHistory: () => void;
   isRunning: boolean;
-  isExpanded: boolean;
-  historyLoading: boolean;
-  historyRows: Array<{
-    id: string;
-    trigger: string;
-    created_at: string;
-    pricing_reports: {
-      share_id: string;
-      status: string;
-      result_summary: { nightlyMedian?: number } | null;
-    } | null;
-  }>;
   onRename: (listingId: string, nextName: string) => Promise<void>;
   onSaveDateDefaults: (
     listingId: string,
@@ -69,6 +56,10 @@ interface Props {
     startDate: string | null,
     endDate: string | null
   ) => void;
+  onSavePreferredComps: (
+    listingId: string,
+    preferredComps: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null
+  ) => Promise<void>;
 }
 
 const PROPERTY_TYPE_SHORT: Record<string, string> = {
@@ -94,23 +85,24 @@ export function ListingCard({
   onSelect,
   onRunAnalysis,
   onDelete,
-  onViewDetails,
   onViewHistory,
   isRunning,
-  isExpanded,
-  historyLoading,
-  historyRows,
   onRename,
   onSaveDateDefaults,
+  onSavePreferredComps,
 }: Props) {
   const [editOpen, setEditOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [renameSaving, setRenameSaving] = useState(false);
   const [renameError, setRenameError] = useState("");
   const [showRenameSuccess, setShowRenameSuccess] = useState(false);
+  const [benchmarkDrafts, setBenchmarkDrafts] = useState<
+    Array<{ listingUrl: string; note: string }>
+  >([]);
+  const [benchmarkSaving, setBenchmarkSaving] = useState(false);
+  const [benchmarkMessage, setBenchmarkMessage] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // Date settings
   const [dateMode, setDateMode] = useState<DateMode>(
     listing.default_date_mode ?? "next_30"
   );
@@ -124,17 +116,29 @@ export function ListingCard({
   const displayTitle =
     listing.name?.trim() || listing.input_address || "Listing";
   const latest = listing.latestReport;
+
   const range =
     latest?.result_summary?.nightlyMin !== undefined &&
     latest?.result_summary?.nightlyMax !== undefined
-      ? `$${latest.result_summary.nightlyMin} – $${latest.result_summary.nightlyMax}`
-      : "No report yet";
+      ? `$${latest.result_summary.nightlyMin}–$${latest.result_summary.nightlyMax}`
+      : null;
 
   const attrs = listing.input_attributes;
   const activeBenchmarks = (attrs.preferredComps ?? []).filter(
     (c) => c.enabled !== false && c.listingUrl
   );
-  const activeBenchmark = activeBenchmarks[0] ?? null;
+  const hasBenchmark = activeBenchmarks.length > 0;
+
+  const statusDot =
+    latest?.status === "ready"
+      ? "bg-emerald-500"
+      : latest?.status === "running" || latest?.status === "queued"
+      ? "bg-amber-400"
+      : "bg-gray-300";
+
+  const typeLabel = attrs.propertyType
+    ? (PROPERTY_TYPE_SHORT[attrs.propertyType] ?? attrs.propertyType)
+    : null;
 
   useEffect(() => {
     if (!editOpen) return;
@@ -151,7 +155,14 @@ export function ListingCard({
     return () => clearTimeout(t);
   }, [showRenameSuccess]);
 
-  // Debounced save of date defaults
+  useEffect(() => {
+    const next = (listing.input_attributes.preferredComps ?? [])
+      .filter((c) => c.enabled !== false && c.listingUrl)
+      .map((c) => ({ listingUrl: c.listingUrl, note: c.note ?? "" }));
+    setBenchmarkDrafts(next.length > 0 ? next : [{ listingUrl: "", note: "" }]);
+    setBenchmarkMessage("");
+  }, [listing.input_attributes.preferredComps]);
+
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const debouncedSaveDates = useCallback(
     (mode: DateMode, start: string | null, end: string | null) => {
@@ -212,134 +223,166 @@ export function ListingCard({
     await onRunAnalysis(listing.id, dates);
   }
 
+  async function handleSaveBenchmarks() {
+    const valid = benchmarkDrafts
+      .map((item) => ({
+        listingUrl: item.listingUrl.trim(),
+        note: item.note.trim(),
+      }))
+      .filter((item) => item.listingUrl.includes("airbnb.com/rooms/"));
+
+    try {
+      setBenchmarkSaving(true);
+      setBenchmarkMessage("");
+      await onSavePreferredComps(
+        listing.id,
+        valid.length > 0
+          ? valid.map((item) => ({
+              listingUrl: item.listingUrl,
+              note: item.note || undefined,
+              enabled: true,
+            }))
+          : null
+      );
+      setBenchmarkMessage(
+        valid.length > 0
+          ? `Saved ${valid.length} benchmark${valid.length !== 1 ? "s" : ""}.`
+          : "Benchmarks cleared."
+      );
+    } catch {
+      setBenchmarkMessage("Could not save benchmark listings.");
+    } finally {
+      setBenchmarkSaving(false);
+    }
+  }
+
   return (
     <div
-      className={`px-5 py-5 cursor-pointer transition-colors hover:bg-gray-50/50 ${
-        isActive ? "border-l-3 border-l-accent pl-4" : ""
+      className={`transition-colors ${
+        isActive
+          ? "border-l-[3px] border-l-accent bg-blue-50/20"
+          : "border-l-[3px] border-l-transparent hover:bg-gray-50/60"
       }`}
     >
-      <div onClick={onSelect}>
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          {/* Left: info */}
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex items-center gap-2">
-              <h3 className="truncate text-base font-semibold">{displayTitle}</h3>
-              {activeBenchmark && (
-                <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
-                  Benchmark active
-                </span>
-              )}
-            </div>
-            <p className="text-sm text-foreground/60">
-              {attrs.propertyType
-                ? (PROPERTY_TYPE_SHORT[attrs.propertyType] ?? attrs.propertyType)
-                : ""}
-              {attrs.propertyType ? " · " : ""}
-              {attrs.maxGuests ?? "?"} guests · {attrs.bedrooms ?? "?"} bed
-              {(attrs.bedrooms ?? 0) !== 1 ? "s" : ""} ·{" "}
-              {attrs.bathrooms ?? "?"} bath
-              {(attrs.bathrooms ?? 0) !== 1 ? "s" : ""}
-            </p>
-            <p className="text-sm">
-              <span className="font-semibold text-foreground">{range}</span>
-              {listing.latestLinkedAt && (
-                <span className="ml-3 text-foreground/50">
-                  Analyzed{" "}
-                  {new Date(listing.latestLinkedAt).toLocaleDateString()}
-                </span>
-              )}
-            </p>
-            {activeBenchmarks.length > 0 && (
-              <div className="space-y-0.5">
-                {activeBenchmarks.map((bm, idx) => (
-                  <p key={idx} className="truncate text-xs text-amber-700">
-                    <span className="mr-1 text-amber-500">{idx + 1}.</span>
-                    <a
-                      href={bm.listingUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hover:underline"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {bm.listingUrl}
-                    </a>
-                    {idx === 0 && activeBenchmarks.length > 1 && (
-                      <span className="ml-1 text-[9px] text-amber-500">(primary)</span>
-                    )}
-                  </p>
-                ))}
-              </div>
-            )}
-            {!activeBenchmark && (
-              <p className="text-xs">
-                <Link
-                  href={`/dashboard/listings/${listing.id}`}
-                  className="font-medium text-amber-700 hover:underline"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  + Add benchmark listing
-                </Link>
-                <span className="ml-1 text-foreground/40">— improves accuracy</span>
-              </p>
-            )}
-          </div>
+      {/* ── Main row ── */}
+      <div
+        className="flex items-center gap-3 px-5 py-4 cursor-pointer"
+        onClick={onSelect}
+      >
+        {/* Status indicator */}
+        <span
+          className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${statusDot}`}
+          title={latest?.status ?? "No report"}
+        />
 
-          {/* Right: actions */}
-          <div
-            className="flex flex-wrap items-center gap-1.5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {latest?.share_id && (
-              <Link href={`/r/${latest.share_id}`}>
-                <Button size="sm" variant="ghost">
-                  Report
-                </Button>
-              </Link>
+        {/* Listing info */}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 mb-0.5">
+            <h3 className="truncate text-sm font-semibold text-foreground">
+              {displayTitle}
+            </h3>
+            {hasBenchmark && (
+              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                Benchmark
+              </span>
             )}
-            <Button size="sm" variant="ghost" onClick={onViewHistory}>
-              All reports
-            </Button>
-            <Button size="sm" variant="ghost" onClick={onViewDetails}>
-              {isExpanded ? "Hide" : "History"}
-            </Button>
-            <Button size="sm" variant="ghost" onClick={onDelete}>
-              Delete
-            </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setEditOpen((v) => {
-                  const next = !v;
-                  if (next) {
-                    setRenameError("");
-                    setDraftName(displayTitle);
-                  }
-                  return next;
-                });
-              }}
-            >
-              {editOpen ? "Close edit" : "Edit"}
-            </Button>
           </div>
+          <p className="text-xs text-foreground/50">
+            {[
+              typeLabel,
+              attrs.maxGuests ? `${attrs.maxGuests} guests` : null,
+              attrs.bedrooms != null
+                ? `${attrs.bedrooms} bed${attrs.bedrooms !== 1 ? "s" : ""}`
+                : null,
+              attrs.bathrooms != null
+                ? `${attrs.bathrooms} bath${attrs.bathrooms !== 1 ? "s" : ""}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+          <div className="mt-1 flex items-center gap-2">
+            {range ? (
+              <span className="text-sm font-semibold text-foreground">
+                {range}
+                <span className="ml-1 text-xs font-normal text-foreground/40">
+                  /night
+                </span>
+              </span>
+            ) : (
+              <span className="text-xs text-foreground/40">No report yet</span>
+            )}
+            {listing.latestLinkedAt && (
+              <span className="text-xs text-foreground/35">
+                · {new Date(listing.latestLinkedAt).toLocaleDateString()}
+              </span>
+            )}
+          </div>
+          {!hasBenchmark && (
+            <Link
+              href={`/dashboard/listings/${listing.id}`}
+              className="mt-1 inline-block text-xs text-amber-700 hover:underline"
+              onClick={(e) => e.stopPropagation()}
+            >
+              + Add benchmark — improves accuracy
+            </Link>
+          )}
+        </div>
+
+        {/* Actions */}
+        <div
+          className="flex shrink-0 items-center gap-2"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {latest?.share_id && latest.status === "ready" && (
+            <Link
+              href={`/r/${latest.share_id}`}
+              className="hidden text-xs font-medium text-foreground/50 hover:text-foreground transition-colors sm:inline"
+            >
+              View report
+            </Link>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setEditOpen((v) => {
+                const next = !v;
+                if (next) {
+                  setRenameError("");
+                  setDraftName(displayTitle);
+                }
+                return next;
+              });
+            }}
+          >
+            {editOpen ? "Close" : "Edit"}
+          </Button>
+          <Button size="sm" onClick={handleRunClick} disabled={isRunning}>
+            {isRunning ? "Running…" : "Analyze"}
+          </Button>
         </div>
       </div>
 
-      {/* ── Inline date settings ────────────────────────────── */}
+      {/* ── Edit panel ── */}
       {editOpen && (
-        <div className="mt-3" onClick={(e) => e.stopPropagation()}>
-          <div className="space-y-4 rounded-xl border border-border bg-white p-4">
+        <div
+          className="border-t border-border px-5 pb-5 pt-4"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="space-y-5 rounded-xl border border-border bg-gray-50/70 p-4">
+            {/* Rename */}
             <div className="space-y-2">
-              <p className="text-sm font-semibold text-foreground">Rename</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-foreground/40">
+                Rename
+              </p>
               <div className="flex flex-wrap items-center gap-2">
                 <input
                   ref={inputRef}
                   type="text"
                   value={draftName}
                   onChange={(e) => setDraftName(e.target.value)}
-                  onBlur={() => {
-                    void commitRename();
-                  }}
+                  onBlur={() => void commitRename()}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault();
@@ -347,41 +390,34 @@ export function ListingCard({
                     }
                   }}
                   aria-label="Rename listing title"
-                  className="w-full max-w-sm rounded-lg border border-border bg-white px-3 py-2 text-base font-semibold outline-none focus:border-accent"
+                  className="w-full max-w-sm rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-accent"
                 />
                 {showRenameSuccess && (
-                  <span
-                    className="text-sm font-medium text-emerald-700"
-                    role="status"
-                    aria-live="polite"
-                  >
-                    Updated
+                  <span className="text-xs font-medium text-emerald-600" role="status" aria-live="polite">
+                    Saved
                   </span>
                 )}
               </div>
               {renameError && (
-                <p
-                  className="text-sm text-rose-600"
-                  role="status"
-                  aria-live="polite"
-                >
+                <p className="text-xs text-rose-600" role="status" aria-live="polite">
                   {renameError}
                 </p>
               )}
             </div>
 
+            {/* Analysis window */}
             <div className="space-y-3">
-              <p className="text-sm font-semibold text-foreground">
-                Date settings
+              <p className="text-xs font-semibold uppercase tracking-wide text-foreground/40">
+                Analysis window
               </p>
-              <div className="inline-flex gap-1 rounded-xl border border-border bg-gray-100/80 p-1">
+              <div className="inline-flex gap-1 rounded-lg border border-border bg-gray-100/80 p-1">
                 <button
                   type="button"
                   onClick={() => handleDateModeChange("next_30")}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                  className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
                     dateMode === "next_30"
                       ? "bg-white text-foreground shadow-sm"
-                      : "text-foreground/60 hover:text-foreground"
+                      : "text-foreground/50 hover:text-foreground"
                   }`}
                 >
                   Next 30 days
@@ -389,10 +425,10 @@ export function ListingCard({
                 <button
                   type="button"
                   onClick={() => handleDateModeChange("custom")}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold transition-all ${
+                  className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
                     dateMode === "custom"
                       ? "bg-white text-foreground shadow-sm"
-                      : "text-foreground/60 hover:text-foreground"
+                      : "text-foreground/50 hover:text-foreground"
                   }`}
                 >
                   Custom range
@@ -402,72 +438,170 @@ export function ListingCard({
               {dateMode === "custom" && (
                 <div className="flex flex-wrap items-center gap-4">
                   <label className="space-y-1">
-                    <span className="text-sm font-medium text-foreground/60">
-                      Start
-                    </span>
+                    <span className="text-xs font-medium text-foreground/50">Start</span>
                     <input
                       type="date"
                       value={customStart}
                       onChange={(e) => handleCustomStartChange(e.target.value)}
-                      className="block rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+                      className="block rounded-lg border border-border bg-white px-3 py-1.5 text-sm outline-none focus:border-accent"
                     />
                   </label>
                   <label className="space-y-1">
-                    <span className="text-sm font-medium text-foreground/60">
-                      End
-                    </span>
+                    <span className="text-xs font-medium text-foreground/50">End</span>
                     <input
                       type="date"
                       value={customEnd}
                       onChange={(e) => handleCustomEndChange(e.target.value)}
                       min={customStart}
-                      className="block rounded-lg border border-border px-3 py-2 text-sm outline-none focus:border-accent"
+                      className="block rounded-lg border border-border bg-white px-3 py-1.5 text-sm outline-none focus:border-accent"
                     />
                   </label>
                 </div>
               )}
             </div>
 
-            <Button size="md" onClick={handleRunClick} disabled={isRunning}>
-              {isRunning ? "Queued..." : "Run analysis"}
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* ── Expanded report history ─────────────────────────── */}
-      {isExpanded && (
-        <div className="mt-4 border-t border-border pt-4">
-          <p className="mb-3 text-sm font-semibold">Report history</p>
-          {historyLoading ? (
-            <p className="text-sm text-foreground/60">Loading...</p>
-          ) : historyRows.length === 0 ? (
-            <p className="text-sm text-foreground/60">No reports yet.</p>
-          ) : (
-            <div className="space-y-1">
-              {historyRows.map((row) => {
-                const report = row.pricing_reports;
-                if (!report) return null;
-                return (
-                  <Link
-                    key={row.id}
-                    href={`/r/${report.share_id}`}
-                    className="flex items-center justify-between rounded-xl px-3 py-2.5 text-sm hover:bg-gray-100"
-                  >
-                    <span className="text-foreground/60">
-                      {new Date(row.created_at).toLocaleDateString()} (
-                      {row.trigger})
-                    </span>
-                    <span className="font-semibold">
-                      {report.result_summary?.nightlyMedian
-                        ? `$${report.result_summary.nightlyMedian}/night`
-                        : report.status}
-                    </span>
-                  </Link>
-                );
-              })}
+            {/* Benchmark listings */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-foreground/40">
+                  Benchmark listings
+                </p>
+                {hasBenchmark && (
+                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                    {activeBenchmarks.length} active
+                  </span>
+                )}
+              </div>
+              <div className="space-y-2">
+                {benchmarkDrafts.map((comp, idx) => (
+                  <div key={idx} className={`rounded-lg border p-3 ${idx === 0 ? "border-amber-300 bg-amber-50/60" : "border-border bg-white"}`}>
+                    {/* Row header */}
+                    <div className="mb-2 flex items-center justify-between">
+                      {idx === 0 ? (
+                        <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+                          ★ Primary benchmark
+                        </span>
+                      ) : benchmarkDrafts.length > 1 ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = [...benchmarkDrafts];
+                            const [picked] = next.splice(idx, 1);
+                            next.unshift(picked);
+                            setBenchmarkDrafts(next);
+                          }}
+                          className="rounded-full border border-gray-300 px-2 py-0.5 text-[10px] font-medium text-gray-500 hover:border-amber-400 hover:text-amber-700 transition-colors"
+                        >
+                          Set as primary
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setBenchmarkDrafts((prev) =>
+                            prev.length > 1 ? prev.filter((_, i) => i !== idx) : [{ listingUrl: "", note: "" }]
+                          )
+                        }
+                        className="ml-auto text-xs text-foreground/45 hover:text-rose-600"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      <input
+                        type="url"
+                        placeholder="https://airbnb.com/rooms/123..."
+                        value={comp.listingUrl}
+                        onChange={(e) => {
+                          const next = [...benchmarkDrafts];
+                          next[idx] = { ...next[idx], listingUrl: e.target.value };
+                          setBenchmarkDrafts(next);
+                        }}
+                        className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-accent"
+                      />
+                      {comp.listingUrl && !comp.listingUrl.includes("airbnb.com/rooms/") && (
+                        <p className="text-xs text-rose-600">Must be a valid Airbnb room URL.</p>
+                      )}
+                      <input
+                        type="text"
+                        placeholder="Optional note"
+                        value={comp.note}
+                        onChange={(e) => {
+                          const next = [...benchmarkDrafts];
+                          next[idx] = { ...next[idx], note: e.target.value };
+                          setBenchmarkDrafts(next);
+                        }}
+                        className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-accent"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {benchmarkDrafts.length < 10 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setBenchmarkDrafts((prev) => [...prev, { listingUrl: "", note: "" }])
+                  }
+                  className="text-xs font-medium text-amber-700 hover:underline"
+                >
+                  + Add benchmark listing
+                </button>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={handleSaveBenchmarks}
+                  disabled={
+                    benchmarkSaving ||
+                    benchmarkDrafts.some(
+                      (comp) =>
+                        comp.listingUrl.trim().length > 0 &&
+                        !comp.listingUrl.includes("airbnb.com/rooms/")
+                    )
+                  }
+                >
+                  {benchmarkSaving ? "Saving..." : "Save benchmarks"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setBenchmarkDrafts([{ listingUrl: "", note: "" }])}
+                  disabled={benchmarkSaving}
+                >
+                  Clear draft
+                </Button>
+                {benchmarkMessage && (
+                  <span className="text-xs text-foreground/55" role="status" aria-live="polite">
+                    {benchmarkMessage}
+                  </span>
+                )}
+              </div>
             </div>
-          )}
+
+            {/* Run */}
+            <Button size="sm" onClick={handleRunClick} disabled={isRunning}>
+              {isRunning ? "Queued…" : "Run analysis"}
+            </Button>
+
+            {/* Footer: secondary actions */}
+            <div className="flex items-center justify-between border-t border-border pt-3">
+              <button
+                type="button"
+                onClick={onViewHistory}
+                className="text-xs font-medium text-foreground/50 hover:text-foreground transition-colors"
+              >
+                All reports →
+              </button>
+              <button
+                type="button"
+                onClick={onDelete}
+                className="text-xs font-medium text-rose-500 hover:text-rose-700 transition-colors"
+              >
+                Delete listing
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
