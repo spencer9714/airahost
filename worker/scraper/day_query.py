@@ -72,6 +72,9 @@ class DayResult:
     is_weekend: bool = False
     price_distribution: Dict[str, Any] = field(default_factory=dict)
     top_comps: List[Dict[str, Any]] = field(default_factory=list)
+    # All priced comps for this day (room_id -> nightly_price).
+    # Used to populate priceByDate for every comp, not just top_k.
+    comp_prices: Dict[str, float] = field(default_factory=dict)
     error: Optional[str] = None
 
 
@@ -136,7 +139,7 @@ def estimate_base_price_for_date(
     def _to_comparable_payload(spec: ListingSpec, score: float) -> Dict[str, Any]:
         room_match = ROOM_ID_RE.search(spec.url or "")
         comp_id = room_match.group(1) if room_match else (spec.url or f"comp-{int(time.time() * 1000)}")
-        return {
+        payload: Dict[str, Any] = {
             "id": comp_id,
             "title": spec.title or "Comparable listing",
             "propertyType": spec.property_type or target.property_type or "entire_home",
@@ -151,38 +154,65 @@ def estimate_base_price_for_date(
             "location": target.location or None,
             "url": spec.url or None,
         }
+        # scrape_nights > 1 means this listing's price was a trip total that was
+        # divided per-night (e.g. "for 2 nights" on a 2-night minimum listing).
+        if spec.scrape_nights > 1:
+            payload["queryNights"] = spec.scrape_nights
+        return payload
 
     checkin_str = date_i.isoformat()
-    next_date = date_i + timedelta(days=1)
-    checkout_str = next_date.isoformat()
     is_weekend = date_i.weekday() >= 4  # Fri=4, Sat=5
 
-    search_url = build_search_url(
-        base_origin, target.location, checkin_str, checkout_str, adults,
-    )
-    logger.info(f"[day_query] {checkin_str}: 1-night search")
-
     try:
-        page.goto(search_url, wait_until="domcontentloaded", timeout=PER_DAY_TIMEOUT_S * 1000)
-        page.wait_for_timeout(700)
+        raw_cards: List[Dict[str, Any]] = []
+        comps: List[ListingSpec] = []
+        priced: List[ListingSpec] = []
+        query_nights_used = 1
 
-        # Dismiss modals
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
+        for query_nights in (1, 2):
+            checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
+            search_url = build_search_url(
+                base_origin, target.location, checkin_str, checkout_str, adults,
+            )
+            logger.info(f"[day_query] {checkin_str}: {query_nights}-night search")
 
-        raw_cards = scroll_and_collect(
-            page,
-            max_rounds=max_scroll_rounds,
-            max_cards=max_cards,
-            pause_ms=600,
-            rate_limit_seconds=rate_limit_seconds,
-        )
+            page.goto(search_url, wait_until="domcontentloaded", timeout=PER_DAY_TIMEOUT_S * 1000)
+            page.wait_for_timeout(700)
 
-        comps = [parse_card_to_spec(c) for c in raw_cards]
-        comps = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+            raw_cards = scroll_and_collect(
+                page,
+                max_rounds=max_scroll_rounds,
+                max_cards=max_cards,
+                pause_ms=600,
+                rate_limit_seconds=rate_limit_seconds,
+                stay_nights=query_nights,
+            )
+
+            comps = [parse_card_to_spec(c) for c in raw_cards]
+            priced = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
+            logger.info(
+                f"[day_query] {checkin_str}: query_nights={query_nights} raw_cards={len(raw_cards)} parsed={len(comps)} priced={len(priced)}"
+            )
+            if priced:
+                query_nights_used = query_nights
+                break
+
+        comps = priced
         comps_collected = len(comps)
+
+        # Build full comp_prices map (all priced comps, not just top_k).
+        # This populates priceByDate for every comp in comparable listings.
+        all_comp_prices: Dict[str, float] = {}
+        for c in comps:
+            room_match = ROOM_ID_RE.search(c.url or "")
+            cid = room_match.group(1) if room_match else (c.url or "")
+            if cid and c.nightly_price:
+                all_comp_prices[cid] = round(float(c.nightly_price), 2)
 
         if comps_collected == 0:
             return DayResult(
@@ -266,7 +296,7 @@ def estimate_base_price_for_date(
 
         logger.info(
             f"[day_query] {checkin_str}: comps={comps_collected} filtered={len(filtered_comps)} "
-            f"used={comps_used} median=${dist['median']}"
+            f"used={comps_used} median=${dist['median']} query_nights={query_nights_used}"
         )
 
         return DayResult(
@@ -280,6 +310,7 @@ def estimate_base_price_for_date(
             is_weekend=is_weekend,
             price_distribution=dist,
             top_comps=top_comps,
+            comp_prices=all_comp_prices,
         )
 
     except Exception as exc:

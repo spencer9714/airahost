@@ -21,13 +21,13 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
 # Load .env from worker directory or repo root
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
+load_dotenv(override=True)
 
 from worker.core import db as db_helpers
 from worker.core.cache import compute_cache_key, get_cached, set_cached
@@ -51,6 +51,7 @@ MAX_RUNTIME_SECONDS = int(os.getenv("WORKER_MAX_RUNTIME_SECONDS", "180"))
 CDP_CONNECT_TIMEOUT_MS = int(os.getenv("CDP_CONNECT_TIMEOUT_MS", "15000"))
 WORKER_VERSION = os.getenv("WORKER_VERSION", "worker-0.1.0")
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222")
+WORKER_ENV = os.getenv("WORKER_ENV", "production")
 
 MAX_SCROLL_ROUNDS = int(os.getenv("MAX_SCROLL_ROUNDS", "12"))
 MAX_CARDS = int(os.getenv("MAX_CARDS", "80"))
@@ -339,20 +340,44 @@ def _build_scrape_calendar(
     min_p = sorted_p[0]
     max_p = sorted_p[-1]
 
+    # Weekday/weekend averages: use actual market comparable medians from the
+    # transparent result when available.  These represent what comparable
+    # listings charge on those days — not the user's own adjusted prices.
+    rec_price_info = (transparent_result or {}).get("recommendedPrice") or {}
+    rec = rec_price_info.get("nightly")
+    market_weekday = rec_price_info.get("weekdayEstimate")
+    market_weekend = rec_price_info.get("weekendEstimate")
+
     weekday_p = [d["basePrice"] for d in calendar if not d["isWeekend"]]
     weekend_p = [d["basePrice"] for d in calendar if d["isWeekend"]]
-    weekday_avg = round(sum(weekday_p) / len(weekday_p)) if weekday_p else median
-    weekend_avg = round(sum(weekend_p) / len(weekend_p)) if weekend_p else median
+    weekday_avg = (
+        round(market_weekday) if market_weekday
+        else (round(sum(weekday_p) / len(weekday_p)) if weekday_p else median)
+    )
+    weekend_avg = (
+        round(market_weekend) if market_weekend
+        else (round(sum(weekend_p) / len(weekend_p)) if weekend_p else median)
+    )
 
-    occupancy = 70  # reasonable default for scraped results
+    # Occupancy: there is no way to determine true booking occupancy from search
+    # data alone.  Use a data-quality proxy: higher market data coverage
+    # (fraction of days where we found valid comparable prices) indicates a
+    # more active, higher-demand market → higher occupancy estimate.
+    valid_day_count = sum(1 for dr in daily_results if dr.get("median_price") is not None)
+    coverage_pct = valid_day_count / max(1, len(daily_results))
+    if coverage_pct >= 0.80:
+        occupancy = 73
+    elif coverage_pct >= 0.60:
+        occupancy = 67
+    elif coverage_pct >= 0.40:
+        occupancy = 60
+    else:
+        occupancy = 53
+
     selected_range_avg = average_refundable_price_for_stay(
         base_prices, total_days, discount_policy
     )
     est_monthly = round(selected_range_avg * 30 * (occupancy / 100))
-
-    # Insight from price data
-    rec_price_info = (transparent_result or {}).get("recommendedPrice") or {}
-    rec = rec_price_info.get("nightly")
     if rec and median:
         diff = round(median - rec)
         if abs(diff) <= 5:
@@ -439,6 +464,18 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             if first_url:
                 primary_benchmark_url = first_url
                 logger.info(f"[{job.get('id', '?')}] Primary benchmark URL: {primary_benchmark_url}")
+
+        # Secondary benchmark URLs — preferredComps[1:] used for consensus signal only
+        secondary_benchmark_urls: List[str] = [
+            str(pc.get("listingUrl") or "").strip()
+            for pc in (preferred_comps or [])[1:]
+            if isinstance(pc, dict) and str(pc.get("listingUrl") or "").strip()
+        ]
+        if secondary_benchmark_urls:
+            logger.info(
+                f"[{job.get('id', '?')}] Secondary benchmark URLs "
+                f"({len(secondary_benchmark_urls)}): {', '.join(secondary_benchmark_urls)}"
+            )
         finalized_input_attributes = dict(attributes)
         finalized_input_attributes["inputMode"] = input_mode
         finalized_input_attributes["listingUrl"] = listing_url or None
@@ -446,11 +483,15 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             str(input_mode), listing_url
         )
 
-        # Check cache first (except URL mode where we must scrape to extract specs)
+        # Check cache first (except URL mode where we must scrape to extract specs,
+        # or explicit force_rerun jobs submitted from the dashboard).
         cache_key = job.get("cache_key") or compute_cache_key(
             address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
         )
-        cached = None if bypass_precache else get_cached(client, cache_key)
+        force_rerun = bool((job.get("result_core_debug") or {}).get("force_rerun"))
+        cached = None if (bypass_precache or force_rerun) else get_cached(client, cache_key)
+        if force_rerun:
+            logger.info(f"[{report_id}] force_rerun=true — skipping cache lookup")
         if cached:
             summary, calendar = cached
             logger.info(f"[{report_id}] Cache hit for key={cache_key[:12]}...")
@@ -488,6 +529,9 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             )
 
         _mode_c_succeeded = False
+        # benchmarkInfo is preserved here even when Mode C falls back to Mode B/A.
+        # Without this, a failed-but-attempted benchmark run would lose all transparency.
+        _saved_benchmark_info: Optional[Dict[str, Any]] = None
 
         if primary_benchmark_url and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
             # Mode C: Benchmark-first — use pinned comp as primary anchor.
@@ -508,7 +552,12 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    secondary_benchmark_urls=secondary_benchmark_urls or None,
+                    user_attributes=attributes,
                 )
+
+                # Save benchmark transparency now — before any fallback overwrites transparent_result.
+                _saved_benchmark_info = (transparent_result or {}).get("benchmarkInfo") or None
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
                 if daily_results and valid_prices:
@@ -675,8 +724,11 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             summary["priceDistribution"] = transparent_result.get("priceDistribution")
             summary["recommendedPrice"] = transparent_result.get("recommendedPrice")
             summary["comparableListings"] = transparent_result.get("comparableListings")
-            if transparent_result.get("benchmarkInfo"):
-                summary["benchmarkInfo"] = transparent_result["benchmarkInfo"]
+            # Use benchmarkInfo from transparent_result if present; otherwise use the
+            # one saved before Mode C fell back (preserves benchmark data across fallbacks).
+            bm_info = transparent_result.get("benchmarkInfo") or _saved_benchmark_info
+            if bm_info:
+                summary["benchmarkInfo"] = bm_info
 
         # Write results
         db_helpers.complete_job(
@@ -744,7 +796,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
 
 def main():
     logger.info(f"AriaHost Worker starting (version={WORKER_VERSION})")
-    logger.info(f"  poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
+    logger.info(f"  env={WORKER_ENV}, poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
     logger.info(f"  heartbeat={HEARTBEAT_SECONDS}s, max_runtime={MAX_RUNTIME_SECONDS}s")
     logger.info(f"  CDP={CDP_URL}, connect_timeout={CDP_CONNECT_TIMEOUT_MS}ms")
 
@@ -755,7 +807,7 @@ def main():
     while not _shutdown_event.is_set():
         try:
             worker_token = uuid.uuid4()
-            job = db_helpers.claim_job(client, worker_token, STALE_MINUTES)
+            job = db_helpers.claim_job(client, worker_token, STALE_MINUTES, WORKER_ENV)
 
             if job is None:
                 # No work — wait with current backoff

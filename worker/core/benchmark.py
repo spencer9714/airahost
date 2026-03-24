@@ -8,8 +8,10 @@ Two-stage model
 ---------------
 Stage 1 — Benchmark anchor
   Fetch the benchmark listing's own nightly price for each sample day.
-  Primary strategy: look for it in 1-night search results.
-  Fallback strategy: navigate to its listing page directly with dates.
+  Primary strategy: navigate to the benchmark listing page directly with dates
+  and read the booking widget's discounted/current nightly price.
+  Fallback strategy: use the 1-night search-result card price only if direct-page
+  extraction fails.
 
 Stage 2 — Market validation / adjustment
   Collect a smaller set of other market comps from the same search.
@@ -60,8 +62,48 @@ BENCHMARK_TOP_K: int = 5             # standard: top_k = 10
 BENCHMARK_MAX_SAMPLE_QUERIES: int = 10  # standard: MAX_SAMPLE_QUERIES = 20
 
 # Pricing formula weights
-BENCHMARK_MARKET_WEIGHT: float = 0.30   # 30 % weight to market adjustment
+BENCHMARK_MARKET_WEIGHT: float = 0.30   # 30 % weight to market adjustment (high-confidence baseline)
 BENCHMARK_MAX_ADJ: float = 0.25         # cap raw market offset at ±25 %
+
+# Confidence-adjusted market weight:
+# Lower benchmark confidence → market has more pull (benchmark trusted less)
+_CONFIDENCE_EFFECTIVE_WEIGHTS: Dict[str, float] = {
+    "high":   BENCHMARK_MARKET_WEIGHT,   # 0.30 — search card price, most reliable
+    "medium": 0.42,                       # direct-page L2 DOM extraction
+    "low":    0.55,                       # direct-page L3 body-text regex, least reliable
+    "failed": BENCHMARK_MARKET_WEIGHT,    # unused — falls through to pure-market path
+}
+
+# Below this many market comps the market median is unreliable;
+# scale effective weight down proportionally.
+_MIN_COMPS_FOR_FULL_WEIGHT: int = 5
+
+# Market-vs-benchmark gap (fraction) that triggers the outlier guard.
+# When exceeded, effective weight is halved and "benchmark_outlier" is flagged.
+BENCHMARK_OUTLIER_THRESHOLD: float = 0.40  # 40 %
+
+# Benchmark-to-target structural similarity thresholds and weight factors.
+# Computed once per job (benchmark spec vs user's property attributes).
+# Passed into each day query so the per-day effective_weight is reduced when
+# the benchmark listing is a poor structural match for the target property.
+_BM_SIMILARITY_HIGH_MATCH: float = 0.70      # ≥ this → no penalty
+_BM_SIMILARITY_STRONG_MISMATCH: float = 0.45 # < this → strong penalty
+_BM_MISMATCH_MODERATE_FACTOR: float = 0.85   # ×0.85 when 0.45 ≤ similarity < 0.70
+_BM_MISMATCH_STRONG_FACTOR: float = 0.65     # ×0.65 when similarity < 0.45
+
+# Per-day secondary consensus → effective_weight multipliers.
+# "support" → secondary comps cluster near benchmark → market adjusts less.
+# "oppose"  → secondary comps cluster near market   → market adjusts more.
+# Intentionally small range so secondary comps cannot override primary signals.
+_SECONDARY_SIGNAL_MULTIPLIERS: Dict[str, float] = {
+    "support": 0.90,   # secondary comps agree with benchmark → trust benchmark more
+    "neutral": 1.00,   # no clear signal (or no secondary data) → no change
+    "oppose":  1.15,   # secondary comps agree with market    → trust market more
+}
+
+# A secondary comp's mean price must be within this fraction of the reference
+# price (benchmark or market) to be classified as "supporting" or "opposing".
+_SECONDARY_CONSENSUS_THRESHOLD: float = 0.20  # 20 %
 
 # Fetch status codes
 FETCH_STATUS_SEARCH_HIT = "search_hit"       # benchmark appeared in search results
@@ -85,6 +127,12 @@ class BenchmarkDayResult:
     market_adj_pct: Optional[float] = None           # raw offset % (market vs benchmark)
     applied_adj_pct: Optional[float] = None          # actual % applied after cap+weight
     benchmark_fetch_status: str = FETCH_STATUS_FAILED
+    fetch_confidence: str = "failed"                 # "high"|"medium"|"low"|"failed"
+    effective_weight: float = 0.0                    # actual market weight applied in blend
+    outlier_action: str = ""                         # "lean_benchmark"|"lean_market"|"conservative"|"minimal"|""
+    secondary_signal: str = "neutral"               # per-day: "support"|"neutral"|"oppose"
+    secondary_comp_prices: Dict[str, Optional[float]] = field(default_factory=dict)  # {url: price|None}
+    comp_prices: Dict[str, float] = field(default_factory=dict)  # room_id -> nightly_price (all comps)
     comps_collected: int = 0
     comps_used: int = 0
     filter_stage: str = ""
@@ -96,6 +144,125 @@ class BenchmarkDayResult:
     error: Optional[str] = None
 
 
+# ── Benchmark Discount Probing (Strategy B) ───────────────────────────────────
+
+def _calculate_discount_pct(base_val: float, discounted_val: float) -> float:
+    if base_val <= 0:
+        return 0.0
+    # If discounted is actually higher (e.g. weekend premium on the probe dates), no discount
+    if discounted_val >= base_val:
+        return 0.0
+    return round(((base_val - discounted_val) / base_val) * 100, 1)
+
+
+def _extract_benchmark_price_with_min_stay_fallback(
+    page,
+    benchmark_url: str,
+    checkin: str,
+    checkout: str,
+) -> Tuple[Optional[float], str]:
+    """
+    Extract benchmark listing-page nightly price with a minimum-stay fallback.
+
+    First try the requested stay window. If it is a 1-night stay and the listing
+    does not expose a price, retry as a 2-night stay starting on the same date.
+    The underlying extractor returns a nightly price, so the fallback remains
+    per-night rather than a total trip price.
+    """
+    price, confidence = extract_nightly_price_from_listing_page(
+        page, benchmark_url, checkin, checkout
+    )
+    if price is not None:
+        return price, confidence
+
+    requested_nights = (date.fromisoformat(checkout) - date.fromisoformat(checkin)).days
+    if requested_nights != 1:
+        return None, "failed"
+
+    fallback_checkout = (date.fromisoformat(checkin) + timedelta(days=2)).isoformat()
+    fallback_price, fallback_confidence = extract_nightly_price_from_listing_page(
+        page, benchmark_url, checkin, fallback_checkout
+    )
+    if fallback_price is not None:
+        logger.info(
+            f"[benchmark] {checkin}: direct page 1-night unavailable, "
+            f"used 2-night minimum-stay fallback (nightly=${fallback_price:.2f})"
+        )
+        return fallback_price, fallback_confidence
+
+    return None, "failed"
+
+def probe_benchmark_discounts(
+    page,
+    benchmark_url: str,
+    base_origin: str,
+    start_date: date,
+) -> Dict[str, Any]:
+    """
+    Probes the benchmark listing for structural discounts (Weekly, Monthly)
+    and Last Minute behavior by executing targeted multi-night queries.
+    """
+    results = {
+        "weeklyDiscountPct": 0.0,
+        "monthlyDiscountPct": 0.0,
+        "lastMinuteDiscountPct": None,
+        "details": {}
+    }
+
+    checkin_iso = start_date.isoformat()
+    
+    # Helper to fetch price with retries inside the probe
+    def _fetch(in_date: str, out_date: str) -> Optional[float]:
+        p, conf = _extract_benchmark_price_with_min_stay_fallback(
+            page, benchmark_url, in_date, out_date
+        )
+        return p
+
+    # 1. Base Reference (1 Night) - consistent with main loop logic
+    # We re-fetch this here to ensure apples-to-apples comparison within this function session
+    d1_out = (start_date + timedelta(days=1)).isoformat()
+    base_price = _fetch(checkin_iso, d1_out)
+
+    if not base_price:
+        logger.warning("[benchmark-probe] Could not fetch base 1-night price, skipping probes.")
+        return results
+
+    # 2. Weekly Probe (7 Nights)
+    d7_out = (start_date + timedelta(days=7)).isoformat()
+    weekly_price = _fetch(checkin_iso, d7_out)
+    
+    if weekly_price:
+        # Calculate effective discount (inclusive of fees dilution)
+        results["weeklyDiscountPct"] = _calculate_discount_pct(base_price, weekly_price)
+        results["details"]["weekly"] = {"base": base_price, "effective": weekly_price}
+
+    # 3. Monthly Probe (28 Nights)
+    d28_out = (start_date + timedelta(days=28)).isoformat()
+    monthly_price = _fetch(checkin_iso, d28_out)
+
+    if monthly_price:
+        results["monthlyDiscountPct"] = _calculate_discount_pct(base_price, monthly_price)
+        results["details"]["monthly"] = {"base": base_price, "effective": monthly_price}
+
+    # 4. Last Minute Probe (Tomorrow)
+    # Check if competitor drops price for immediate bookings.
+    # Only valid if the main report is for a future date (> 7 days away).
+    days_until_start = (start_date - date.today()).days
+    if days_until_start > 7:
+        tmr = date.today() + timedelta(days=1)
+        tmr_out = tmr + timedelta(days=1)
+        lm_price = _fetch(tmr.isoformat(), tmr_out.isoformat())
+        
+        if lm_price:
+            results["lastMinuteDiscountPct"] = _calculate_discount_pct(base_price, lm_price)
+            results["details"]["lastMinute"] = {"futureBase": base_price, "tomorrow": lm_price}
+
+    logger.info(
+        f"[benchmark-probe] Base=${base_price}, Weekly=${weekly_price} (-{results['weeklyDiscountPct']}%), "
+        f"Monthly=${monthly_price} (-{results['monthlyDiscountPct']}%)"
+    )
+    return results
+
 # ── Single-day benchmark query ────────────────────────────────────────────────
 
 def estimate_benchmark_price_for_date(
@@ -106,6 +273,8 @@ def estimate_benchmark_price_for_date(
     date_i: date,
     adults: int,
     *,
+    secondary_benchmark_urls: Optional[List[str]] = None,
+    benchmark_target_similarity: float = 1.0,
     max_scroll_rounds: int = BENCHMARK_SCROLL_ROUNDS,
     max_cards: int = BENCHMARK_MAX_CARDS,
     rate_limit_seconds: float = 1.0,
@@ -114,10 +283,12 @@ def estimate_benchmark_price_for_date(
     """
     Execute a 1-night benchmark-first query for *date_i*.
 
-    1. Run a 1-night Airbnb search (fast-path: fewer rounds/cards).
-    2. If the benchmark listing appears in results → use its price as anchor.
-    3. If not → navigate to the benchmark listing page directly with dates
-       and extract the nightly price from the booking widget.
+    1. Run a 1-night Airbnb search (fast-path: fewer rounds/cards) to collect
+       market comps and locate the benchmark card if present.
+    2. Always attempt benchmark direct-page extraction first so the anchor price
+       comes from the listing page booking widget's discounted/current nightly rate.
+    3. If direct-page extraction fails and the benchmark appeared in results,
+       fall back to its search-result card price.
     4. Remaining market comps → compute market adjustment.
     5. Return blended final price.
     """
@@ -135,7 +306,7 @@ def estimate_benchmark_price_for_date(
             room_match.group(1) if room_match
             else (spec.url or f"comp-{int(time.time() * 1000)}")
         )
-        return {
+        payload: Dict[str, Any] = {
             "id": comp_id,
             "title": spec.title or "Comparable listing",
             "propertyType": spec.property_type or target.property_type or "entire_home",
@@ -157,34 +328,54 @@ def estimate_benchmark_price_for_date(
             "url": spec.url or None,
             "isPinnedBenchmark": False,
         }
+        if spec.scrape_nights > 1:
+            payload["queryNights"] = spec.scrape_nights
+        return payload
 
     checkin_str = date_i.isoformat()
-    checkout_str = (date_i + timedelta(days=1)).isoformat()
     is_weekend = date_i.weekday() >= 4  # Fri=4, Sat=5
 
-    search_url = build_search_url(
-        base_origin, target.location, checkin_str, checkout_str, adults,
-    )
-    logger.info(f"[benchmark] {checkin_str}: 1-night benchmark search")
-
     try:
-        page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(700)
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
+        query_nights_used = 1
+        comps: List[ListingSpec] = []
+        for query_nights in (1, 2):
+            checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
+            search_url = build_search_url(
+                base_origin, target.location, checkin_str, checkout_str, adults,
+            )
+            logger.info(f"[benchmark] {checkin_str}: {query_nights}-night benchmark search")
 
-        raw_cards = scroll_and_collect(
-            page,
-            max_rounds=max_scroll_rounds,
-            max_cards=max_cards,
-            pause_ms=600,
-            rate_limit_seconds=rate_limit_seconds,
-        )
-        comps = [parse_card_to_spec(c) for c in raw_cards]
+            page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(700)
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+
+            raw_cards = scroll_and_collect(
+                page,
+                max_rounds=max_scroll_rounds,
+                max_cards=max_cards,
+                pause_ms=600,
+                rate_limit_seconds=rate_limit_seconds,
+                stay_nights=query_nights,
+            )
+            comps = [parse_card_to_spec(c) for c in raw_cards]
+            comps = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
+            if comps:
+                query_nights_used = query_nights
+                break
+
         comps = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
         comps_collected = len(comps)
+
+        # Build full comp_prices map for priceByDate tracking.
+        all_comp_prices: Dict[str, float] = {}
+        for c in comps:
+            room_match = _ROOM_ID_RE.search(c.url or "")
+            cid = room_match.group(1) if room_match else (c.url or "")
+            if cid and c.nightly_price:
+                all_comp_prices[cid] = round(float(c.nightly_price), 2)
 
         # ── Stage 1: locate benchmark in search results ───────────────────
         benchmark_comp = next(
@@ -193,46 +384,95 @@ def estimate_benchmark_price_for_date(
         )
         benchmark_price: Optional[float] = None
         benchmark_fetch_status = FETCH_STATUS_FAILED
+        fetch_confidence = "failed"
 
-        if benchmark_comp and benchmark_comp.nightly_price:
+        # Benchmark is the primary anchor, so always prefer the listing page's
+        # live booking-widget price (including discounts) over the search card.
+        logger.info(
+            f"[benchmark] {checkin_str}: trying benchmark listing page first"
+        )
+        time.sleep(rate_limit_seconds)
+        direct_price, direct_confidence = _extract_benchmark_price_with_min_stay_fallback(
+            page, benchmark_url, checkin_str, checkout_str
+        )
+        if direct_price:
+            benchmark_price = direct_price
+            fetch_confidence = direct_confidence
+            benchmark_fetch_status = FETCH_STATUS_DIRECT_PAGE
+            logger.info(
+                f"[benchmark] {checkin_str}: direct page price=${benchmark_price:.2f} "
+                f"(confidence={fetch_confidence})"
+            )
+        elif benchmark_comp and benchmark_comp.nightly_price:
             benchmark_price = benchmark_comp.nightly_price
             benchmark_fetch_status = FETCH_STATUS_SEARCH_HIT
+            fetch_confidence = "high"
             logger.info(
-                f"[benchmark] {checkin_str}: benchmark found in search "
-                f"(price=${benchmark_price:.2f})"
+                f"[benchmark] {checkin_str}: direct page failed, falling back to search "
+                f"(price=${benchmark_price:.2f}, query_nights={query_nights_used})"
             )
         else:
-            # Not in search results → try direct listing page
             logger.info(
-                f"[benchmark] {checkin_str}: benchmark not in search results, "
-                "trying direct page"
+                f"[benchmark] {checkin_str}: benchmark price unavailable from direct page and search"
             )
-            time.sleep(rate_limit_seconds)
-            direct_price = extract_nightly_price_from_listing_page(
-                page, benchmark_url, checkin_str, checkout_str
-            )
-            if direct_price:
-                benchmark_price = direct_price
-                benchmark_fetch_status = FETCH_STATUS_DIRECT_PAGE
-                logger.info(
-                    f"[benchmark] {checkin_str}: direct page price=${benchmark_price:.2f}"
-                )
-                # Re-navigate to search to ensure market comps are loaded
-                time.sleep(rate_limit_seconds)
-                page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(700)
 
-        # ── Stage 2: market comps (exclude benchmark itself) ─────────────
+        # ── Secondary comps (Phase 2 — observational only) ───────────────
+        # Look up preferredComps[1:] in the already-collected search results.
+        # No extra page loads — only search_hit prices are recorded here.
+        # These prices feed consensusSignal ONLY and have zero effect on
+        # market_median, market_adj_pct, or final_price.
+        secondary_prices: Dict[str, Optional[float]] = {}
+        for sec_url in (secondary_benchmark_urls or []):
+            sec_match = next(
+                (c for c in comps if c.url and comp_urls_match(c.url, sec_url)),
+                None,
+            )
+            secondary_prices[sec_url] = (
+                sec_match.nightly_price
+                if sec_match and sec_match.nightly_price and sec_match.nightly_price > 0
+                else None
+            )
+
+        # ── Stage 2: market comps (exclude primary benchmark only) ────────
+        # Secondary comps deliberately remain in market_comps so they
+        # participate in market_median exactly like any other comp.
+        # Excluding them here would change market_adj and final_price,
+        # which contradicts the observational-only contract above.
         market_comps = [
             c for c in comps
             if not (c.url and comp_urls_match(c.url, benchmark_url))
         ]
 
         if comps_collected == 0:
+            early_top_comps: List[Dict[str, Any]] = []
+            if benchmark_price is not None:
+                bm_room_match = _ROOM_ID_RE.search(benchmark_url)
+                bm_id = bm_room_match.group(1) if bm_room_match else benchmark_url
+                all_comp_prices[bm_id] = round(benchmark_price, 2)
+                early_top_comps.append({
+                    "id": bm_id,
+                    "title": "Your benchmark listing",
+                    "propertyType": target.property_type or "entire_home",
+                    "accommodates": int(_safe_num(None, target.accommodates or 1)),
+                    "bedrooms": int(_safe_num(None, target.bedrooms or 1)),
+                    "baths": round(_safe_num(None, target.baths or 1), 1),
+                    "nightlyPrice": round(benchmark_price, 2),
+                    "currency": "USD",
+                    "similarity": 0.98,
+                    "rating": None,
+                    "reviews": None,
+                    "location": target.location or None,
+                    "url": benchmark_url,
+                    "isPinnedBenchmark": True,
+                })
             return BenchmarkDayResult(
                 date=checkin_str,
                 benchmark_price=benchmark_price,
                 benchmark_fetch_status=benchmark_fetch_status,
+                fetch_confidence=fetch_confidence,
+                secondary_comp_prices=secondary_prices,
+                comp_prices=all_comp_prices,
+                top_comps=early_top_comps,
                 flags=["missing_data"],
                 is_sampled=True,
                 is_weekend=is_weekend,
@@ -251,33 +491,204 @@ def estimate_benchmark_price_for_date(
             round(statistics.median(market_prices), 2) if market_prices else None
         )
 
-        # ── Blend: benchmark anchor + market adjustment ───────────────────
+        # ── Per-day secondary consensus signal ────────────────────────────────
+        # Look at found secondary comp prices (already collected from this
+        # day's search results) and classify them relative to benchmark and
+        # market.  This is a per-day signal, not the aggregate consensusSignal.
+        #
+        #   "support" → secondary comps cluster near benchmark (±20%)
+        #   "oppose"  → secondary comps cluster near market    (±20%)
+        #   "neutral" → mixed, unclear, or no secondary data
+        #
+        # The signal is used in Step 2.5 below to nudge effective_weight.
+        secondary_signal: str = "neutral"
+        found_sec_prices = [p for p in secondary_prices.values() if p is not None]
+        if found_sec_prices and benchmark_price is not None:
+            sec_mean = statistics.mean(found_sec_prices)
+            pct_from_benchmark = abs(sec_mean - benchmark_price) / benchmark_price
+            if market_median is not None:
+                pct_from_market = abs(sec_mean - market_median) / market_median
+                # Classify by which side the secondary mean is *closer* to,
+                # and only when it's actually within the threshold of that side.
+                # This prevents a secondary comp that sits between both prices
+                # from misfiring "support" just because the threshold catches it.
+                if pct_from_benchmark <= pct_from_market and pct_from_benchmark <= _SECONDARY_CONSENSUS_THRESHOLD:
+                    secondary_signal = "support"
+                elif pct_from_market < pct_from_benchmark and pct_from_market <= _SECONDARY_CONSENSUS_THRESHOLD:
+                    secondary_signal = "oppose"
+                # else: equidistant / both too far → neutral
+            elif pct_from_benchmark <= _SECONDARY_CONSENSUS_THRESHOLD:
+                secondary_signal = "support"
+
+        # ── Effective market weight: confidence + comp-count + secondary ──────
+        # Step 1 — base weight from benchmark fetch confidence.
+        #   High (search card)  → 0.30  benchmark-dominant
+        #   Medium (DOM)        → 0.42  slightly more market pull
+        #   Low (body regex)    → 0.55  benchmark and market roughly equal
+        base_weight = _CONFIDENCE_EFFECTIVE_WEIGHTS.get(fetch_confidence, BENCHMARK_MARKET_WEIGHT)
+
+        # Step 2 — scale by market comp count: fewer comps → market median
+        # is less representative → pull it back proportionally.
+        comp_reliability = min(1.0, len(market_prices) / _MIN_COMPS_FOR_FULL_WEIGHT)
+        effective_weight = round(base_weight * comp_reliability, 3)
+
+        # Step 2.5 — secondary consensus nudge.
+        # Secondary comps that agree with the benchmark → market has less pull.
+        # Secondary comps that agree with the market   → market has more pull.
+        # Multipliers are kept small (0.90 / 1.15) so secondary comps can
+        # never override the primary benchmark signal — they only nudge.
+        # When there are no secondary comps or the signal is neutral, no change.
+        secondary_multiplier = _SECONDARY_SIGNAL_MULTIPLIERS.get(secondary_signal, 1.0)
+        if secondary_multiplier != 1.0:
+            effective_weight = round(effective_weight * secondary_multiplier, 3)
+            logger.debug(
+                f"[benchmark] {checkin_str}: secondary consensus={secondary_signal} "
+                f"(n={len(found_sec_prices)}), multiplier={secondary_multiplier}, "
+                f"effective_weight after nudge={effective_weight}"
+            )
+
+        # Step 2.7 — benchmark-to-target structural similarity guardrail.
+        # When the benchmark listing differs significantly from the user's
+        # target property (e.g. 1-BR private room vs 3-BR entire home), the
+        # benchmark price is a less reliable anchor.  Reduce effective_weight
+        # so that the market adjustment corrects more of the structural gap.
+        # Default benchmark_target_similarity=1.0 → no adjustment (no user
+        # attributes provided or similarity not computed).
+        if benchmark_target_similarity < _BM_SIMILARITY_STRONG_MISMATCH:
+            effective_weight = round(effective_weight * _BM_MISMATCH_STRONG_FACTOR, 3)
+        elif benchmark_target_similarity < _BM_SIMILARITY_HIGH_MATCH:
+            effective_weight = round(effective_weight * _BM_MISMATCH_MODERATE_FACTOR, 3)
+
+        # ── Flags ─────────────────────────────────────────────────────────
+        flags: List[str] = []
+        if benchmark_fetch_status == FETCH_STATUS_FAILED:
+            flags.append("benchmark_fetch_failed")
+
+        # ── Blend: benchmark anchor + confidence-weighted market adjustment ──
         final_price: Optional[float] = None
         market_adj_pct: Optional[float] = None
         applied_adj_pct: Optional[float] = None
+        outlier_action: str = ""
 
         if benchmark_price is not None:
             if market_median is not None:
                 raw_adj = (market_median - benchmark_price) / benchmark_price
+
+                # Step 3 — directional outlier guard.
+                #
+                # When the gap exceeds BENCHMARK_OUTLIER_THRESHOLD (40%) we
+                # cannot blindly always shrink market influence — that would
+                # systematically bias toward the benchmark even when the
+                # benchmark is unreliable and the market is well-sampled.
+                #
+                # Instead, adjust based on the *relative* reliability of each
+                # signal:
+                #
+                #   benchmark_reliable = fetch_confidence == "high"
+                #     (search-card price — authoritative)
+                #   market_reliable = enough comps to trust the median
+                #
+                # Four outcomes:
+                #   benchmark better, market weak   → lean_benchmark  (0.50×)
+                #   market better, benchmark shaky  → lean_market     (1.00× — do NOT shrink further)
+                #   both reliable but diverge       → conservative    (0.75×)
+                #   neither reliable                → minimal         (0.40×)
+                if abs(raw_adj) > BENCHMARK_OUTLIER_THRESHOLD:
+                    benchmark_reliable = (fetch_confidence == "high")
+                    market_reliable = (len(market_prices) >= _MIN_COMPS_FOR_FULL_WEIGHT)
+
+                    if benchmark_reliable and not market_reliable:
+                        # Benchmark is a trustworthy search-card price; market
+                        # sample is thin.  Pull final price toward benchmark.
+                        outlier_factor = 0.50
+                        outlier_action = "lean_benchmark"
+                    elif not benchmark_reliable and market_reliable:
+                        # Benchmark came from a less reliable extraction method
+                        # (DOM / body-text).  Market has enough comps.
+                        # Do NOT shrink market influence — leave effective_weight
+                        # as-is so the market can correct the uncertain anchor.
+                        outlier_factor = 1.00
+                        outlier_action = "lean_market"
+                    elif benchmark_reliable and market_reliable:
+                        # Both signals are credible but sharply diverge.
+                        # Apply a mild conservative pull toward the benchmark
+                        # (user chose it as anchor) without dismissing market.
+                        outlier_factor = 0.75
+                        outlier_action = "conservative"
+                    else:
+                        # Neither signal is highly reliable.
+                        # Keep adjustment minimal to avoid compounding errors.
+                        outlier_factor = 0.40
+                        outlier_action = "minimal"
+
+                    effective_weight = round(effective_weight * outlier_factor, 3)
+                    flags.append("benchmark_outlier")
+                    logger.info(
+                        f"[benchmark] {checkin_str}: outlier — "
+                        f"market=${market_median:.2f} vs benchmark=${benchmark_price:.2f} "
+                        f"(gap={raw_adj*100:.1f}%), action={outlier_action}, "
+                        f"outlier_factor={outlier_factor}, effective_weight={effective_weight}"
+                    )
+
                 capped_adj = max(-BENCHMARK_MAX_ADJ, min(BENCHMARK_MAX_ADJ, raw_adj))
-                adj_factor = 1.0 + capped_adj * BENCHMARK_MARKET_WEIGHT
+                adj_factor = 1.0 + capped_adj * effective_weight
                 final_price = round(benchmark_price * adj_factor, 2)
                 market_adj_pct = round(raw_adj * 100, 1)
                 applied_adj_pct = round((adj_factor - 1.0) * 100, 1)
             else:
+                # No market comps — pure benchmark price, no market influence
                 final_price = benchmark_price
+                effective_weight = 0.0
         elif market_median is not None:
             # No benchmark price at all → fall back to pure market median
             final_price = market_median
+            effective_weight = 1.0
 
-        # Build top-comps payload (market comps only; benchmark shown separately)
+        # Build top-comps payload. Prepend the primary benchmark so it always
+        # appears in comparableListings with its per-day benchmark_price.
         top_comps_scored = market_scored[: max(3, top_k)]
         top_comps = [_to_comp_payload(c, s) for c, s in top_comps_scored]
 
-        # Flags
-        flags: List[str] = []
-        if benchmark_fetch_status == FETCH_STATUS_FAILED:
-            flags.append("benchmark_fetch_failed")
+        if benchmark_price is not None:
+            bm_room_match = _ROOM_ID_RE.search(benchmark_url)
+            bm_id = bm_room_match.group(1) if bm_room_match else benchmark_url
+            bm_spec = benchmark_comp  # may be None if not in search results
+            bm_payload: Dict[str, Any] = {
+                "id": bm_id,
+                "title": (bm_spec.title if bm_spec else "") or "Your benchmark listing",
+                "propertyType": (bm_spec.property_type if bm_spec else "") or target.property_type or "entire_home",
+                "accommodates": int(_safe_num(bm_spec.accommodates if bm_spec else None, target.accommodates or 1)),
+                "bedrooms": int(_safe_num(bm_spec.bedrooms if bm_spec else None, target.bedrooms or 1)),
+                "baths": round(_safe_num(bm_spec.baths if bm_spec else None, target.baths or 1), 1),
+                "nightlyPrice": round(benchmark_price, 2),
+                "currency": "USD",
+                "similarity": 0.98,
+                "rating": round(float(bm_spec.rating), 2) if bm_spec and isinstance(bm_spec.rating, (int, float)) else None,
+                "reviews": int(bm_spec.reviews) if bm_spec and isinstance(bm_spec.reviews, (int, float)) else None,
+                "location": target.location or None,
+                "url": benchmark_url,
+                "isPinnedBenchmark": True,
+            }
+            top_comps = [bm_payload] + top_comps
+            # Also track benchmark price in comp_prices so priceByDate is populated
+            all_comp_prices[bm_id] = round(benchmark_price, 2)
+
+        # Add secondary benchmark comps explicitly to top_comps so they always
+        # appear in comparableListings, deduplicated against existing entries.
+        for sec_url in (secondary_benchmark_urls or []):
+            sec_comp = next(
+                (c for c in comps if c.url and comp_urls_match(c.url, sec_url)),
+                None,
+            )
+            if sec_comp and sec_comp.nightly_price:
+                sec_room_match = _ROOM_ID_RE.search(sec_url)
+                sec_id = sec_room_match.group(1) if sec_room_match else sec_url
+                if not any(tc.get("id") == sec_id for tc in top_comps):
+                    sec_payload = _to_comp_payload(sec_comp, similarity_score(target, sec_comp))
+                    sec_payload["isPinnedBenchmark"] = True
+                    top_comps.append(sec_payload)
+                if sec_id and sec_comp.nightly_price:
+                    all_comp_prices[sec_id] = round(float(sec_comp.nightly_price), 2)
 
         # Price distribution (include benchmark price as a data point)
         all_prices = market_prices.copy()
@@ -295,6 +706,21 @@ def estimate_benchmark_price_for_date(
             dist["p25"] = round(q[0], 2)
             dist["p75"] = round(q[2], 2)
 
+        # Hard cap: final price must stay within ±20% of benchmark anchor.
+        # This prevents market noise from pushing the recommendation too far
+        # from the listing the user knows and trusts.
+        if benchmark_price is not None and final_price is not None:
+            cap_max = round(benchmark_price * 1.20, 2)
+            cap_min = round(benchmark_price * 0.80, 2)
+            capped = max(cap_min, min(cap_max, final_price))
+            if capped != final_price:
+                logger.info(
+                    f"[benchmark] {checkin_str}: price capped "
+                    f"${final_price:.2f} → ${capped:.2f} "
+                    f"(benchmark=${benchmark_price:.2f}, ±20% band [{cap_min:.2f}, {cap_max:.2f}])"
+                )
+                final_price = capped
+
         logger.info(
             f"[benchmark] {checkin_str}: anchor=${benchmark_price} "
             f"market_median=${market_median} adj={applied_adj_pct}% "
@@ -309,6 +735,12 @@ def estimate_benchmark_price_for_date(
             market_adj_pct=market_adj_pct,
             applied_adj_pct=applied_adj_pct,
             benchmark_fetch_status=benchmark_fetch_status,
+            fetch_confidence=fetch_confidence,
+            effective_weight=effective_weight,
+            outlier_action=outlier_action,
+            secondary_signal=secondary_signal,
+            secondary_comp_prices=secondary_prices,
+            comp_prices=all_comp_prices,
             comps_collected=comps_collected,
             comps_used=len(top_comps_scored),
             filter_stage=filter_debug.get("stage", "unknown"),
@@ -324,6 +756,9 @@ def estimate_benchmark_price_for_date(
         return BenchmarkDayResult(
             date=checkin_str,
             benchmark_fetch_status=FETCH_STATUS_FAILED,
+            fetch_confidence="failed",
+            secondary_comp_prices={},
+            comp_prices={},
             flags=["missing_data"],
             is_sampled=True,
             is_weekend=is_weekend,
@@ -373,6 +808,70 @@ def aggregate_benchmark_transparency(
     else:
         primary_method = FETCH_STATUS_FAILED
 
+    # Confidence breakdown
+    high_confidence_days = sum(1 for r in day_results if r.fetch_confidence == "high")
+    medium_confidence_days = sum(1 for r in day_results if r.fetch_confidence == "medium")
+    low_confidence_days = sum(1 for r in day_results if r.fetch_confidence == "low")
+
+    # Secondary comp aggregation (observational — pricing formula unchanged)
+    all_secondary_urls: set = set()
+    for r in day_results:
+        all_secondary_urls.update(r.secondary_comp_prices.keys())
+
+    secondary_comps_agg: List[Dict[str, Any]] = []
+    for sec_url in sorted(all_secondary_urls):
+        prices = [
+            r.secondary_comp_prices[sec_url]
+            for r in day_results
+            if sec_url in r.secondary_comp_prices
+            and r.secondary_comp_prices[sec_url] is not None
+        ]
+        secondary_comps_agg.append({
+            "url": sec_url,
+            "avgPrice": round(statistics.mean(prices), 2) if prices else None,
+            "daysFound": len(prices),
+            "totalDays": total,
+        })
+
+    # Consensus signal: do secondary comps cluster near benchmark or near market?
+    consensus_signal: Optional[str] = None
+    if secondary_comps_agg and avg_benchmark is not None:
+        found_avgs = [
+            s["avgPrice"] for s in secondary_comps_agg if s["avgPrice"] is not None
+        ]
+        if found_avgs:
+            secondary_mean = statistics.mean(found_avgs)
+            pct_from_benchmark = abs(secondary_mean - avg_benchmark) / avg_benchmark
+            if avg_market is not None:
+                pct_from_market = abs(secondary_mean - avg_market) / avg_market
+                if pct_from_benchmark <= 0.20:
+                    consensus_signal = "strong"     # secondary comps agree with benchmark
+                elif pct_from_market <= 0.20 and pct_from_benchmark > 0.20:
+                    consensus_signal = "divergent"  # secondary comps agree with market, not benchmark
+                else:
+                    consensus_signal = "mixed"
+            else:
+                consensus_signal = "strong" if pct_from_benchmark <= 0.20 else "mixed"
+
+    # Effective weight stats (only from days where benchmark was used)
+    eff_weights = [
+        r.effective_weight
+        for r in day_results
+        if r.benchmark_price is not None and r.market_price is not None
+    ]
+    avg_eff_weight = round(statistics.mean(eff_weights), 3) if eff_weights else BENCHMARK_MARKET_WEIGHT
+
+    # Outlier days: benchmark and market diverged ≥ BENCHMARK_OUTLIER_THRESHOLD
+    outlier_days = sum(1 for r in day_results if "benchmark_outlier" in r.flags)
+
+    # Conflict detected when:
+    #   - outlier days exceed 30% of sampled days, OR
+    #   - secondary comps clearly agree with market rather than benchmark
+    conflict_detected = bool(
+        (total > 0 and outlier_days / total > 0.30)
+        or consensus_signal == "divergent"
+    )
+
     return {
         "benchmarkUsed": benchmark_used,
         "benchmarkUrl": benchmark_url,
@@ -382,14 +881,22 @@ def aggregate_benchmark_transparency(
         "avgMarketPrice": avg_market,
         "marketAdjustmentPct": avg_adj,
         "appliedMarketWeight": BENCHMARK_MARKET_WEIGHT,
+        "effectiveMarketWeight": avg_eff_weight,
         "maxAdjCap": BENCHMARK_MAX_ADJ,
+        "outlierDays": outlier_days,
+        "conflictDetected": conflict_detected,
         "fallbackReason": fallback_reason,
         "fetchStats": {
             "searchHits": search_hits,
             "directFetches": direct_fetches,
             "failed": failed,
             "totalDays": total,
+            "highConfidenceDays": high_confidence_days,
+            "mediumConfidenceDays": medium_confidence_days,
+            "lowConfidenceDays": low_confidence_days,
         },
+        "secondaryComps": secondary_comps_agg or None,
+        "consensusSignal": consensus_signal,
     }
 
 
@@ -404,6 +911,11 @@ def benchmark_day_result_to_dict(r: BenchmarkDayResult) -> Dict[str, Any]:
         "market_adj_pct": r.market_adj_pct,
         "applied_adj_pct": r.applied_adj_pct,
         "benchmark_fetch_status": r.benchmark_fetch_status,
+        "fetch_confidence": r.fetch_confidence,
+        "effective_weight": r.effective_weight,
+        "outlier_action": r.outlier_action,
+        "secondary_signal": r.secondary_signal,
+        "secondary_comp_prices": r.secondary_comp_prices,
         "comps_collected": r.comps_collected,
         "comps_used": r.comps_used,
         "filter_stage": r.filter_stage,

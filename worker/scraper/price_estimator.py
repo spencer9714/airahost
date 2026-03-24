@@ -26,6 +26,7 @@ from datetime import datetime as dt
 from typing import Any, Dict, List, Optional, Tuple
 
 from worker.core.similarity import (
+    comp_urls_match,
     filter_similar_candidates,
     similarity_score,
 )
@@ -55,6 +56,7 @@ from worker.scraper.target_extractor import (
 )
 
 logger = logging.getLogger("worker.scraper")
+ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
 
 
 # ---------------------------------------------------------------------------
@@ -97,26 +99,55 @@ def _build_daily_transparent_result(
     total_comps_used = sum(r.get("comps_used", 0) for r in all_day_results)
     comparable_index: Dict[str, Dict[str, Any]] = {}
     for day_result in all_day_results:
+        day_date = day_result.get("date")
+        # comp_prices holds prices for ALL scraped comps (not just top_k).
+        # Use it to fill priceByDate for any comp already in the index.
+        day_comp_prices: Dict[str, float] = day_result.get("comp_prices") or {}
+
         for comp in day_result.get("top_comps", []) or []:
             comp_id = str(comp.get("id") or comp.get("url") or "").strip()
             if not comp_id:
                 continue
             score = float(comp.get("similarity") or 0.0)
+            # Prefer comp_prices for the day's price; fall back to top_comps value.
+            price = day_comp_prices.get(comp_id) or comp.get("nightlyPrice")
             if comp_id not in comparable_index:
                 comparable_index[comp_id] = {
                     "item": dict(comp),
                     "score_sum": score,
                     "count": 1,
+                    "price_by_date": {},
+                    "max_query_nights": int(comp.get("queryNights") or 1),
                 }
             else:
                 comparable_index[comp_id]["score_sum"] += score
                 comparable_index[comp_id]["count"] += 1
+                qn = int(comp.get("queryNights") or 1)
+                if qn > comparable_index[comp_id]["max_query_nights"]:
+                    comparable_index[comp_id]["max_query_nights"] = qn
+            if day_date and isinstance(price, (int, float)) and price > 0:
+                comparable_index[comp_id]["price_by_date"][day_date] = round(float(price), 2)
+
+        # Second pass: fill priceByDate for comps already in the index that
+        # appeared in this day's full results but not in top_comps.
+        if day_date and day_comp_prices:
+            for comp_id, price in day_comp_prices.items():
+                if comp_id in comparable_index and day_date not in comparable_index[comp_id]["price_by_date"]:
+                    comparable_index[comp_id]["price_by_date"][day_date] = price
 
     comparable_listings: List[Dict[str, Any]] = []
     for state in comparable_index.values():
         item = dict(state["item"])
         avg_score = state["score_sum"] / max(1, state["count"])
         item["similarity"] = round(avg_score, 3)
+        price_by_date = state.get("price_by_date", {})
+        if price_by_date:
+            item["priceByDate"] = price_by_date
+        max_qn = state.get("max_query_nights", 1)
+        if max_qn > 1:
+            item["queryNights"] = max_qn
+        elif "queryNights" in item:
+            del item["queryNights"]
         comparable_listings.append(item)
     comparable_listings.sort(
         key=lambda row: (
@@ -131,6 +162,7 @@ def _build_daily_transparent_result(
         "min": None, "p25": None, "median": None, "p75": None, "max": None,
         "currency": "USD",
     }
+
     if valid_prices:
         price_dist["min"] = round(min(valid_prices), 2)
         price_dist["max"] = round(max(valid_prices), 2)
@@ -203,6 +235,147 @@ def _build_daily_transparent_result(
                 "validPriceCount": len(valid_prices),
             },
         },
+    }
+
+
+def _preferred_comp_id(listing_url: str) -> str:
+    match = ROOM_ID_RE.search(listing_url)
+    return match.group(1) if match else listing_url
+
+
+def _build_url_mode_benchmark_info(
+    all_day_results: List[Dict[str, Any]],
+    preferred_comps: Optional[List[Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    if not preferred_comps:
+        return None
+
+    primary_url = str(preferred_comps[0].get("listingUrl") or "").strip()
+    if not primary_url:
+        return None
+
+    sampled_days = [r for r in all_day_results if r.get("is_sampled", False)]
+    total_days = len(sampled_days)
+    if total_days == 0:
+        return None
+
+    from worker.core.benchmark import BENCHMARK_MARKET_WEIGHT, BENCHMARK_MAX_ADJ
+
+    primary_id = _preferred_comp_id(primary_url)
+    benchmark_prices: List[float] = []
+    market_prices: List[float] = []
+    market_adjustments: List[float] = []
+    outlier_days = 0
+    search_hits = 0
+    failed = 0
+
+    secondary_urls = [
+        str(pc.get("listingUrl") or "").strip()
+        for pc in preferred_comps[1:]
+        if isinstance(pc, dict) and str(pc.get("listingUrl") or "").strip()
+    ]
+    secondary_found: Dict[str, List[float]] = {url: [] for url in secondary_urls}
+
+    for day in sampled_days:
+        comp_prices = day.get("comp_prices") or {}
+        primary_price = comp_prices.get(primary_id)
+        if primary_price is None:
+            for tc in day.get("top_comps", []) or []:
+                tc_url = str(tc.get("url") or "").strip()
+                if tc_url and comp_urls_match(tc_url, primary_url):
+                    price = tc.get("nightlyPrice")
+                    if isinstance(price, (int, float)) and price > 0:
+                        primary_price = float(price)
+                        break
+
+        if primary_price is not None:
+            benchmark_prices.append(round(float(primary_price), 2))
+            search_hits += 1
+            market_price = day.get("median_price")
+            if isinstance(market_price, (int, float)) and market_price > 0:
+                market_prices.append(round(float(market_price), 2))
+                adj = ((float(market_price) - float(primary_price)) / float(primary_price)) * 100
+                market_adjustments.append(adj)
+                if abs(adj) >= 40:
+                    outlier_days += 1
+        else:
+            failed += 1
+
+        for sec_url in secondary_urls:
+            sec_id = _preferred_comp_id(sec_url)
+            sec_price = comp_prices.get(sec_id)
+            if sec_price is None:
+                for tc in day.get("top_comps", []) or []:
+                    tc_url = str(tc.get("url") or "").strip()
+                    if tc_url and comp_urls_match(tc_url, sec_url):
+                        price = tc.get("nightlyPrice")
+                        if isinstance(price, (int, float)) and price > 0:
+                            sec_price = float(price)
+                            break
+            if isinstance(sec_price, (int, float)) and sec_price > 0:
+                secondary_found[sec_url].append(round(float(sec_price), 2))
+
+    benchmark_used = len(benchmark_prices) > 0
+    avg_benchmark = round(statistics.mean(benchmark_prices), 2) if benchmark_prices else None
+    avg_market = round(statistics.mean(market_prices), 2) if market_prices else None
+    avg_adj = round(statistics.mean(market_adjustments), 1) if market_adjustments else None
+
+    secondary_comps: List[Dict[str, Any]] = []
+    for sec_url in secondary_urls:
+        prices = secondary_found.get(sec_url, [])
+        secondary_comps.append({
+            "url": sec_url,
+            "avgPrice": round(statistics.mean(prices), 2) if prices else None,
+            "daysFound": len(prices),
+            "totalDays": total_days,
+        })
+
+    consensus_signal: Optional[str] = None
+    found_avgs = [row["avgPrice"] for row in secondary_comps if row["avgPrice"] is not None]
+    if found_avgs and avg_benchmark is not None:
+        secondary_mean = statistics.mean(found_avgs)
+        pct_from_benchmark = abs(secondary_mean - avg_benchmark) / avg_benchmark
+        if avg_market is not None and avg_market > 0:
+            pct_from_market = abs(secondary_mean - avg_market) / avg_market
+            if pct_from_benchmark <= 0.20:
+                consensus_signal = "strong"
+            elif pct_from_market <= 0.20 and pct_from_benchmark > 0.20:
+                consensus_signal = "divergent"
+            else:
+                consensus_signal = "mixed"
+        else:
+            consensus_signal = "strong" if pct_from_benchmark <= 0.20 else "mixed"
+
+    conflict_detected = bool(
+        (total_days > 0 and outlier_days / total_days > 0.30)
+        or consensus_signal == "divergent"
+    )
+
+    return {
+        "benchmarkUsed": benchmark_used,
+        "benchmarkUrl": primary_url,
+        "benchmarkFetchStatus": "search_hit" if benchmark_used else "failed",
+        "benchmarkFetchMethod": "search_hit" if benchmark_used else "failed",
+        "avgBenchmarkPrice": avg_benchmark,
+        "avgMarketPrice": avg_market,
+        "marketAdjustmentPct": avg_adj,
+        "appliedMarketWeight": BENCHMARK_MARKET_WEIGHT,
+        "effectiveMarketWeight": BENCHMARK_MARKET_WEIGHT,
+        "maxAdjCap": BENCHMARK_MAX_ADJ,
+        "outlierDays": outlier_days,
+        "conflictDetected": conflict_detected,
+        "fallbackReason": None if benchmark_used else "benchmark_not_found_in_url_mode",
+        "fetchStats": {
+            "searchHits": search_hits,
+            "directFetches": 0,
+            "failed": failed,
+            "totalDays": total_days,
+            "highConfidenceDays": search_hits,
+            "mediumConfidenceDays": 0,
+            "lowConfidenceDays": 0,
+        },
+        "secondaryComps": secondary_comps or None,
+        "consensusSignal": consensus_signal,
     }
 
 
@@ -416,6 +589,7 @@ def run_scrape(
                     "is_weekend": dr.is_weekend,
                     "price_distribution": dr.price_distribution,
                     "top_comps": dr.top_comps,
+                    "comp_prices": dr.comp_prices,
                     "error": dr.error,
                 })
 
@@ -441,6 +615,10 @@ def run_scrape(
                 source="scrape",
                 extraction_warnings=extraction_warnings,
                 discount_evidence=discount_evidence,
+                benchmark_info=_build_url_mode_benchmark_info(
+                    all_day_results,
+                    preferred_comps,
+                ),
             )
 
             logger.info(
@@ -475,6 +653,8 @@ def run_benchmark_scrape(
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
     target_spec_override: Optional[ListingSpec] = None,
+    secondary_benchmark_urls: Optional[List[str]] = None,
+    user_attributes: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     """
     Benchmark-first pipeline.
@@ -492,6 +672,7 @@ def run_benchmark_scrape(
         BenchmarkDayResult,
         aggregate_benchmark_transparency,
         benchmark_day_result_to_dict,
+        probe_benchmark_discounts,  # 記得 import 新函式
         estimate_benchmark_price_for_date,
     )
 
@@ -532,6 +713,16 @@ def run_benchmark_scrape(
         context = browser.contexts[0] if browser.contexts else browser.new_context()
         page = context.new_page()
 
+        # ── Step 0: Probe Discounts (Strategy B) ────────────────────────
+        # 在開始逐日抓取前，先對 Benchmark 進行「定價策略探測」
+        # 這會額外花費約 3-5 秒，但能大幅提升準確度
+        discount_info = {}
+        try:
+            discount_info = probe_benchmark_discounts(page, benchmark_url, base_origin, d_start)
+        except Exception as e:
+            logger.warning(f"[benchmark] Discount probe failed: {e}")
+        # ────────────────────────────────────────────────────────────────
+
         try:
             # Step 1: Extract benchmark listing spec (location, capacity, etc.)
             extract_start = time.time()
@@ -567,6 +758,47 @@ def run_benchmark_scrape(
                     )
 
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
+
+            # ── Benchmark-to-target similarity (computed once per job) ────────
+            # Compare the benchmark listing's extracted spec against the user's
+            # stated property attributes.  The resulting similarity score is
+            # passed to each day query so it can reduce effective_weight when
+            # the benchmark is a poor structural match for the target property.
+            from worker.core.benchmark import (
+                _BM_SIMILARITY_HIGH_MATCH,
+                _BM_SIMILARITY_STRONG_MISMATCH,
+            )
+            from worker.core.similarity import similarity_score as _similarity_score
+
+            bm_target_similarity: float = 1.0   # default: no penalty
+            bm_mismatch_level: str = "unknown"
+
+            if user_attributes:
+                user_spec = ListingSpec(
+                    url="",
+                    bedrooms=user_attributes.get("bedrooms"),
+                    baths=user_attributes.get("bathrooms"),
+                    accommodates=user_attributes.get("maxGuests"),
+                    property_type=user_attributes.get("propertyType", ""),
+                )
+                bm_target_similarity = round(_similarity_score(user_spec, target), 3)
+                if bm_target_similarity >= _BM_SIMILARITY_HIGH_MATCH:
+                    bm_mismatch_level = "high_match"
+                elif bm_target_similarity >= _BM_SIMILARITY_STRONG_MISMATCH:
+                    bm_mismatch_level = "moderate_mismatch"
+                else:
+                    bm_mismatch_level = "strong_mismatch"
+
+                if bm_mismatch_level != "high_match":
+                    logger.warning(
+                        f"[benchmark] Benchmark-to-target similarity={bm_target_similarity:.3f} "
+                        f"({bm_mismatch_level}) — benchmark may be a poor anchor for this property"
+                    )
+                else:
+                    logger.info(
+                        f"[benchmark] Benchmark-to-target similarity={bm_target_similarity:.3f} "
+                        f"({bm_mismatch_level})"
+                    )
 
             effective_adults = adults
             if target.accommodates and target.accommodates > 0:
@@ -607,6 +839,8 @@ def run_benchmark_scrape(
                     base_origin,
                     date_i,
                     effective_adults,
+                    secondary_benchmark_urls=secondary_benchmark_urls or [],
+                    benchmark_target_similarity=bm_target_similarity,
                     max_scroll_rounds=BENCHMARK_SCROLL_ROUNDS,
                     max_cards=BENCHMARK_MAX_CARDS,
                     rate_limit_seconds=rate_limit_seconds,
@@ -632,6 +866,7 @@ def run_benchmark_scrape(
                     is_weekend=r.is_weekend,
                     price_distribution=r.price_distribution,
                     top_comps=r.top_comps,
+                    comp_prices=r.comp_prices,
                     error=r.error,
                 )
 
@@ -655,13 +890,93 @@ def run_benchmark_scrape(
                     "is_weekend": dr.is_weekend,
                     "price_distribution": dr.price_distribution,
                     "top_comps": dr.top_comps,
+                    "comp_prices": dr.comp_prices,
                     "error": dr.error,
                 })
 
             timings["total_ms"] = round((time.time() - start_time) * 1000)
 
+            # ── Guarantee secondary benchmarks appear in comparableListings ────
+            # Secondary benchmark listings may never surface in Airbnb search
+            # results (different area, unavailable, outside search radius).
+            # For each secondary URL that never appeared in ANY day's top_comps,
+            # inject a synthetic entry into the first sampled day using the
+            # average price collected via secondary_prices across all days.
+            if secondary_benchmark_urls and all_day_results:
+                from worker.core.benchmark import _ROOM_ID_RE as _BM_ROOM_ID_RE
+                from worker.core.similarity import comp_urls_match as _cmu
+
+                # Collect IDs of secondary comps already seen in top_comps
+                seen_sec_ids: set = set()
+                for day_dict in all_day_results:
+                    for tc in (day_dict.get("top_comps") or []):
+                        if tc.get("isPinnedBenchmark") and tc.get("url"):
+                            m = _BM_ROOM_ID_RE.search(tc["url"])
+                            if m:
+                                seen_sec_ids.add(m.group(1))
+
+                for sec_url in secondary_benchmark_urls:
+                    sec_m = _BM_ROOM_ID_RE.search(sec_url)
+                    sec_id = sec_m.group(1) if sec_m else sec_url
+                    if sec_id in seen_sec_ids:
+                        continue  # already present in at least one day
+
+                    # Collect avg price from secondary_comp_prices across all sampled days
+                    sec_prices_found = [
+                        r.secondary_comp_prices.get(sec_url)
+                        for r in sampled_results
+                        if r.secondary_comp_prices.get(sec_url) is not None
+                    ]
+                    avg_sec_price = (
+                        round(sum(sec_prices_found) / len(sec_prices_found), 2)
+                        if sec_prices_found else None
+                    )
+
+                    if avg_sec_price is None:
+                        # Truly zero data — skip; we have nothing to show
+                        logger.info(
+                            f"[benchmark] Secondary {sec_url}: never found in search — omitting from comps"
+                        )
+                        continue
+
+                    # Inject into the first non-interpolated day
+                    inject_day = next(
+                        (d for d in all_day_results if d.get("is_sampled")),
+                        all_day_results[0],
+                    )
+                    inject_day.setdefault("top_comps", [])
+                    inject_day.setdefault("comp_prices", {})
+                    inject_day["top_comps"].append({
+                        "id": sec_id,
+                        "title": "Secondary benchmark listing",
+                        "propertyType": target.property_type or "entire_home",
+                        "accommodates": int(target.accommodates or 1),
+                        "bedrooms": int(target.bedrooms or 1),
+                        "baths": round(float(target.baths or 1), 1),
+                        "nightlyPrice": avg_sec_price,
+                        "currency": "USD",
+                        "similarity": 0.95,
+                        "rating": None,
+                        "reviews": None,
+                        "location": target.location or None,
+                        "url": sec_url,
+                        "isPinnedBenchmark": True,
+                    })
+                    inject_day["comp_prices"][sec_id] = avg_sec_price
+                    logger.info(
+                        f"[benchmark] Secondary {sec_url}: injected as synthetic comp "
+                        f"(avg_price=${avg_sec_price}, n={len(sec_prices_found)} days)"
+                    )
+
             # Aggregate benchmark transparency
             benchmark_info = aggregate_benchmark_transparency(benchmark_url, sampled_results)
+            # Attach benchmark-to-target similarity (computed once above)
+            if discount_info:
+                benchmark_info["detectedDiscounts"] = discount_info
+
+            if user_attributes:
+                benchmark_info["benchmarkTargetSimilarity"] = bm_target_similarity
+                benchmark_info["benchmarkMismatchLevel"] = bm_mismatch_level
 
             transparent = _build_daily_transparent_result(
                 target=target,
@@ -801,6 +1116,8 @@ def run_criteria_search(
 
     adults = min(attributes.get("maxGuests", 2), 16)
 
+    total_nights = max(1, (dt.strptime(checkout, "%Y-%m-%d") - dt.strptime(checkin, "%Y-%m-%d")).days)
+
     query_criteria = {
         "locationBasis": search_location,
         "rawAddress": address,
@@ -884,6 +1201,7 @@ def run_criteria_search(
                 max_cards=max_cards,
                 pause_ms=900,
                 rate_limit_seconds=rate_limit_seconds,
+                stay_nights=total_nights,
             )
             timings["scroll_ms"] = round((time.time() - scroll_start) * 1000)
 

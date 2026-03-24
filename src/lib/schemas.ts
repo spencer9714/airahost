@@ -213,12 +213,22 @@ export interface ComparableListing {
   bedrooms: number;
   baths: number;
   nightlyPrice: number;
+  /** Nightly price keyed by date ("YYYY-MM-DD"). Present on new reports only. */
+  priceByDate?: Record<string, number>;
   currency: string;
   similarity: number; // 0–1
   rating: number | null;
   reviews: number | null;
   location: string | null;
   url: string | null;
+  /**
+   * Number of nights that the scraped Airbnb card price covered.
+   * 1 = "for 1 night" or "/night" — price is already per-night, no change.
+   * 2 = "for 2 nights" — original price was a 2-night total; divided by 2.
+   * N = "for N nights" — original price was an N-night total; divided by N.
+   * Absent on old reports (treat as 1).
+   */
+  queryNights?: number;
 }
 
 export interface RecommendedPrice {
@@ -241,15 +251,65 @@ export interface BenchmarkInfo {
   avgMarketPrice: number | null;
   /** Raw market offset vs benchmark, in percent (e.g. +10.5 or -6.2) */
   marketAdjustmentPct: number | null;
+  /** Nominal market weight constant (baseline, before confidence/guardrail adjustments) */
   appliedMarketWeight: number;
+  /**
+   * Average effective market weight actually applied across sampled days.
+   * Lower than appliedMarketWeight when benchmark confidence is high and
+   * comps are plentiful; higher when confidence is low (market corrects more).
+   */
+  effectiveMarketWeight?: number | null;
   maxAdjCap: number;
+  /**
+   * Structural similarity score (0–1) between the benchmark listing and the
+   * user's target property attributes (bedrooms, baths, accommodates, type).
+   * 1.0 = perfect match; lower = more different.
+   * null when user attributes were not available for comparison.
+   */
+  benchmarkTargetSimilarity?: number | null;
+  /**
+   * Human-readable classification of the benchmark-to-target similarity.
+   * "high_match"          ≥ 0.70 — benchmark is structurally suitable
+   * "moderate_mismatch"   0.45–0.70 — some structural differences
+   * "strong_mismatch"     < 0.45 — benchmark may be a poor anchor
+   * "unknown"             user attributes not provided
+   */
+  benchmarkMismatchLevel?: "high_match" | "moderate_mismatch" | "strong_mismatch" | "unknown" | null;
+  /** Count of sampled days where benchmark vs market gap exceeded 40% */
+  outlierDays?: number | null;
+  /**
+   * True when benchmark and market are in significant conflict:
+   * outlier days > 30% of sampled days, or secondary comps signal "divergent".
+   */
+  conflictDetected?: boolean | null;
   fallbackReason: string | null;
   fetchStats: {
     searchHits: number;
     directFetches: number;
     failed: number;
     totalDays: number;
+    /** Phase 2 — confidence breakdown from extract_nightly_price_from_listing_page() */
+    highConfidenceDays?: number;
+    mediumConfidenceDays?: number;
+    lowConfidenceDays?: number;
   };
+  /**
+   * Phase 2 stub — preferredComps[1:] prices collected from search results.
+   * Observational only; does NOT affect pricing formula.
+   */
+  secondaryComps?: Array<{
+    url: string;
+    avgPrice: number | null;
+    daysFound: number;
+    totalDays: number;
+  }> | null;
+  /**
+   * Phase 2 stub — whether secondary comps agree with benchmark or market.
+   * "strong"    secondary comps cluster near benchmark price (±20%)
+   * "divergent" secondary comps cluster near market price instead
+   * "mixed"     no clear consensus
+   */
+  consensusSignal?: "strong" | "mixed" | "divergent" | null;
 }
 
 // ── Summary & Report ────────────────────────────────────────────

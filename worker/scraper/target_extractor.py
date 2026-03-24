@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -39,6 +40,9 @@ class ListingSpec:
     rating: Optional[float] = None
     reviews: Optional[int] = None
     amenities: List[str] = field(default_factory=list)
+    # Number of nights the scraped price covered before per-night normalization.
+    # 1 = normal 1-night search card; 2 = "for 2 nights" trip total, divided by 2; etc.
+    scrape_nights: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -484,23 +488,157 @@ _NIGHTLY_PRICE_RES = [
     re.compile(r"(\d{1,4}(?:,\d{3})?)\s+USD\s*/\s*night", re.I),
 ]
 
+# JavaScript run inside the browser to classify price candidates in the booking widget.
+# For each price element found near a "/night" label it records:
+#   value       — numeric price
+#   strikethrough — True if the element (or an ancestor ≤4 levels) has
+#                   CSS text-decoration:line-through or is a <s>/<del> tag
+#   domIndex    — position in the widget's element list (document order)
+#
+# The caller (Python) then picks the last non-strikethrough candidate, which is
+# the current/discounted nightly price rather than the crossed-out original.
+_BOOKING_WIDGET_PRICE_JS = """
+() => {
+  // Returns true if el or any ancestor up to 4 levels has line-through styling.
+  function isLineThrough(el) {
+    let node = el;
+    for (let i = 0; i < 4 && node && node !== document.body; i++) {
+      const s = window.getComputedStyle(node);
+      const td = (s.textDecoration || '') + (s.textDecorationLine || '');
+      if (td.includes('line-through')) return true;
+      if (node.tagName === 'S' || node.tagName === 'DEL') return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  // Matches a bare dollar amount with no surrounding text: "$465", "$1,234"
+  const BARE_PRICE_RE = /^\\$?\\s*(\\d{1,4}(?:,\\d{3})*)\\s*$/;
+  // Matches "$X /night" or "$X per night" somewhere in a string
+  const PRICE_NIGHT_RE = /\\$\\s*(\\d{1,4}(?:,\\d{3})?)\\s*(?:\\/\\s*night|per\\s+night)/i;
+
+  // Find the booking widget container (most-to-least specific).
+  const WIDGET_SELS = [
+    '[data-testid="book-it-default"]',
+    '[data-testid="price-block"]',
+    '[data-testid="book-it-price-breakdown"]',
+  ];
+  let widget = null;
+  for (const s of WIDGET_SELS) {
+    widget = document.querySelector(s);
+    if (widget) break;
+  }
+  if (!widget) return { candidates: [], hasWidget: false, widgetText: '' };
+
+  // All inline elements in the widget, in document order.
+  const allEls = Array.from(widget.querySelectorAll('span, b, strong, em'));
+
+  // Find the smallest elements whose innerText matches the "$X /night" compound
+  // pattern — these are the price+night containers (e.g. the header span that
+  // wraps both the price number and the "/night" label).
+  const nightContainers = [];
+  for (const el of allEls) {
+    const t = (el.innerText || '').trim();
+    if (PRICE_NIGHT_RE.test(t) && t.length < 200) {
+      nightContainers.push(el);
+    }
+  }
+  // Smallest first → most specific container processed first.
+  nightContainers.sort((a, b) =>
+    (a.innerText || '').length - (b.innerText || '').length
+  );
+
+  const candidates = [];
+  const seenEls = new Set();
+
+  for (const container of nightContainers.slice(0, 3)) {
+    const priceEls = container.querySelectorAll('span, b, strong, em');
+    for (const el of priceEls) {
+      if (seenEls.has(el)) continue;
+      // Skip elements that contain block children (they are containers, not leaves).
+      if (el.querySelectorAll('div, p, h1, h2, h3').length > 0) continue;
+      const text = (el.textContent || '').trim();
+      const m = text.match(BARE_PRICE_RE);
+      if (!m) continue;
+      const value = parseFloat(m[1].replace(',', ''));
+      if (isNaN(value) || value < 10 || value > 15000) continue;
+      seenEls.add(el);
+      candidates.push({
+        value,
+        strikethrough: isLineThrough(el),
+        domIndex: allEls.indexOf(el),
+      });
+    }
+    if (candidates.length > 0) break; // stop at the most-specific container
+  }
+
+  return {
+    candidates,
+    hasWidget: true,
+    widgetText: (widget.innerText || '').substring(0, 600),
+  };
+}
+"""
+
+
+def select_nightly_price_from_candidates(
+    candidates: List[Dict[str, Any]],
+) -> Optional[Tuple[float, str]]:
+    """
+    Select the current nightly price from structured DOM price candidates.
+
+    Rules
+    -----
+    * Non-strikethrough candidates are the current/discounted price.
+    * Strikethrough candidates are the original/crossed-out price — excluded.
+    * When multiple non-strikethrough candidates exist, pick the **last** one
+      in DOM order: Airbnb always places the original price before the discounted
+      price in the DOM, so the last non-strikethrough entry is the discounted one.
+    * Returns (price, price_kind) or None if no valid candidate exists.
+      price_kind: "nightly_discounted" if strikethrough originals are also present,
+                  "nightly_standard" otherwise.
+    """
+    if not candidates:
+        return None
+
+    non_st = [c for c in candidates if not c.get("strikethrough")]
+    has_strikethrough = any(c.get("strikethrough") for c in candidates)
+
+    if not non_st:
+        return None
+
+    # Sort by domIndex (document order); take the last (= discounted price when
+    # a discount is active, or the sole price when there is no discount).
+    non_st_sorted = sorted(non_st, key=lambda c: c.get("domIndex", 0))
+    best = non_st_sorted[-1]
+    price_val = float(best["value"])
+
+    if not (10 <= price_val <= 10000):
+        return None
+
+    price_kind = "nightly_discounted" if has_strikethrough else "nightly_standard"
+    return price_val, price_kind
+
 
 def extract_nightly_price_from_listing_page(
     page,
     listing_url: str,
     checkin: str,
     checkout: str,
-) -> Optional[float]:
+) -> Tuple[Optional[float], str]:
     """
     Navigate to a listing page with check-in/check-out dates appended and
     extract the displayed nightly price from the booking widget.
 
-    Returns the nightly price (float), or None if extraction fails.
-    This is used by the benchmark-first pipeline to get the pinned comp's
-    own price without relying on it appearing in search results.
-    """
-    from urllib.parse import urlparse
+    Returns (nightly_price, confidence) where confidence is one of:
+      "high"   — price found in ld+json structured data
+      "medium" — price found via DOM data-testid selectors
+      "low"    — price found via body-text regex
+      "failed" — price could not be extracted
 
+    Extraction layers run in confidence order and stop at first success.
+    One retry is attempted on navigation failure before giving up.
+    """
     parsed = urlparse(listing_url)
     # Reconstruct with only check_in / check_out — drop any pre-existing params.
     url_with_dates = (
@@ -508,69 +646,189 @@ def extract_nightly_price_from_listing_page(
         f"?check_in={checkin}&check_out={checkout}&adults=2"
     )
 
-    try:
-        page.goto(url_with_dates, wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(1200)
-    except Exception as exc:
-        logger.warning(f"[benchmark] Failed to navigate to benchmark page: {exc}")
-        return None
+    # Navigate with one retry on transient failure
+    for attempt in range(2):
+        try:
+            page.goto(url_with_dates, wait_until="domcontentloaded", timeout=15000)
+            break
+        except Exception as exc:
+            if attempt == 1:
+                logger.warning(
+                    f"[benchmark] Failed to navigate to benchmark page after retry: {exc}"
+                )
+                return None, "failed"
+            logger.warning(
+                f"[benchmark] Navigation attempt {attempt + 1} failed, retrying in 2s: {exc}"
+            )
+            time.sleep(2.0)
 
-    body = ""
+    # Wait for the booking widget to render (React hydration happens after domcontentloaded).
+    # L2 DOM selectors are client-rendered; the ld+json (L1) and body text (L3) are server-
+    # rendered and available immediately, but the widget is the most reliable price source.
+    # If the widget doesn't appear within 6s, proceed anyway — L1/L3 may still succeed.
+    try:
+        page.wait_for_selector(
+            '[data-testid="book-it-default"], [data-testid="price-block"]',
+            timeout=6000,
+        )
+    except Exception:
+        page.wait_for_timeout(800)  # short fixed wait as last resort before extraction
+
+    # ── Layer 1: ld+json structured data (high confidence) ────────────────
+    # Airbnb's LodgingBusiness schema includes rating and address but deliberately
+    # omits per-night pricing. This layer is a forward-looking check: if Airbnb
+    # ever adds priceSpecification to their ld+json, we capture it at high confidence.
+    # In current practice this layer almost always falls through to L2.
+    try:
+        ld_texts: List[str] = page.evaluate(
+            """() => Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+                         .map(s => s.textContent || '')
+                         .filter(Boolean)"""
+        )
+        for blob in (ld_texts or []):
+            try:
+                obj = json.loads(blob)
+                items = obj if isinstance(obj, list) else [obj]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    ld_candidates = item.get("priceSpecification") or item.get("offers") or []
+                    if isinstance(ld_candidates, dict):
+                        ld_candidates = [ld_candidates]
+                    for spec in (ld_candidates if isinstance(ld_candidates, list) else []):
+                        if not isinstance(spec, dict):
+                            continue
+                        for key in ("price", "lowPrice", "minPrice"):
+                            raw = spec.get(key)
+                            if raw is None:
+                                continue
+                            try:
+                                price = float(str(raw).replace(",", ""))
+                                if 10 <= price <= 10000:
+                                    logger.info(
+                                        f"[benchmark] ld+json price=${price} "
+                                        f"from {listing_url}"
+                                    )
+                                    return price, "high"
+                                else:
+                                    logger.warning(
+                                        f"[benchmark] ld+json price ${price} out of range "
+                                        f"(raw={raw!r}), skipping"
+                                    )
+                            except Exception:
+                                continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # ── Layer 2: DOM price-candidate classification (medium confidence) ────
+    # Runs _BOOKING_WIDGET_PRICE_JS to find price elements near the "/night"
+    # label and classify each as strikethrough (original/crossed-out) or
+    # current (discounted or standard).  select_nightly_price_from_candidates()
+    # then picks the last non-strikethrough price in DOM order, which is the
+    # discounted price when a discount is active.
+    try:
+        dom_result: Dict[str, Any] = page.evaluate(_BOOKING_WIDGET_PRICE_JS)
+        if isinstance(dom_result, dict):
+            dom_candidates: List[Dict[str, Any]] = dom_result.get("candidates") or []
+            widget_text: str = dom_result.get("widgetText") or ""
+            has_widget: bool = bool(dom_result.get("hasWidget"))
+
+            logger.debug(
+                f"[benchmark] DOM candidates (n={len(dom_candidates)}): {dom_candidates}"
+            )
+
+            selected = select_nightly_price_from_candidates(dom_candidates)
+            if selected is not None:
+                price, price_kind = selected
+                non_st_count = sum(1 for c in dom_candidates if not c.get("strikethrough"))
+                st_count = sum(1 for c in dom_candidates if c.get("strikethrough"))
+                logger.info(
+                    f"[benchmark] DOM price=${price} kind={price_kind} "
+                    f"(non_strikethrough={non_st_count}, strikethrough={st_count}) "
+                    f"from {listing_url}"
+                )
+                return price, "medium"
+
+            # Structured scan found nothing — fall back to regex on the widget text.
+            # When multiple prices are present prefer the LAST match (the discounted
+            # price follows the original in the DOM / text order).
+            if widget_text:
+                text_matches: List[Tuple[int, float]] = []
+                for pat in _NIGHTLY_PRICE_RES:
+                    for m in pat.finditer(widget_text):
+                        try:
+                            p = float(m.group(1).replace(",", ""))
+                            if 10 <= p <= 10000:
+                                text_matches.append((m.start(), p))
+                        except Exception:
+                            continue
+                if text_matches:
+                    text_matches.sort(key=lambda x: x[0])
+                    price = text_matches[-1][1]  # last = discounted if discount present
+                    logger.info(
+                        f"[benchmark] DOM widget-text fallback price=${price} "
+                        f"(last of {len(text_matches)} matches) from {listing_url}"
+                    )
+                    return price, "medium"
+
+            if not has_widget:
+                logger.debug(
+                    f"[benchmark] No booking widget found via data-testid, "
+                    "falling through to body-text layer"
+                )
+    except Exception as exc:
+        logger.debug(f"[benchmark] Layer 2 JS evaluation failed: {exc}")
+
+    # ── Layer 3: body-text regex (low confidence) ──────────────────────────
+    # Most fragile — depends on rendered text order, but catches edge cases
+    # where booking widget data-testid attributes are absent.
     try:
         body = page.inner_text("body", timeout=8000)
     except Exception:
         logger.warning("[benchmark] Failed to read body text from listing page")
-        return None
+        return None, "failed"
 
     if not body:
-        return None
+        return None, "failed"
 
-    # Search the first 8 000 characters where booking widget typically renders.
+    # Scan the first 8 000 characters where the booking widget typically renders.
+    # Collect ALL matches then pick the LAST one that appears before any
+    # "Show price breakdown" section — the discounted price always follows the
+    # original in text order, so the last pre-breakdown match is the current price.
     search_area = body[:8000]
+
+    breakdown_pos = search_area.lower().find("show price breakdown")
+    cutoff = breakdown_pos if breakdown_pos > 0 else len(search_area)
+
+    body_matches: List[Tuple[int, float]] = []
     for pat in _NIGHTLY_PRICE_RES:
         for m in pat.finditer(search_area):
             try:
                 price = float(m.group(1).replace(",", ""))
                 if 10 <= price <= 10000:
-                    logger.info(
-                        f"[benchmark] Extracted nightly price ${price} "
-                        f"from listing page: {listing_url}"
+                    body_matches.append((m.start(), price))
+                else:
+                    logger.warning(
+                        f"[benchmark] Body-text price ${price} out of range "
+                        f"(raw='{m.group(0)}'), skipping"
                     )
-                    return price
             except Exception:
                 continue
 
-    # DOM-based fallback via JavaScript evaluation
-    try:
-        price_text: str = page.evaluate(
-            """() => {
-              const candidates = [
-                document.querySelector('[data-testid="book-it-default"]'),
-                document.querySelector('[data-testid="price-block"]'),
-                document.querySelector('._tyxjp1'),
-                ...Array.from(document.querySelectorAll('span[class*="price"]')),
-              ].filter(Boolean);
-              for (const el of candidates) {
-                const t = (el.innerText || el.textContent || '').trim();
-                if (t) return t;
-              }
-              return '';
-            }"""
+    if body_matches:
+        body_matches.sort(key=lambda x: x[0])
+        pre_breakdown = [(pos, p) for pos, p in body_matches if pos < cutoff]
+        chosen_pos, price = (pre_breakdown[-1] if pre_breakdown else body_matches[-1])
+        logger.info(
+            f"[benchmark] Body-text price=${price} "
+            f"(last of {len(body_matches)} matches, pre_breakdown={len(pre_breakdown)}) "
+            f"from {listing_url}"
         )
-        if price_text:
-            for pat in _NIGHTLY_PRICE_RES:
-                m = pat.search(price_text)
-                if m:
-                    price = float(m.group(1).replace(",", ""))
-                    if 10 <= price <= 10000:
-                        logger.info(
-                            f"[benchmark] Extracted nightly price ${price} via DOM: {listing_url}"
-                        )
-                        return price
-    except Exception:
-        pass
+        return price, "low"
 
     logger.warning(
         f"[benchmark] Could not extract nightly price from listing page: {listing_url}"
     )
-    return None
+    return None, "failed"
