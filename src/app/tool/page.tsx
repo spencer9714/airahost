@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { SliderField } from "@/components/ui/SliderField";
 import { getSupabaseBrowser } from "@/lib/supabase";
+import { isValidAirbnbRoomUrl } from "@/lib/benchmarkUrl";
 import type {
   PropertyType,
   Amenity,
@@ -137,8 +138,8 @@ export default function ToolPage() {
 
   // Benchmark listing (formerly preferred comparables)
   const [preferredCompsList, setPreferredCompsList] = useState<
-    { listingUrl: string; note: string }[]
-  >([{ listingUrl: "", note: "" }]);
+    { listingUrl: string; note: string; enabled: boolean; validationState: "idle" | "valid" | "invalid"; cleanedUrl?: string }[]
+  >([{ listingUrl: "", note: "", enabled: true, validationState: "idle" }]);
 
   // Submit
   const [loading, setLoading] = useState(false);
@@ -165,6 +166,33 @@ export default function ToolPage() {
     setAmenities((prev) =>
       prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a]
     );
+  }
+
+  async function validateCompUrl(idx: number, url: string) {
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setPreferredCompsList((prev) => {
+        const next = [...prev];
+        next[idx] = { ...next[idx], validationState: "idle", cleanedUrl: undefined };
+        return next;
+      });
+      return;
+    }
+    try {
+      const res = await fetch(`/api/validate-benchmark?url=${encodeURIComponent(trimmed)}`);
+      const data: { valid: boolean; cleanedUrl?: string } = await res.json();
+      setPreferredCompsList((prev) => {
+        const next = [...prev];
+        next[idx] = {
+          ...next[idx],
+          validationState: data.valid ? "valid" : "invalid",
+          cleanedUrl: data.valid ? data.cleanedUrl : undefined,
+        };
+        return next;
+      });
+    } catch {
+      // silent — don't block the user on a network error
+    }
   }
 
   async function handleSubmit() {
@@ -202,17 +230,22 @@ export default function ToolPage() {
             cap: 1.05,
           },
           listingUrl: inputMode === "url" ? listingUrl : undefined,
-          preferredComps: preferredCompsList.some((c) =>
-            c.listingUrl.includes("airbnb.com/rooms/")
-          )
-            ? preferredCompsList
-                .filter((c) => c.listingUrl.includes("airbnb.com/rooms/"))
-                .map((c) => ({
-                  listingUrl: c.listingUrl.trim(),
+          preferredComps: (() => {
+            const valid = preferredCompsList.filter(
+              (c) =>
+                c.enabled &&
+                (c.validationState === "valid" ||
+                  (c.validationState === "idle" &&
+                    isValidAirbnbRoomUrl(c.listingUrl)))
+            );
+            return valid.length > 0
+              ? valid.map((c) => ({
+                  listingUrl: (c.cleanedUrl ?? c.listingUrl).trim(),
                   note: c.note.trim() || undefined,
                   enabled: true,
                 }))
-            : undefined,
+              : undefined;
+          })(),
           saveToListings:
             isSignedIn && saveToListings
               ? {
@@ -457,7 +490,7 @@ export default function ToolPage() {
                   onClick={() => setStep(2)}
                   disabled={
                     inputMode === "url"
-                      ? !listingUrl.includes("airbnb.com/rooms/")
+                      ? !isValidAirbnbRoomUrl(listingUrl)
                       : criteriaInvalid
                   }
                   className="w-full"
@@ -728,20 +761,72 @@ export default function ToolPage() {
                   </p>
                   <div className="space-y-3">
                     {preferredCompsList.map((comp, idx) => (
-                      <div key={idx} className="flex gap-2">
-                        <div className="flex-1 space-y-1.5">
+                      <div key={idx} className={`rounded-lg border p-3 ${idx === 0 ? "border-amber-300 bg-amber-50/60" : "border-gray-200 bg-white"}`}>
+                        {/* Row header: primary badge or set-as-primary button */}
+                        {preferredCompsList.length > 1 && (
+                          <div className="mb-2 flex items-center justify-between">
+                            {idx === 0 ? (
+                              <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+                                ★ Primary benchmark
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = [...preferredCompsList];
+                                  const [picked] = next.splice(idx, 1);
+                                  next.unshift(picked);
+                                  setPreferredCompsList(next);
+                                }}
+                                className="rounded-full border border-gray-300 px-2 py-0.5 text-[10px] font-medium text-gray-500 hover:border-amber-400 hover:text-amber-700 transition-colors"
+                              >
+                                Set as primary
+                              </button>
+                            )}
+                            <div className="flex items-center gap-2">
+                              <label className="flex cursor-pointer select-none items-center gap-1 text-[11px] text-muted">
+                                <input
+                                  type="checkbox"
+                                  checked={comp.enabled}
+                                  onChange={(e) => {
+                                    const next = [...preferredCompsList];
+                                    next[idx] = { ...next[idx], enabled: e.target.checked };
+                                    setPreferredCompsList(next);
+                                  }}
+                                  className="rounded"
+                                />
+                                Active
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => setPreferredCompsList(preferredCompsList.filter((_, i) => i !== idx))}
+                                className="text-xs text-muted hover:text-warning"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        <div className="space-y-1.5">
                           <input
                             type="url"
                             placeholder="https://airbnb.com/rooms/123... (the listing you compete with most)"
                             value={comp.listingUrl}
                             onChange={(e) => {
                               const next = [...preferredCompsList];
-                              next[idx] = { ...next[idx], listingUrl: e.target.value };
+                              next[idx] = { ...next[idx], listingUrl: e.target.value, validationState: "idle", cleanedUrl: undefined };
                               setPreferredCompsList(next);
                             }}
+                            onBlur={() => validateCompUrl(idx, comp.listingUrl)}
                             className="input w-full text-sm"
                           />
-                          {comp.listingUrl && !comp.listingUrl.includes("airbnb.com/rooms/") && (
+                          {comp.listingUrl && comp.validationState === "valid" && (
+                            <p className="text-xs font-medium text-emerald-600">✓ Valid Airbnb listing</p>
+                          )}
+                          {comp.listingUrl && comp.validationState === "invalid" && (
+                            <p className="text-xs text-warning">Not a valid Airbnb listing URL.</p>
+                          )}
+                          {comp.listingUrl && comp.validationState === "idle" && !isValidAirbnbRoomUrl(comp.listingUrl) && (
                             <p className="text-xs text-warning">Must be a valid Airbnb listing URL (airbnb.com/rooms/...).</p>
                           )}
                           <input
@@ -757,21 +842,12 @@ export default function ToolPage() {
                             maxLength={500}
                           />
                         </div>
-                        {preferredCompsList.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => setPreferredCompsList(preferredCompsList.filter((_, i) => i !== idx))}
-                            className="self-start pt-2 text-xs text-muted hover:text-warning"
-                          >
-                            ✕
-                          </button>
-                        )}
                       </div>
                     ))}
                     {preferredCompsList.length < 10 && (
                       <button
                         type="button"
-                        onClick={() => setPreferredCompsList([...preferredCompsList, { listingUrl: "", note: "" }])}
+                        onClick={() => setPreferredCompsList([...preferredCompsList, { listingUrl: "", note: "", enabled: true, validationState: "idle" }])}
                         className="text-xs text-accent hover:underline"
                       >
                         + Add another listing
@@ -826,7 +902,7 @@ export default function ToolPage() {
                   disabled={
                     loading ||
                     (inputMode === "url"
-                      ? !listingUrl.includes("airbnb.com/rooms/")
+                      ? !isValidAirbnbRoomUrl(listingUrl)
                       : criteriaInvalid)
                   }
                   className="w-full"
@@ -925,7 +1001,12 @@ export default function ToolPage() {
                 <SummaryRow
                   label="Benchmark"
                   value={
-                    preferredCompsList.some((c) => c.listingUrl.includes("airbnb.com/rooms/"))
+                    preferredCompsList.some(
+                      (c) =>
+                        c.enabled &&
+                        (c.validationState === "valid" ||
+                          isValidAirbnbRoomUrl(c.listingUrl))
+                    )
                       ? "Added ✓"
                       : "Not set"
                   }
