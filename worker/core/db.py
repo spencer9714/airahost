@@ -21,14 +21,14 @@ def get_client() -> Client:
     return create_client(url, key)
 
 
-def claim_job(client: Client, worker_token: uuid.UUID, stale_minutes: int) -> Optional[Dict[str, Any]]:
+def claim_job(client: Client, worker_token: uuid.UUID, stale_minutes: int, target_env: str) -> Optional[Dict[str, Any]]:
     """
     Atomically claim one queued (or stale-running) job.
     Returns the full row dict, or None if no work available.
     """
     result = client.rpc(
         "claim_pricing_report",
-        {"p_worker_token": str(worker_token), "p_stale_minutes": stale_minutes},
+        {"p_worker_token": str(worker_token), "p_stale_minutes": stale_minutes, "p_target_env": target_env},
     ).execute()
 
     rows = result.data
