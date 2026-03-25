@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import { RecommendationBanner } from "@/components/dashboard/RecommendationBanner";
@@ -54,6 +53,7 @@ type ListingRow = {
     beds?: number;
     amenities?: string[];
     address?: string;
+    preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
   };
   created_at: string;
   last_used_at: string | null;
@@ -72,20 +72,6 @@ type RecentReportRow = {
   report: NonNullable<LatestReport>;
 };
 
-type ListingDetailResponse = {
-  listing: ListingRow;
-  reports: Array<{
-    id: string;
-    trigger: string;
-    created_at: string;
-    pricing_reports: {
-      share_id: string;
-      status: string;
-      result_summary: { nightlyMedian?: number } | null;
-    } | null;
-  }>;
-};
-
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -97,13 +83,6 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [rerunningId, setRerunningId] = useState<string | null>(null);
-  const [expandedListingId, setExpandedListingId] = useState<string | null>(
-    null
-  );
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyRows, setHistoryRows] = useState<
-    ListingDetailResponse["reports"]
-  >([]);
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
   const [pricingMode, setPricingMode] = useState<
     "refundable" | "nonRefundable"
@@ -166,26 +145,6 @@ export default function DashboardPage() {
     });
   }, [router, loadDashboardData]);
 
-  async function loadListingHistory(listingId: string) {
-    if (expandedListingId === listingId) {
-      setExpandedListingId(null);
-      setHistoryRows([]);
-      return;
-    }
-    setExpandedListingId(listingId);
-    setHistoryLoading(true);
-    try {
-      const res = await fetch(`/api/listings/${listingId}`);
-      if (!res.ok) throw new Error("Failed to load listing details");
-      const data = (await res.json()) as ListingDetailResponse;
-      setHistoryRows(data.reports ?? []);
-    } catch {
-      setHistoryRows([]);
-    } finally {
-      setHistoryLoading(false);
-    }
-  }
-
   async function handleRunAnalysis(
     listingId: string,
     dates: { startDate: string; endDate: string }
@@ -235,10 +194,6 @@ export default function DashboardPage() {
     });
     if (res.ok) {
       if (activeListingId === listingId) setActiveListingId(null);
-      if (expandedListingId === listingId) {
-        setExpandedListingId(null);
-        setHistoryRows([]);
-      }
       await loadDashboardData();
     }
   }
@@ -270,6 +225,21 @@ export default function DashboardPage() {
       setRecentReports(previousRecent);
       throw new Error("Failed to rename listing");
     }
+  }
+
+  async function handleSavePreferredComps(
+    listingId: string,
+    preferredComps: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null
+  ) {
+    const res = await fetch(`/api/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preferredComps }),
+    });
+    if (!res.ok) {
+      throw new Error("Failed to save benchmark listings");
+    }
+    await loadDashboardData();
   }
 
   // ── Derived state ──────────────────────────────────────────────
@@ -323,132 +293,71 @@ export default function DashboardPage() {
 
   if (!authReady || loading) {
     return (
-      <div className="mx-auto max-w-5xl px-6 py-10">
-        <p className="text-base text-foreground/60">Loading dashboard...</p>
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <p className="text-sm text-foreground/40">Loading dashboard…</p>
       </div>
     );
   }
 
+  const firstName = userName ? userName.split(" ")[0] : null;
+
   return (
-    <div className="mx-auto max-w-5xl space-y-10 px-6 py-10">
-      {/* Header */}
-      <section className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-sm font-medium uppercase tracking-wide text-foreground/50">
-            Dashboard
-          </p>
-          <h1 className="text-3xl font-bold tracking-tight">
-            Welcome back, {userName || userEmail}
-          </h1>
-          <p className="mt-1 text-base text-foreground/60">
-            Track your listings and optimize pricing. You currently manage{" "}
-            {listingCountText}.
-          </p>
-        </div>
-        <Link href="/tool?from=dashboard">
-          <Button size="md">New analysis</Button>
-        </Link>
-      </section>
+    <div className="min-h-screen bg-gray-50/50">
+      <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-12">
 
-      {error && (
-        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-6 py-4">
-          <p className="text-base text-rose-800">{error}</p>
+        {/* ── Header ── */}
+        <div className="mb-10 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-foreground/35">
+              Host Dashboard
+            </p>
+            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+              {firstName ? `Welcome back, ${firstName}` : (userEmail || "Dashboard")}
+            </h1>
+            <p className="mt-0.5 text-sm text-foreground/50">
+              {listingCountText} saved · pricing analytics
+            </p>
+          </div>
+          <Link href="/tool?from=dashboard">
+            <Button size="md">+ New analysis</Button>
+          </Link>
         </div>
-      )}
 
-      {/* ═══ Section A: Today's Recommendation ═══ */}
-      {activeListing && activeSummary && activeReport && (
-        <section className="space-y-6">
-          {/* Title row + listing selector */}
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-2xl font-bold tracking-tight">
-              Today&apos;s recommendation
-            </h2>
-            {readyListings.length > 1 && (
-              <select
-                value={activeListing.id}
-                onChange={(e) => handleListingSelect(e.target.value)}
-                className="min-w-0 max-w-xs rounded-xl border border-border bg-white px-4 py-2.5 text-base font-semibold text-foreground outline-none focus:border-accent"
-              >
-                {readyListings.map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
+        {error && (
+          <div className="mb-8 rounded-xl border border-rose-200 bg-rose-50 px-5 py-4">
+            <p className="text-sm text-rose-700">{error}</p>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════
+            Section 1 — Saved Listings
+        ════════════════════════════════════════ */}
+        <section className="mb-10">
+          <div className="mb-4 flex items-center gap-2.5">
+            <p className="text-xs font-semibold uppercase tracking-widest text-foreground/35">
+              Saved Listings
+            </p>
+            {listings.length > 0 && (
+              <span className="inline-flex items-center rounded-full bg-gray-200/70 px-2 py-0.5 text-[11px] font-semibold text-foreground/50">
+                {listings.length}
+              </span>
             )}
           </div>
 
-          {/* Recommendation card */}
-          <RecommendationBanner
-            listingName={activeListing.name}
-            summary={activeSummary}
-            recommendedPrice={activeSummary.recommendedPrice ?? null}
-            reportShareId={activeReport.share_id}
-            onRerun={() => {
-              const today = new Date().toISOString().split("T")[0];
-              const end = new Date();
-              end.setDate(end.getDate() + 30);
-              void handleRunAnalysis(activeListing.id, {
-                startDate: today,
-                endDate: end.toISOString().split("T")[0],
-              });
-            }}
-            isRerunning={rerunningId === activeListing.id}
-            propertyMeta={{
-              propertyType: activeListing.input_attributes.propertyType,
-              guests: activeListing.input_attributes.maxGuests,
-              beds:
-                activeListing.input_attributes.beds ??
-                activeListing.input_attributes.bedrooms,
-              baths: activeListing.input_attributes.bathrooms,
-            }}
-            lastAnalysisDate={activeListing.latestLinkedAt}
-          />
-
-          {/* Pricing Heatmap */}
-          {activeCalendar.length > 0 && (
-            <PricingHeatmap
-              calendar={activeCalendar}
-              pricingMode={pricingMode}
-              onModeChange={setPricingMode}
-            />
-          )}
-
-          {/* Smart Alerts */}
-          {activeSummary && (
-            <div>
-              <h3 className="mb-4 text-xl font-bold tracking-tight">Alerts</h3>
-              <SmartAlerts
-                summary={activeSummary}
-                compsSummary={activeSummary.compsSummary ?? null}
-                priceDistribution={activeSummary.priceDistribution ?? null}
-              />
+          {listings.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-border bg-white px-8 py-10 text-center">
+              <p className="text-sm font-medium text-foreground/50">
+                No saved listings yet.
+              </p>
+              <p className="mt-1 text-sm text-foreground/40">
+                Run your first analysis to start tracking pricing.
+              </p>
+              <Link href="/tool?from=dashboard" className="mt-5 inline-block">
+                <Button size="sm">Run analysis</Button>
+              </Link>
             </div>
-          )}
-        </section>
-      )}
-
-      {/* ═══ Section B: Saved Listings ═══ */}
-      <section className="space-y-4">
-        <div className="flex items-center gap-3">
-          <h2 className="text-2xl font-bold tracking-tight">Saved Listings</h2>
-          {listings.length > 0 && (
-            <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-semibold text-foreground/60">
-              {listings.length}
-            </span>
-          )}
-        </div>
-        {listings.length === 0 ? (
-          <Card className="text-center">
-            <p className="text-base text-foreground/60">
-              No saved listings yet. Add your first listing to start tracking
-              pricing performance.
-            </p>
-          </Card>
-        ) : (
-          <div className="overflow-hidden rounded-2xl border border-border bg-white">
-            <div className="divide-y divide-border">
+          ) : (
+            <div className="overflow-hidden rounded-2xl border border-border bg-white divide-y divide-border shadow-sm">
               {listings.map((listing) => (
                 <ListingCard
                   key={listing.id}
@@ -457,52 +366,146 @@ export default function DashboardPage() {
                   onSelect={() => setActiveListingId(listing.id)}
                   onRunAnalysis={handleRunAnalysis}
                   onDelete={() => handleDelete(listing.id)}
-                  onViewDetails={() => loadListingHistory(listing.id)}
                   onViewHistory={() =>
                     router.push(`/dashboard/listings/${listing.id}`)
                   }
                   isRunning={rerunningId === listing.id}
-                  isExpanded={expandedListingId === listing.id}
-                  historyLoading={historyLoading}
-                  historyRows={historyRows}
                   onRename={handleRenameListing}
                   onSaveDateDefaults={handleSaveDateDefaults}
+                  onSavePreferredComps={handleSavePreferredComps}
                 />
               ))}
             </div>
-          </div>
-        )}
-      </section>
+          )}
+        </section>
 
-      {/* Recent Reports */}
-      <section className="space-y-4">
-        <h2 className="text-2xl font-bold tracking-tight">Recent Reports</h2>
-        {recentReports.length === 0 ? (
-          <div className="rounded-2xl border border-border bg-white px-6 py-5">
-            <p className="text-base text-foreground/60">No reports yet.</p>
-          </div>
-        ) : (
-          <div className="rounded-2xl border border-border bg-white divide-y divide-border">
-            {recentReports.slice(0, 5).map((item) => (
-              <Link
-                key={`${item.listingId}-${item.report.id}`}
-                href={`/r/${item.report.share_id}`}
-                className="flex items-center justify-between px-6 py-4 text-base hover:bg-gray-50 transition-colors first:rounded-t-2xl last:rounded-b-2xl"
-              >
-                <span className="text-foreground/70">
-                  {new Date(item.linkedAt).toLocaleDateString()} –{" "}
-                  {item.listingName}
-                </span>
-                <span className="font-semibold">
-                  {item.report.result_summary?.nightlyMedian
-                    ? `$${item.report.result_summary.nightlyMedian}/night`
-                    : item.report.status}
-                </span>
-              </Link>
-            ))}
-          </div>
+        {/* ════════════════════════════════════════
+            Section 2 — Pricing Insights
+        ════════════════════════════════════════ */}
+        {activeListing && activeSummary && activeReport && (
+          <section className="mb-10">
+            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-foreground/35">
+                  Pricing Insights
+                </p>
+                <h2 className="mt-0.5 text-base font-semibold text-foreground">
+                  {activeListing.name}
+                </h2>
+              </div>
+              {readyListings.length > 1 && (
+                <select
+                  value={activeListing.id}
+                  onChange={(e) => handleListingSelect(e.target.value)}
+                  className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-foreground outline-none focus:border-accent"
+                >
+                  {readyListings.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <div className="space-y-4">
+          <RecommendationBanner
+            listingName={activeListing.name}
+            summary={activeSummary}
+            recommendedPrice={activeSummary.recommendedPrice ?? null}
+            reportShareId={activeReport.share_id}
+            onRerun={() => {
+                  const today = new Date().toISOString().split("T")[0];
+                  const end = new Date();
+                  end.setDate(end.getDate() + 30);
+                  void handleRunAnalysis(activeListing.id, {
+                    startDate: today,
+                    endDate: end.toISOString().split("T")[0],
+                  });
+                }}
+                isRerunning={rerunningId === activeListing.id}
+            propertyMeta={{
+              propertyType: activeListing.input_attributes.propertyType,
+              guests: activeListing.input_attributes.maxGuests,
+              beds:
+                activeListing.input_attributes.beds ??
+                activeListing.input_attributes.bedrooms,
+              baths: activeListing.input_attributes.bathrooms,
+            }}
+            benchmarkMeta={{
+              count:
+                activeListing.input_attributes.preferredComps?.filter(
+                  (comp) => comp.enabled !== false && comp.listingUrl
+                ).length ?? 0,
+              primaryUrl:
+                activeListing.input_attributes.preferredComps?.find(
+                  (comp) => comp.enabled !== false && comp.listingUrl
+                )?.listingUrl ?? null,
+            }}
+            lastAnalysisDate={activeListing.latestLinkedAt}
+          />
+
+              {activeCalendar.length > 0 && (
+                <PricingHeatmap
+                  calendar={activeCalendar}
+                  pricingMode={pricingMode}
+                  onModeChange={setPricingMode}
+                />
+              )}
+
+              <div>
+                <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-foreground/35">
+                  Alerts
+                </p>
+                <SmartAlerts
+                  summary={activeSummary}
+                  compsSummary={activeSummary.compsSummary ?? null}
+                  priceDistribution={activeSummary.priceDistribution ?? null}
+                />
+              </div>
+            </div>
+          </section>
         )}
-      </section>
+
+        {/* ════════════════════════════════════════
+            Section 3 — Recent Reports
+        ════════════════════════════════════════ */}
+        <section>
+          <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-foreground/35">
+            Recent Reports
+          </p>
+          {recentReports.length === 0 ? (
+            <div className="rounded-2xl border border-border bg-white px-6 py-5">
+              <p className="text-sm text-foreground/40">No reports yet.</p>
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-2xl border border-border bg-white divide-y divide-border shadow-sm">
+              {recentReports.slice(0, 5).map((item) => (
+                <Link
+                  key={`${item.listingId}-${item.report.id}`}
+                  href={`/r/${item.report.share_id}`}
+                  className="flex items-center justify-between px-5 py-3.5 transition-colors hover:bg-gray-50 first:rounded-t-2xl last:rounded-b-2xl"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {item.listingName}
+                    </p>
+                    <p className="text-xs text-foreground/40">
+                      {new Date(item.linkedAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <span className="ml-4 shrink-0 text-sm font-semibold text-foreground">
+                    {item.report.result_summary?.nightlyMedian
+                      ? `$${item.report.result_summary.nightlyMedian}/night`
+                      : item.report.status}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </section>
+
+      </div>
     </div>
   );
 }

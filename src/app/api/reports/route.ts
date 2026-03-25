@@ -86,25 +86,12 @@ export async function POST(req: NextRequest) {
         inputMode
       );
 
-      let cachedSummary = null;
-      let cachedCalendar = null;
-      try {
-        const { data: cacheRows } = await admin
-          .from("pricing_cache")
-          .select("summary, calendar")
-          .eq("cache_key", cacheKey)
-          .gt("expires_at", new Date().toISOString())
-          .limit(1);
-        if (cacheRows && cacheRows.length > 0) {
-          cachedSummary = cacheRows[0].summary;
-          cachedCalendar = cacheRows[0].calendar;
-        }
-      } catch {
-        // Cache miss
-      }
-
-      const isCacheHit = cachedSummary !== null;
+      // Dashboard reruns always queue a fresh job — never serve a cache hit.
+      // Serving cache here would silently skip the worker, making "Rerun" a no-op
+      // whenever the cache is still valid (24 h TTL).
       const shareId = generateShareId();
+
+      const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
 
       const report = {
         id: crypto.randomUUID(),
@@ -112,6 +99,7 @@ export async function POST(req: NextRequest) {
         share_id: shareId,
         listing_id: listingId,
         input_address: address,
+        target_env: targetEnv,
         input_attributes: {
           ...listing.input_attributes,
           inputMode,
@@ -122,12 +110,13 @@ export async function POST(req: NextRequest) {
         discount_policy: discountPolicy,
         input_listing_url: listingUrl || null,
         cache_key: cacheKey,
-        status: isCacheHit ? "ready" : "queued",
-        core_version: isCacheHit ? "cache-hit" : "pending",
-        result_summary: cachedSummary,
-        result_calendar: cachedCalendar,
+        status: "queued",
+        core_version: "pending",
+        result_summary: null,
+        result_calendar: null,
         result_core_debug: {
-          cache_hit: isCacheHit,
+          cache_hit: false,
+          force_rerun: true,
           cache_key: cacheKey,
           request_source: "api/reports (listing shorthand)",
           input_mode: inputMode,
@@ -278,11 +267,14 @@ export async function POST(req: NextRequest) {
 
     const isCacheHit = cachedSummary !== null;
 
+    const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
+
     const report = {
       id: crypto.randomUUID(),
       user_id: requestUserId,
       share_id: shareId,
       input_address: listing.address,
+      target_env: targetEnv,
       input_attributes: enrichedInputAttributes,
       input_date_start: dates.startDate,
       input_date_end: dates.endDate,

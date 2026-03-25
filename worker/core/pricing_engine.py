@@ -49,10 +49,13 @@ def recommend_price(
 ) -> Tuple[Optional[float], Dict[str, Any]]:
     """Pick top-K similar comps and compute a recommended nightly price.
 
-    If preferred_comp_urls is provided and a comp matches any of those URLs,
-    its similarity score is boosted by _PINNED_MULTIPLIER (capped at
-    _PINNED_MAX_SCORE) so it has dominant influence on the weighted median.
-    If no comp matches, the result is identical to the unpinned calculation.
+    Formula: the most-similar comp anchors 90% of the price; all remaining
+    comps in top-K contribute only 10% via their median. This prevents a
+    handful of outlier comps from dragging the price far from the closest
+    market signal.
+
+    If preferred_comp_urls is provided, a matching comp's similarity score is
+    boosted so it is ranked first (dominant anchor role).
     """
     comps = [c for c in comps if c.nightly_price and c.nightly_price > 0]
     if not comps:
@@ -69,17 +72,16 @@ def recommend_price(
     picked = ranked[: max(3, top_k)]
 
     prices = [c.nightly_price for c in picked if c.nightly_price]
-    weights = [
-        max(0.05, _effective_score(c))
-        for c in picked
-        if c.nightly_price
-    ]
-
-    wm = _weighted_median(prices, weights)
-    if wm is None:
-        wm = statistics.median(prices) if prices else None
-    if wm is None:
+    if not prices:
         return None, {"reason": "Failed to compute median."}
+
+    # 90/10 formula: top comp anchors the price, others provide a small correction.
+    top_price = prices[0]
+    if len(prices) >= 2:
+        others_median = statistics.median(prices[1:])
+        wm = top_price * 0.90 + others_median * 0.10
+    else:
+        wm = top_price
 
     rec = wm * (1.0 - max(0.0, min(0.35, new_listing_discount)))
 

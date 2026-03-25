@@ -49,5 +49,6 @@ export async function GET(
     priceDistribution: summary?.priceDistribution ?? null,
     recommendedPrice: summary?.recommendedPrice ?? null,
     comparableListings: summary?.comparableListings ?? null,
+    benchmarkInfo: summary?.benchmarkInfo ?? null,
   });
 }

@@ -9,6 +9,31 @@ import { getSupabaseBrowser } from "@/lib/supabase";
 import type { PricingReport, CalendarDay } from "@/lib/schemas";
 import { generatePricingReport } from "@/core/pricingCore";
 
+// Find the nearest calendar date that has actual comp price data.
+// When a user clicks an interpolated day (no real scrape done), snapping to
+// the nearest sampled date prevents the "No data for this date" state for all listings.
+function snapToNearestSampledDate(
+  date: string,
+  comparableListings: import("@/lib/schemas").ComparableListing[] | null | undefined
+): string {
+  if (!comparableListings || comparableListings.length === 0) return date;
+  const datesWithData = new Set<string>();
+  for (const l of comparableListings) {
+    if (l.priceByDate) {
+      for (const d of Object.keys(l.priceByDate)) datesWithData.add(d);
+    }
+  }
+  if (datesWithData.size === 0 || datesWithData.has(date)) return date;
+  const targetMs = new Date(date + "T00:00:00Z").getTime();
+  let nearest = date;
+  let minDiff = Infinity;
+  for (const d of datesWithData) {
+    const diff = Math.abs(new Date(d + "T00:00:00Z").getTime() - targetMs);
+    if (diff < minDiff) { minDiff = diff; nearest = d; }
+  }
+  return nearest;
+}
+
 // Demo report (unchanged)
 function getDemoReport(): PricingReport {
   const result = generatePricingReport({
@@ -73,6 +98,22 @@ function getDemoReport(): PricingReport {
 const POLL_INTERVAL_MS = 2_000;
 const SLOW_THRESHOLD_MS = 120_000; // 2 minutes
 
+function getFriendlyReportError(message: string | null | undefined) {
+  if (!message) {
+    return "We couldn't generate your pricing report. Please try again.";
+  }
+
+  if (message.includes("Could not reach Airbnb data")) {
+    return "We found Airbnb listings, but couldn't verify enough nightly prices for this report. Please try again in a moment.";
+  }
+
+  if (message.includes("Could not collect enough pricing data")) {
+    return "We couldn't collect enough trustworthy nightly prices to build this report. Please try again in a moment.";
+  }
+
+  return message;
+}
+
 export default function ResultsPage({
   params,
 }: {
@@ -85,6 +126,12 @@ export default function ResultsPage({
   const [calendarView, setCalendarView] = useState<"base" | "effective">(
     "base"
   );
+  // selectedDate  = the date the user clicked in the calendar (used for highlight only)
+  // effectiveDate = nearest sampled date with real comp data (used for price lookup)
+  // When clicking a sampled date they are equal. When clicking an interpolated date,
+  // effectiveDate differs and a disclosure banner is shown in the comp section.
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
 
   // Polling state
   const [pollStartedAt] = useState(() => Date.now());
@@ -266,8 +313,7 @@ export default function ResultsPage({
         </div>
         <h1 className="mb-3 text-2xl font-bold">Something went wrong</h1>
         <p className="mb-6 text-muted">
-          {report.errorMessage ||
-            "We couldn't generate your pricing report. Please try again."}
+          {getFriendlyReportError(report.errorMessage)}
         </p>
         <Button
           onClick={() => {
@@ -402,7 +448,7 @@ export default function ResultsPage({
         <Card>
           <p className="text-sm text-muted">Occupancy</p>
           <p className="mt-1 text-2xl font-bold">{s.occupancyPct}%</p>
-          <p className="mt-1 text-sm text-muted">Estimated for this area</p>
+          <p className="mt-1 text-sm text-muted">Market est. — not booking data</p>
         </Card>
         <Card>
           <p className="text-sm text-muted">Weekday vs weekend</p>
@@ -444,9 +490,19 @@ export default function ResultsPage({
         report.compsSummary ||
         report.resultSummary?.compsSummary ||
         report.comparableListings ||
-        report.resultSummary?.comparableListings
+        report.resultSummary?.comparableListings ||
+        report.benchmarkInfo ||
+        report.resultSummary?.benchmarkInfo ||
+        (Array.isArray(report.inputAttributes?.preferredComps) &&
+          report.inputAttributes.preferredComps.some(
+            (comp) => comp.enabled !== false && comp.listingUrl
+          ))
       ) && (
-        <HowWeEstimated report={report} />
+        <HowWeEstimated
+          report={report}
+          selectedDate={effectiveDate}
+          clickedDate={selectedDate !== effectiveDate ? selectedDate : undefined}
+        />
       )}
 
       {/* Section 3 - Price Calendar */}
@@ -454,6 +510,13 @@ export default function ResultsPage({
         calendar={report.resultCalendar ?? []}
         calendarView={calendarView}
         onViewChange={setCalendarView}
+        selectedDate={selectedDate}
+        onDateSelect={(d) => {
+          if (!d) { setSelectedDate(null); setEffectiveDate(null); return; }
+          setSelectedDate(d); // calendar always highlights what was clicked
+          const cl = report.comparableListings ?? report.resultSummary?.comparableListings;
+          setEffectiveDate(snapToNearestSampledDate(d, cl));
+        }}
       />
 
       {/* Section 4 - Discount Explanation */}
@@ -657,10 +720,14 @@ function PriceCalendar({
   calendar,
   calendarView,
   onViewChange,
+  selectedDate,
+  onDateSelect,
 }: {
   calendar: CalendarDay[];
   calendarView: "base" | "effective";
   onViewChange: (v: "base" | "effective") => void;
+  selectedDate?: string | null;
+  onDateSelect?: (date: string | null) => void;
 }) {
   // Build a lookup map: "YYYY-MM-DD" -> CalendarDay
   const dayMap = useMemo(() => {
@@ -820,12 +887,18 @@ function PriceCalendar({
             const flags = entry.flags ?? [];
             const isInterpolated = flags.includes("interpolated");
             const isMissing = flags.includes("missing_data");
+            const isSelected = selectedDate === ds;
 
             return (
               <div
                 key={ds}
-                className={`group relative flex aspect-square flex-col items-center justify-center rounded-xl border border-border/60 transition-shadow hover:shadow-md ${
-                  entry.isWeekend ? "border-accent/20" : ""
+                onClick={() => onDateSelect?.(isSelected ? null : ds)}
+                className={`group relative flex aspect-square flex-col items-center justify-center rounded-xl border transition-shadow hover:shadow-md cursor-pointer ${
+                  isSelected
+                    ? "border-accent bg-accent/10 ring-2 ring-accent/40"
+                    : entry.isWeekend
+                    ? "border-accent/20 border-border/60"
+                    : "border-border/60"
                 } ${isInterpolated && !isMissing ? "border-dashed" : ""}`}
               >
                 <span className="text-[10px] leading-none text-muted sm:text-xs">

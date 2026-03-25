@@ -406,7 +406,7 @@ export function ComparableListingsSection({
       ) : selectedDate ? (
         <p className="mb-2 text-xs font-medium text-accent">
           Showing scraped nightly prices for {selectedDate}.
-          {" "}Listings marked "No data for this date" were not queried on this day.
+          {" "}Listings marked &ldquo;No data for this date&rdquo; were not queried on this day.
           {" "}Click a calendar day to change, or click the selected day to deselect.
         </p>
       ) : null}
