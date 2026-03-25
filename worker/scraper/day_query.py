@@ -25,14 +25,19 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM, apply_geo_filter
+from worker.core.price_band import apply_price_band_filter
+from worker.core.price_sanity import apply_price_sanity, build_price_sanity_weights
 from worker.core.pricing_engine import recommend_price
 from worker.core.similarity import (
+    SIMILARITY_FLOOR,
     comp_urls_match,
     filter_similar_candidates,
     similarity_score,
 )
 from worker.scraper.comparable_collector import (
     build_search_url,
+    extract_comp_coords,
     parse_card_to_spec,
     scroll_and_collect,
 )
@@ -63,11 +68,16 @@ class DayResult:
     """Result of a single 1-night query (or an interpolated placeholder)."""
 
     date: str                                        # "YYYY-MM-DD"
-    median_price: Optional[float] = None             # weighted median from comps
+    median_price: Optional[float] = None             # weighted mean from comps
     comps_collected: int = 0
     comps_used: int = 0
+    below_similarity_floor: int = 0                  # comps excluded by similarity floor
+    price_outliers_excluded: int = 0                 # comps rejected by Layer 1 price sanity
+    price_outliers_downweighted: int = 0             # comps downweighted (0.5×) by price sanity
+    geo_excluded: int = 0                            # comps rejected by distance filter (Phase 3A)
+    price_band_excluded: int = 0                     # comps rejected by price band filter (Phase 3B)
     filter_stage: str = ""
-    flags: List[str] = field(default_factory=list)   # peak, low_demand, missing_data, interpolated
+    flags: List[str] = field(default_factory=list)   # peak, low_demand, missing_data, interpolated, low_comp_confidence
     is_sampled: bool = True                          # False if interpolated
     is_weekend: bool = False
     price_distribution: Dict[str, Any] = field(default_factory=dict)
@@ -158,6 +168,13 @@ def estimate_base_price_for_date(
         # divided per-night (e.g. "for 2 nights" on a 2-night minimum listing).
         if spec.scrape_nights > 1:
             payload["queryNights"] = spec.scrape_nights
+        # Include distance from target when available (from geo filter)
+        if spec.distance_to_target_km is not None:
+            payload["distanceKm"] = round(spec.distance_to_target_km, 2)
+        # Include approximate coordinates when available
+        if spec.lat is not None and spec.lng is not None:
+            payload["lat"] = round(spec.lat, 6)
+            payload["lng"] = round(spec.lng, 6)
         return payload
 
     checkin_str = date_i.isoformat()
@@ -193,7 +210,24 @@ def estimate_base_price_for_date(
                 stay_nights=query_nights,
             )
 
+            # Best-effort: extract approximate coordinates from page state.
+            # Returns {} if page has no embedded coord data or parse fails.
+            try:
+                coord_map = extract_comp_coords(page)
+            except Exception:
+                coord_map = {}
+
             parsed_comps = [parse_card_to_spec(c) for c in raw_cards]
+
+            # Assign coordinates to specs where available
+            if coord_map:
+                for spec in parsed_comps:
+                    room_m = ROOM_ID_RE.search(spec.url or "")
+                    if room_m:
+                        pair = coord_map.get(room_m.group(1))
+                        if pair:
+                            spec.lat, spec.lng = pair[0], pair[1]
+
             comps = [
                 c for c in parsed_comps
                 if c.url and not (target.url and comp_urls_match(c.url, target.url))
@@ -209,6 +243,20 @@ def estimate_base_price_for_date(
                 break
 
         comps = priced
+
+        # ── Phase 3A: Geographic distance filter ──────────────────
+        # Applied before similarity scoring.  Requires both the target
+        # and at least some comps to have coordinates; otherwise skipped.
+        # Comps without coords always pass through — see geo_filter.py.
+        geo_excluded_count = 0
+        if target.lat is not None and target.lng is not None:
+            try:
+                comps, geo_excluded_count = apply_geo_filter(
+                    comps, target.lat, target.lng, DEFAULT_MAX_RADIUS_KM
+                )
+            except Exception as _geo_exc:
+                logger.warning(f"[day_query] Geo filter failed (non-fatal): {_geo_exc}")
+
         comps_collected = len(comps)
 
         # Build full comp_prices map (all priced comps, not just top_k).
@@ -233,8 +281,10 @@ def estimate_base_price_for_date(
 
         filtered_comps, filter_debug = filter_similar_candidates(target, comps)
 
-        # Score and rank
+        # Score and rank (raw scores stored separately before any boost).
         comps_scored = [(c, similarity_score(target, c)) for c in filtered_comps]
+        # Capture raw scores keyed by object id before the boost step overwrites them.
+        raw_sim_scores: Dict[int, float] = {id(c): s for c, s in comps_scored}
         comps_scored.sort(key=lambda x: x[1], reverse=True)
 
         # Build list of enabled preferred comp URLs for boost logic.
@@ -264,22 +314,99 @@ def estimate_base_price_for_date(
             if pinned_hit:
                 comps_scored = sorted(boosted, key=lambda x: x[1], reverse=True)
 
+        # Apply similarity floor using raw (unboosted) scores.
+        # Only comps above the floor enter pricing and display.
+        above_floor = [
+            (c, s) for c, s in comps_scored
+            if raw_sim_scores.get(id(c), 0.0) >= SIMILARITY_FLOOR
+        ]
+        below_floor_count = len(comps_scored) - len(above_floor)
+
+        # ── Layer 1 Price Sanity ──────────────────────────────────
+        # Applied after the similarity floor.  Severe price outliers
+        # (nd > 4.0) are excluded from pricing entirely; mild outliers
+        # (nd 2.5–4.0) are downweighted to 0.5× in the formula.
+        # The full above_floor list is still used for top_comps display
+        # so that users can see all candidates (outliers flagged).
+        sanity_results, ps_excluded, ps_downweighted = apply_price_sanity(above_floor)
+
+        # Comps accepted by price sanity (weight > 0).
+        pricing_pool_pre_band = [(r.comp, r.sim_score) for r in sanity_results if r.weight > 0]
+        ps_weights = build_price_sanity_weights(sanity_results)
+
+        # Build a set of sanity-excluded comp ids for payload tagging below.
+        excluded_ids = {id(r.comp) for r in sanity_results if r.weight == 0.0}
+
+        if ps_excluded or ps_downweighted:
+            logger.info(
+                f"[day_query] {checkin_str}: price sanity — "
+                f"excluded={ps_excluded} downweighted={ps_downweighted} "
+                f"accepted={len(pricing_pool_pre_band)}"
+            )
+
+        # ── Phase 3B: Price-band filter (pricing only) ────────────
+        # Applied to the pricing pool ONLY.  above_floor is kept intact so
+        # that comparable display never shrinks to 1 when the whole market
+        # sits above the anchor's ±30% band.
+        #
+        # Anchor priority: primary preferred comp card price → target price → majority band.
+        price_band_excluded_count = 0
+        price_band_anchor: Optional[float] = None
+        if pref_urls:
+            for c in comps:
+                if c.url and any(comp_urls_match(c.url, pu) for pu in pref_urls):
+                    if c.nightly_price and c.nightly_price > 0:
+                        price_band_anchor = float(c.nightly_price)
+                        break
+        if price_band_anchor is None and isinstance(target.nightly_price, (int, float)) and target.nightly_price > 0:
+            price_band_anchor = float(target.nightly_price)
+        _band_excluded_ids: set = set()
+        try:
+            pricing_pool, _pb_excluded, _pb_info = apply_price_band_filter(
+                pricing_pool_pre_band, price_band_anchor
+            )
+            price_band_excluded_count = len(_pb_excluded)
+            _band_excluded_ids = {id(c) for c, _ in _pb_excluded}
+            if price_band_excluded_count:
+                logger.info(
+                    f"[day_query] {checkin_str}: price band "
+                    f"({_pb_info['anchor_mode']}) "
+                    f"${_pb_info.get('lower')}-${_pb_info.get('upper')} "
+                    f"excluded={price_band_excluded_count} from pricing"
+                )
+        except Exception as _pb_exc:
+            logger.warning(f"[day_query] Price band filter failed (non-fatal): {_pb_exc}")
+            pricing_pool = pricing_pool_pre_band
+
         # No new_listing_discount per-day — discount applied at calendar level
         rec_price, rec_debug = recommend_price(
             target,
-            [c for c, _ in comps_scored],
+            [c for c, _ in pricing_pool],
             top_k=top_k,
             new_listing_discount=0.0,
             preferred_comp_urls=pref_urls if pref_urls else None,
+            price_sanity_weights=ps_weights,
         )
 
-        prices = [c.nightly_price for c, _ in comps_scored if c.nightly_price]
+        prices = [c.nightly_price for c, _ in pricing_pool if c.nightly_price]
         comps_used = rec_debug.get("picked_n", 0)
-        top_comps_scored = comps_scored[: min(max(3, top_k), len(comps_scored))]
-        top_comps = [_to_comparable_payload(c, s) for c, s in top_comps_scored]
+        # top_comps uses the full above_floor list for transparency.
+        # Comps excluded by price sanity are tagged priceOutlier=True;
+        # comps excluded by price band are tagged priceBandExcluded=True.
+        top_comps_scored = above_floor[: min(max(3, top_k), len(above_floor))]
+        top_comps = [
+            {
+                **_to_comparable_payload(c, s),
+                **({"priceOutlier": True} if id(c) in excluded_ids else {}),
+                **({"priceBandExcluded": True} if id(c) in _band_excluded_ids else {}),
+            }
+            for c, s in top_comps_scored
+        ]
 
         # Determine flags
         flags: List[str] = []
+        if rec_debug.get("low_comp_confidence", False):
+            flags.append("low_comp_confidence")
         if rec_price is not None and len(prices) >= 3:
             overall_median = statistics.median(prices)
             if rec_price > overall_median * 1.25:
@@ -310,6 +437,11 @@ def estimate_base_price_for_date(
             median_price=round(rec_price, 2) if rec_price else None,
             comps_collected=comps_collected,
             comps_used=comps_used,
+            below_similarity_floor=below_floor_count + rec_debug.get("below_floor", 0),
+            price_outliers_excluded=ps_excluded,
+            price_outliers_downweighted=ps_downweighted,
+            geo_excluded=geo_excluded_count,
+            price_band_excluded=price_band_excluded_count,
             filter_stage=filter_debug.get("stage", "unknown"),
             flags=flags,
             is_sampled=True,

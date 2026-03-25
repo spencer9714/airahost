@@ -43,6 +43,11 @@ class ListingSpec:
     # Number of nights the scraped price covered before per-night normalization.
     # 1 = normal 1-night search card; 2 = "for 2 nights" trip total, divided by 2; etc.
     scrape_nights: int = 1
+    # Approximate WGS-84 coordinates (optional — best-effort from geocoding or page state).
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    # Distance from the target listing (set by geo_filter, None if coords unavailable).
+    distance_to_target_km: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +87,7 @@ AMENITY_HINTS = {
     "gym": ["gym", "fitness"],
     "bbq": ["bbq", "barbecue", "grill"],
     "fire_pit": ["fire pit"],
+    "pets_allowed": ["pets allowed", "pet-friendly", "pet friendly"],
 }
 
 

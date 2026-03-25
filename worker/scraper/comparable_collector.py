@@ -435,3 +435,82 @@ def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
         amenities=extract_amenities(text),
         scrape_nights=price_nights,
     )
+
+
+def extract_comp_coords(page) -> dict:
+    """
+    Best-effort extraction of room_id → (lat, lng) from the Airbnb search
+    page's embedded Next.js JSON state.
+
+    Airbnb embeds listing data (including map-pin coordinates) in a
+    ``<script id="__NEXT_DATA__">`` tag on search result pages.  The exact
+    shape of this JSON changes over time, so we scan the structure
+    recursively for any object that has both a numeric listing id and
+    lat/lng fields rather than relying on a hard-coded path.
+
+    Returns:
+        dict mapping room_id_str → (lat, lng) floats.
+        Empty dict on any failure (parse error, missing tag, no coords found).
+    """
+    try:
+        result = page.evaluate(r"""
+() => {
+  try {
+    const el = document.getElementById('__NEXT_DATA__');
+    if (!el) return {};
+    const raw = el.textContent || '';
+    if (!raw || raw.length > 6000000) return {};   // 6 MB hard limit
+
+    const data = JSON.parse(raw);
+    const coords = {};
+    let scanCount = 0;
+    const MAX_SCANS = 30000;
+
+    function scan(obj, depth) {
+      if (scanCount++ > MAX_SCANS || depth > 25 || obj === null || typeof obj !== 'object') return;
+      if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) scan(obj[i], depth + 1);
+        return;
+      }
+      // Check if this object looks like a listing with coordinates
+      const lat = typeof obj.lat === 'number' ? obj.lat
+                : typeof obj.latitude === 'number' ? obj.latitude : null;
+      const lng = typeof obj.lng === 'number' ? obj.lng
+                : typeof obj.longitude === 'number' ? obj.longitude : null;
+      const rawId = obj.id || obj.listingId || obj.listing_id;
+      if (lat !== null && lng !== null && rawId) {
+        const id = String(rawId);
+        if (/^\d+$/.test(id) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+          coords[id] = [lat, lng];
+        }
+      }
+      const keys = Object.keys(obj);
+      for (let k = 0; k < keys.length; k++) {
+        const val = obj[keys[k]];
+        if (val && typeof val === 'object') scan(val, depth + 1);
+      }
+    }
+
+    scan(data, 0);
+    return coords;
+  } catch (e) {
+    return {};
+  }
+}
+""")
+        if isinstance(result, dict):
+            # Convert JS [lat, lng] arrays to Python tuples with float validation
+            clean: dict = {}
+            for room_id, pair in result.items():
+                if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                    try:
+                        lat, lng = float(pair[0]), float(pair[1])
+                        if -90 <= lat <= 90 and -180 <= lng <= 180:
+                            clean[str(room_id)] = (lat, lng)
+                    except (TypeError, ValueError):
+                        pass
+            return clean
+        return {}
+    except Exception as exc:
+        logger.debug(f"[extract_comp_coords] Failed (non-fatal): {exc}")
+        return {}

@@ -528,6 +528,49 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 },
             )
 
+        # ── Phase 3A: Resolve target coordinates ─────────────────────────
+        # Fetch existing coords from the saved listing, or geocode the address
+        # if they are missing.  Best-effort: failure is logged and skipped.
+        _job_target_lat: Optional[float] = None
+        _job_target_lng: Optional[float] = None
+        _geocoded_now = False  # True if we just geocoded (need to write back)
+
+        _listing_id_for_geocode = job.get("listing_id")
+        if _listing_id_for_geocode:
+            try:
+                _geo_row = (
+                    client.table("saved_listings")
+                    .select("target_lat, target_lng")
+                    .eq("id", _listing_id_for_geocode)
+                    .single()
+                    .execute()
+                )
+                _geo_data = (_geo_row.data or {})
+                _db_lat = _geo_data.get("target_lat")
+                _db_lng = _geo_data.get("target_lng")
+                if _db_lat is not None and _db_lng is not None:
+                    _job_target_lat = float(_db_lat)
+                    _job_target_lng = float(_db_lng)
+                    logger.info(
+                        f"[{report_id}] Target coords from DB: "
+                        f"({_job_target_lat:.5f}, {_job_target_lng:.5f})"
+                    )
+                else:
+                    # Coords not yet stored — geocode the input address
+                    from worker.core.geocoding import geocode_address
+                    _gc = geocode_address(address)
+                    if _gc:
+                        _job_target_lat, _job_target_lng = _gc
+                        _geocoded_now = True
+                        logger.info(
+                            f"[{report_id}] Geocoded target: "
+                            f"({_job_target_lat:.5f}, {_job_target_lng:.5f})"
+                        )
+            except Exception as _geo_exc:
+                logger.warning(
+                    f"[{report_id}] Target coord resolution failed (non-fatal): {_geo_exc}"
+                )
+
         _mode_c_succeeded = False
         # benchmarkInfo is preserved here even when Mode C falls back to Mode B/A.
         # Without this, a failed-but-attempted benchmark run would lose all transparency.
@@ -554,6 +597,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                     secondary_benchmark_urls=secondary_benchmark_urls or None,
                     user_attributes=attributes,
+                    target_lat=_job_target_lat,
+                    target_lng=_job_target_lng,
                 )
 
                 # Save benchmark transparency now — before any fallback overwrites transparent_result.
@@ -603,6 +648,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                     preferred_comps=preferred_comps,
+                    target_lat=_job_target_lat,
+                    target_lng=_job_target_lng,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -660,6 +707,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                     preferred_comps=preferred_comps,
+                    target_lat=_job_target_lat,
+                    target_lng=_job_target_lng,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -747,6 +796,32 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
             except Exception as exc:
                 logger.warning(f"[{report_id}] Failed to sync linked listing attributes: {exc}")
+
+        # Write back geocoded target coords to saved_listings (Phase 3A)
+        if _geocoded_now and _listing_id_for_geocode and _job_target_lat is not None:
+            try:
+                client.table("saved_listings").update({
+                    "target_lat": _job_target_lat,
+                    "target_lng": _job_target_lng,
+                }).eq("id", _listing_id_for_geocode).execute()
+                logger.info(
+                    f"[{report_id}] Saved geocoded coords to listing {_listing_id_for_geocode}"
+                )
+            except Exception as exc:
+                logger.warning(f"[{report_id}] Failed to write geocoded coords (non-fatal): {exc}")
+
+        # Seed comparable pool (Phase 2) — non-fatal, runs after job is marked ready
+        _listing_id = job.get("listing_id")
+        if _listing_id and transparent_result:
+            try:
+                from worker.core.pool_seeding import seed_pool_from_report
+                seed_pool_from_report(
+                    client,
+                    saved_listing_id=_listing_id,
+                    comparable_listings=transparent_result.get("comparableListings") or [],
+                )
+            except Exception as exc:
+                logger.warning(f"[{report_id}] Pool seeding failed (non-fatal): {exc}")
 
         # Store in cache (enriched summary includes transparency)
         try:

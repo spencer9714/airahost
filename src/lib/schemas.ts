@@ -194,6 +194,12 @@ export interface CompsSummary {
   sampledDays?: number;
   interpolatedDays?: number;
   missingDays?: number;
+  /** Comps excluded by the similarity floor (score < filterFloor). Present on new reports only. */
+  belowSimilarityFloor?: number;
+  /** The minimum similarity score required for a comp to enter pricing. */
+  filterFloor?: number;
+  /** Days where only 1–2 comps survived the similarity floor (low confidence). */
+  lowCompConfidenceDays?: number;
 }
 
 export interface PriceDistribution {
@@ -229,6 +235,11 @@ export interface ComparableListing {
    * Absent on old reports (treat as 1).
    */
   queryNights?: number;
+  /**
+   * Number of sampled days on which this comp appeared in the pricing pool.
+   * Higher = more consistently similar across dates. Present on new reports only.
+   */
+  usedInPricingDays?: number;
 }
 
 export interface RecommendedPrice {

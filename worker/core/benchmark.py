@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from worker.core.price_band import apply_price_band_filter
+from worker.core.price_sanity import apply_price_sanity
 from worker.core.similarity import (
     comp_urls_match,
     filter_similar_candidates,
@@ -388,12 +390,16 @@ def estimate_benchmark_price_for_date(
 
         # Benchmark is the primary anchor, so always prefer the listing page's
         # live booking-widget price (including discounts) over the search card.
+        # Always attempt with a 1-night checkout regardless of how many nights the
+        # market search used — the extractor has its own 1→2-night fallback for
+        # listings with a minimum-stay > 1 night.
+        _bm_checkout_str = (date_i + timedelta(days=1)).isoformat()
         logger.info(
             f"[benchmark] {checkin_str}: trying benchmark listing page first"
         )
         time.sleep(rate_limit_seconds)
         direct_price, direct_confidence = _extract_benchmark_price_with_min_stay_fallback(
-            page, benchmark_url, checkin_str, checkout_str
+            page, benchmark_url, checkin_str, _bm_checkout_str
         )
         if direct_price:
             benchmark_price = direct_price
@@ -486,7 +492,45 @@ def estimate_benchmark_price_for_date(
         ]
         market_scored.sort(key=lambda x: x[1], reverse=True)
 
-        market_prices = [c.nightly_price for c, _ in market_scored if c.nightly_price]
+        # ── Phase 3B: Price-band filter (benchmark path — pricing only) ──────
+        # Applied only to the pricing pool (market_scored_priced), NOT to the
+        # display list (market_scored).  Keeping display intact prevents the
+        # "only 1 comparable" symptom when the whole market prices above the
+        # ±30% anchor band — the user can still see where the market sits.
+        #
+        # The anchor is benchmark_price (Stage 1); falls back to majority band
+        # when benchmark_price is unavailable.
+        market_scored_for_pricing = market_scored  # start from full similarity pool
+        try:
+            _pb_anchor = benchmark_price if (benchmark_price and benchmark_price > 0) else None
+            market_scored_for_pricing, _pb_excluded, _pb_info = apply_price_band_filter(
+                market_scored, _pb_anchor
+            )
+            if _pb_excluded:
+                logger.info(
+                    f"[benchmark] {checkin_str}: price band "
+                    f"({_pb_info['anchor_mode']}) "
+                    f"${_pb_info.get('lower')}-${_pb_info.get('upper')} "
+                    f"excluded={len(_pb_excluded)} from pricing "
+                    f"(display unaffected, {len(market_scored)} comps shown)"
+                )
+        except Exception as _pb_exc:
+            logger.warning(f"[benchmark] Price band filter failed (non-fatal): {_pb_exc}")
+
+        # Layer 1 price sanity: remove severe price outliers from market_median
+        # computation so they don't skew the benchmark correction signal.
+        # market_scored (unfiltered by price band) is kept intact for display.
+        _sanity_results, _ps_excl, _ps_down = apply_price_sanity(market_scored_for_pricing)
+        market_scored_priced = [
+            (r.comp, r.sim_score) for r in _sanity_results if r.weight > 0
+        ]
+        if _ps_excl or _ps_down:
+            logger.debug(
+                f"[benchmark] {checkin_str}: market price sanity — "
+                f"excluded={_ps_excl} downweighted={_ps_down}"
+            )
+
+        market_prices = [c.nightly_price for c, _ in market_scored_priced if c.nightly_price]
         market_median = (
             round(statistics.median(market_prices), 2) if market_prices else None
         )
@@ -594,7 +638,11 @@ def estimate_benchmark_price_for_date(
                 #   both reliable but diverge       → conservative    (0.75×)
                 #   neither reliable                → minimal         (0.40×)
                 if abs(raw_adj) > BENCHMARK_OUTLIER_THRESHOLD:
-                    benchmark_reliable = (fetch_confidence == "high")
+                    # "medium" = direct-page DOM widget extraction — reliable enough
+                    # to anchor pricing.  Treating it as "not reliable" caused
+                    # lean_market (outlier_factor=1.0) to fire on direct-page fetches,
+                    # leaving full market weight applied even at a >40% gap.
+                    benchmark_reliable = (fetch_confidence in ("high", "medium"))
                     market_reliable = (len(market_prices) >= _MIN_COMPS_FOR_FULL_WEIGHT)
 
                     if benchmark_reliable and not market_reliable:
@@ -640,9 +688,20 @@ def estimate_benchmark_price_for_date(
                 final_price = benchmark_price
                 effective_weight = 0.0
         elif market_median is not None:
-            # No benchmark price at all → fall back to pure market median
-            final_price = market_median
-            effective_weight = 1.0
+            # Benchmark price unavailable for this day.  Rather than using the
+            # raw market median (which would pull the overall recommendation far
+            # below the benchmark level on days where the listing is booked or
+            # blocked), signal the interpolation layer to fill this day from
+            # adjacent benchmark-anchored sampled days.
+            #
+            # market_price is still recorded so aggregate_benchmark_transparency
+            # can report the market signal even when it wasn't used for pricing.
+            #
+            # NOTE: if ALL sampled days fail to fetch the benchmark, interpolation
+            # has no anchors and the pipeline returns an empty recommendation — the
+            # caller in run_benchmark_scrape should then fall back to run_scrape.
+            final_price = None
+            effective_weight = 0.0
 
         # Build top-comps payload. Prepend the primary benchmark so it always
         # appears in comparableListings with its per-day benchmark_price.
@@ -706,18 +765,18 @@ def estimate_benchmark_price_for_date(
             dist["p25"] = round(q[0], 2)
             dist["p75"] = round(q[2], 2)
 
-        # Hard cap: final price must stay within ±20% of benchmark anchor.
+        # Hard cap: final price must stay within ±15% of benchmark anchor.
         # This prevents market noise from pushing the recommendation too far
         # from the listing the user knows and trusts.
         if benchmark_price is not None and final_price is not None:
-            cap_max = round(benchmark_price * 1.20, 2)
-            cap_min = round(benchmark_price * 0.80, 2)
+            cap_max = round(benchmark_price * 1.15, 2)
+            cap_min = round(benchmark_price * 0.85, 2)
             capped = max(cap_min, min(cap_max, final_price))
             if capped != final_price:
                 logger.info(
                     f"[benchmark] {checkin_str}: price capped "
                     f"${final_price:.2f} → ${capped:.2f} "
-                    f"(benchmark=${benchmark_price:.2f}, ±20% band [{cap_min:.2f}, {cap_max:.2f}])"
+                    f"(benchmark=${benchmark_price:.2f}, ±15% band [{cap_min:.2f}, {cap_max:.2f}])"
                 )
                 final_price = capped
 
@@ -864,6 +923,16 @@ def aggregate_benchmark_transparency(
     # Outlier days: benchmark and market diverged ≥ BENCHMARK_OUTLIER_THRESHOLD
     outlier_days = sum(1 for r in day_results if "benchmark_outlier" in r.flags)
 
+    # Anchor/interpolation breakdown
+    days_with_benchmark_anchor = len(benchmark_prices)  # days where benchmark_price was fetched
+    days_benchmark_failed = sum(
+        1 for r in day_results if "benchmark_fetch_failed" in r.flags
+    )
+    days_interpolated = sum(
+        1 for r in day_results
+        if r.median_price is not None and "benchmark_fetch_failed" in r.flags
+    )  # failed days that were filled by interpolation
+
     # Conflict detected when:
     #   - outlier days exceed 30% of sampled days, OR
     #   - secondary comps clearly agree with market rather than benchmark
@@ -897,6 +966,12 @@ def aggregate_benchmark_transparency(
         },
         "secondaryComps": secondary_comps_agg or None,
         "consensusSignal": consensus_signal,
+        "anchorStats": {
+            "daysWithBenchmarkAnchor": days_with_benchmark_anchor,
+            "daysBenchmarkFailed": days_benchmark_failed,
+            "daysInterpolated": days_interpolated,
+            "totalSampledDays": total,
+        },
     }
 
 

@@ -26,6 +26,7 @@ from datetime import datetime as dt
 from typing import Any, Dict, List, Optional, Tuple
 
 from worker.core.similarity import (
+    SIMILARITY_FLOOR,
     comp_urls_match,
     filter_similar_candidates,
     similarity_score,
@@ -151,6 +152,12 @@ def _build_daily_transparent_result(
 
     total_comps_collected = sum(r.get("comps_collected", 0) for r in all_day_results)
     total_comps_used = sum(r.get("comps_used", 0) for r in all_day_results)
+    total_below_floor = sum(r.get("below_similarity_floor", 0) for r in all_day_results)
+    low_comp_confidence_days = sum(
+        1 for r in all_day_results
+        if "low_comp_confidence" in (r.get("flags") or [])
+    )
+
     comparable_index: Dict[str, Dict[str, Any]] = {}
     for day_result in all_day_results:
         day_date = day_result.get("date")
@@ -193,7 +200,13 @@ def _build_daily_transparent_result(
     for state in comparable_index.values():
         item = dict(state["item"])
         avg_score = state["score_sum"] / max(1, state["count"])
+        # Only surface comps whose average similarity passes the floor.
+        # top_comps already excludes below-floor comps, so this is a safety guard
+        # against boosted display scores that may have been stored in older entries.
+        if avg_score < SIMILARITY_FLOOR:
+            continue
         item["similarity"] = round(avg_score, 3)
+        item["usedInPricingDays"] = state["count"]
         price_by_date = state.get("price_by_date", {})
         if price_by_date:
             item["priceByDate"] = price_by_date
@@ -203,13 +216,14 @@ def _build_daily_transparent_result(
         elif "queryNights" in item:
             del item["queryNights"]
         comparable_listings.append(item)
+    # Sort: similarity DESC; use reviews as tie-break (more reviews = more signal).
     comparable_listings.sort(
         key=lambda row: (
             -float(row.get("similarity") or 0.0),
-            float(row.get("nightlyPrice") or 0.0),
+            -int(row.get("reviews") or 0),
         )
     )
-    comparable_listings = comparable_listings[:20]
+    comparable_listings = comparable_listings[:15]
 
     # Price distribution from aggregated daily medians
     price_dist: Dict[str, Any] = {
@@ -264,6 +278,9 @@ def _build_daily_transparent_result(
             "sampledDays": sampled_days,
             "interpolatedDays": interpolated_days,
             "missingDays": missing_days,
+            "belowSimilarityFloor": total_below_floor,
+            "filterFloor": SIMILARITY_FLOOR,
+            "lowCompConfidenceDays": low_comp_confidence_days,
         },
         "priceDistribution": price_dist,
         "recommendedPrice": {
@@ -451,6 +468,8 @@ def run_scrape(
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    target_lat: Optional[float] = None,
+    target_lng: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -514,6 +533,11 @@ def run_scrape(
             target, warnings = extract_target_spec(page, listing_url)
             extraction_warnings.extend(warnings)
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
+
+            # Inject geocoded coordinates (passed from main.py via job's saved listing)
+            if target_lat is not None and target_lng is not None:
+                target.lat = target_lat
+                target.lng = target_lng
 
             if not target.location:
                 # Try "... in City, State" pattern first
@@ -637,6 +661,11 @@ def run_scrape(
                     "median_price": dr.median_price,
                     "comps_collected": dr.comps_collected,
                     "comps_used": dr.comps_used,
+                    "below_similarity_floor": dr.below_similarity_floor,
+                    "price_outliers_excluded": dr.price_outliers_excluded,
+                    "price_outliers_downweighted": dr.price_outliers_downweighted,
+                    "geo_excluded": dr.geo_excluded,
+                    "price_band_excluded": dr.price_band_excluded,
                     "filter_stage": dr.filter_stage,
                     "flags": dr.flags,
                     "is_sampled": dr.is_sampled,
@@ -710,6 +739,8 @@ def run_benchmark_scrape(
     target_spec_override: Optional[ListingSpec] = None,
     secondary_benchmark_urls: Optional[List[str]] = None,
     user_attributes: Optional[Dict[str, Any]] = None,
+    target_lat: Optional[float] = None,
+    target_lng: Optional[float] = None,
 ) -> tuple:
     """
     Benchmark-first pipeline.
@@ -813,6 +844,11 @@ def run_benchmark_scrape(
                     )
 
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
+
+            # Inject geocoded coordinates
+            if target_lat is not None and target_lng is not None:
+                target.lat = target_lat
+                target.lng = target_lng
 
             # ── Benchmark-to-target similarity (computed once per job) ────────
             # Compare the benchmark listing's extracted spec against the user's
@@ -939,6 +975,11 @@ def run_benchmark_scrape(
                     "median_price": dr.median_price,
                     "comps_collected": dr.comps_collected,
                     "comps_used": dr.comps_used,
+                    "below_similarity_floor": dr.below_similarity_floor,
+                    "price_outliers_excluded": dr.price_outliers_excluded,
+                    "price_outliers_downweighted": dr.price_outliers_downweighted,
+                    "geo_excluded": dr.geo_excluded,
+                    "price_band_excluded": dr.price_band_excluded,
                     "filter_stage": dr.filter_stage,
                     "flags": dr.flags,
                     "is_sampled": dr.is_sampled,
@@ -1121,6 +1162,8 @@ def run_criteria_search(
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    target_lat: Optional[float] = None,
+    target_lng: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Criteria-based search: search Airbnb for listings matching the user's
@@ -1168,6 +1211,8 @@ def run_criteria_search(
         beds=attributes.get("bedrooms"),  # approximate beds = bedrooms
         baths=attributes.get("bathrooms"),
         property_type=attributes.get("propertyType", ""),
+        lat=target_lat,
+        lng=target_lng,
     )
 
     adults = min(attributes.get("maxGuests", 2), 16)
