@@ -222,6 +222,54 @@ def collect_search_cards(page, stay_nights: int = 1) -> List[Dict[str, Any]]:
             return { value: null, kind: 'unknown', price_nights: 1, source: 'none' };
           }
 
+          function normalizeLine(text) {
+            return (text || '').replace(/\s+/g, ' ').trim();
+          }
+
+          function isLikelyBadgeOrMeta(line) {
+            if (!line) return true;
+            if (line.length < 8 || line.length > 140) return true;
+            if (/^(top\s+guest\s+favorite|guest\s+favorite|superhost|rare\s+find|new)$/i.test(line)) return true;
+            if (/(US\$|CA\$|AU\$|NZ\$|\$)\s*\d/.test(line)) return true;
+            if (/\b(?:night|nights|total|tax|taxes|fee|fees|cleaning|discounted|originally|before taxes)\b/i.test(line)) return true;
+            if (/\b(?:review|reviews)\b/i.test(line)) return true;
+            if (/\b(?:guest|guests|bedroom|bedrooms|bed|beds|bath|baths)\b/i.test(line) && /\d/.test(line)) return true;
+            if (/^\d(?:\.\d+)?(?:\s*\(|\s*$)/.test(line)) return true;
+            if (/^(entire|private|shared)\s.+\sin\s.+/i.test(line)) return true;
+            if (/^(room in|home in|apartment in|condo in|townhouse in|rental unit in|villa in|cabin in)\b/i.test(line)) return true;
+            return false;
+          }
+
+          function extractListingTitle(root, anchor) {
+            const candidates = [];
+
+            function pushCandidate(raw) {
+              const line = normalizeLine(raw);
+              if (!line) return;
+              if (!candidates.includes(line)) candidates.push(line);
+            }
+
+            const headingNodes = root.querySelectorAll('h1, h2, h3, [role="heading"]');
+            for (const el of headingNodes) {
+              pushCandidate(el.textContent || '');
+            }
+
+            if (anchor) {
+              const anchorLines = (anchor.innerText || '').split('\n');
+              for (const line of anchorLines) pushCandidate(line);
+            }
+
+            const rootLines = (root.innerText || '').split('\n');
+            for (const line of rootLines) pushCandidate(line);
+
+            const preferred = candidates.find(function(line) {
+              return !isLikelyBadgeOrMeta(line);
+            });
+            if (preferred) return preferred;
+
+            return candidates.find(function(line) { return line.length >= 6; }) || '';
+          }
+
           // ── Card collection ───────────────────────────────────────────────
           const cardRoots = []
             .concat(Array.from(
@@ -253,10 +301,7 @@ def collect_search_cards(page, stay_nights: int = 1) -> List[Dict[str, Any]]:
             uniq.add(roomId);
 
             const text = (root.innerText || '').trim();
-            const aria = a.getAttribute('aria-label') || '';
-            const title = aria || (text.split('\n').find(function(x) {
-              return x.trim().length > 6;
-            }) || '');
+            const title = extractListingTitle(root, a);
 
             const priceChoice = selectCardPrice(root);
 

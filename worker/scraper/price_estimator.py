@@ -51,12 +51,66 @@ from worker.scraper.day_query import (
 from worker.scraper.target_extractor import (
     ListingSpec,
     check_cdp_endpoint,
+    extract_listing_page_title,
     extract_target_spec,
     safe_domain_base,
 )
 
 logger = logging.getLogger("worker.scraper")
 ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+
+
+def _title_looks_suspicious(title: str) -> bool:
+    t = (title or "").strip()
+    if len(t) < 8:
+        return True
+    if re.fullmatch(r"(?i)(top guest favorite|guest favorite|superhost|rare find|new|show price breakdown)", t):
+        return True
+    if re.fullmatch(r"(?i)[A-Za-z]{3,9}\s+\d{1,2}\s+to\s+\d{1,2}", t):
+        return True
+    if re.fullmatch(
+        r"(?i)(?:jan|feb|mar|apr|may|jun|june|jul|july|aug|sep|sept|oct|nov|dec)\s+\d{1,2}\s+to\s+"
+        r"(?:jan|feb|mar|apr|may|jun|june|jul|july|aug|sep|sept|oct|nov|dec)\s+\d{1,2}",
+        t,
+    ):
+        return True
+    if re.search(r"(?i)\b(show price breakdown|price breakdown|reserve|check in|check out)\b", t):
+        return True
+    if re.search(r"(?i)\b(?:may|jun|june|jul|july|aug|sep|sept|oct|nov|dec|jan|feb|mar|apr)\s+\d{1,2}\s+to\s+\d{1,2}\b", t):
+        return True
+    return False
+
+
+def _repair_suspicious_comparable_titles(
+    page,
+    transparent_result: Dict[str, Any],
+    extraction_warnings: List[str],
+    limit: int = 8,
+) -> None:
+    listings = transparent_result.get("comparableListings")
+    if not isinstance(listings, list) or not listings:
+        return
+
+    repaired = 0
+    for item in listings:
+        if repaired >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not url or not _title_looks_suspicious(title):
+            continue
+        try:
+            resolved_title, title_warnings = extract_listing_page_title(page, url)
+        except Exception as exc:
+            extraction_warnings.append(f"Comparable title repair failed for {url}: {exc}")
+            continue
+        extraction_warnings.extend(title_warnings)
+        if resolved_title and not _title_looks_suspicious(resolved_title):
+            item["title"] = resolved_title
+            repaired += 1
+            logger.info(f"[comp_title] repaired title for {url} -> {resolved_title!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +674,7 @@ def run_scrape(
                     preferred_comps,
                 ),
             )
+            _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
 
             logger.info(
                 f"Day-by-day pipeline complete: {len(sample_indices)} queries, "
@@ -987,6 +1042,7 @@ def run_benchmark_scrape(
                 extraction_warnings=extraction_warnings,
                 benchmark_info=benchmark_info,
             )
+            _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
 
             logger.info(
                 f"[benchmark] Pipeline complete: {len(sampled_results)} queries, "

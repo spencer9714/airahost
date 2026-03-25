@@ -478,6 +478,72 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
     return spec, warnings
 
 
+def extract_listing_page_title(page, listing_url: str) -> Tuple[str, List[str]]:
+    """
+    Navigate to an Airbnb listing page and extract the canonical listing title.
+
+    Returns (title, warnings). This is lighter-weight than extract_target_spec
+    and is intended for post-processing comparable listings whose search-card
+    title looks suspicious.
+    """
+    warnings: List[str] = []
+    title = ""
+
+    try:
+        page.goto(listing_url, wait_until="domcontentloaded")
+        page.wait_for_timeout(600)
+    except Exception as exc:
+        warnings.append(f"Failed to open listing page: {exc}")
+        return "", warnings
+
+    try:
+        title = clean(page.locator("h1").first.inner_text(timeout=3000))
+    except Exception:
+        title = ""
+
+    if title:
+        return title, warnings
+
+    try:
+        ld = page.evaluate(
+            """() => {
+              const scripts = Array.from(
+                document.querySelectorAll('script[type="application/ld+json"]')
+              );
+              return scripts.map(s => s.textContent || '').filter(Boolean);
+            }"""
+        )
+    except Exception:
+        ld = []
+
+    if isinstance(ld, list):
+        for block in ld:
+            try:
+                obj = json.loads(block)
+            except Exception:
+                continue
+            items = obj if isinstance(obj, list) else [obj]
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                name = clean(str(it.get("name") or ""))
+                if name:
+                    return name, warnings
+
+    try:
+        body_text = page.inner_text("body", timeout=5000)
+        for line in body_text.splitlines():
+            line = clean(line)
+            if len(line) >= 8:
+                warnings.append("Title extracted from body text fallback")
+                return line, warnings
+    except Exception:
+        pass
+
+    warnings.append("Could not extract listing page title")
+    return "", warnings
+
+
 # ---------------------------------------------------------------------------
 # Benchmark price extraction — direct listing page visit with dates
 # ---------------------------------------------------------------------------

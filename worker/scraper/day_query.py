@@ -193,10 +193,16 @@ def estimate_base_price_for_date(
                 stay_nights=query_nights,
             )
 
-            comps = [parse_card_to_spec(c) for c in raw_cards]
+            parsed_comps = [parse_card_to_spec(c) for c in raw_cards]
+            comps = [
+                c for c in parsed_comps
+                if c.url and not (target.url and comp_urls_match(c.url, target.url))
+            ]
+            self_excluded = len(parsed_comps) - len(comps)
             priced = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
             logger.info(
-                f"[day_query] {checkin_str}: query_nights={query_nights} raw_cards={len(raw_cards)} parsed={len(comps)} priced={len(priced)}"
+                f"[day_query] {checkin_str}: query_nights={query_nights} raw_cards={len(raw_cards)} "
+                f"parsed={len(parsed_comps)} self_excluded={self_excluded} priced={len(priced)}"
             )
             if priced:
                 query_nights_used = query_nights
