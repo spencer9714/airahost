@@ -116,6 +116,72 @@ def _repair_suspicious_comparable_titles(
             logger.info(f"[comp_title] repaired title for {url} -> {resolved_title!r}")
 
 
+def _repair_incomplete_comparable_specs(
+    page,
+    transparent_result: Dict[str, Any],
+    extraction_warnings: List[str],
+    limit: int = 6,
+) -> None:
+    """Backfill comp metadata from listing pages when search-card fields are incomplete."""
+    listings = transparent_result.get("comparableListings")
+    if not isinstance(listings, list) or not listings:
+        return
+
+    repaired = 0
+    for item in listings:
+        if repaired >= limit:
+            break
+        if not isinstance(item, dict):
+            continue
+
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+
+        needs_repair = any(
+            item.get(key) in (None, "", 0)
+            for key in ("accommodates", "bedrooms", "baths")
+        ) or not str(item.get("location") or "").strip()
+
+        if not needs_repair and not _title_looks_suspicious(str(item.get("title") or "")):
+            continue
+
+        try:
+            spec, warnings = extract_target_spec(page, url)
+        except Exception as exc:
+            extraction_warnings.append(f"Comparable spec repair failed for {url}: {exc}")
+            continue
+
+        extraction_warnings.extend(warnings)
+
+        if spec.title and _title_looks_suspicious(str(item.get("title") or "")):
+            item["title"] = spec.title
+        if spec.property_type:
+            item["propertyType"] = spec.property_type
+        if isinstance(spec.accommodates, (int, float)):
+            item["accommodates"] = int(spec.accommodates)
+        if isinstance(spec.bedrooms, (int, float)):
+            item["bedrooms"] = int(spec.bedrooms)
+        if isinstance(spec.baths, (int, float)):
+            item["baths"] = round(float(spec.baths), 1)
+        if spec.location:
+            item["location"] = spec.location
+        if isinstance(spec.rating, (int, float)) and item.get("rating") is None:
+            item["rating"] = round(float(spec.rating), 2)
+        if isinstance(spec.reviews, (int, float)) and item.get("reviews") is None:
+            item["reviews"] = int(spec.reviews)
+
+        repaired += 1
+        logger.info(
+            "[comp_spec] repaired %s -> accommodates=%s bedrooms=%s baths=%s location=%r",
+            url,
+            item.get("accommodates"),
+            item.get("bedrooms"),
+            item.get("baths"),
+            item.get("location"),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helper: assemble transparent result from day-by-day data
 # ---------------------------------------------------------------------------
@@ -166,6 +232,19 @@ def _build_daily_transparent_result(
         return d.strftime("%Y-%m-%d")
 
     comparable_index: Dict[str, Dict[str, Any]] = {}
+
+    def _prefer_better_comp_value(current: Any, candidate: Any) -> Any:
+        """Keep richer comp metadata when the same listing appears across days."""
+        if candidate is None:
+            return current
+        if isinstance(candidate, str):
+            cand = candidate.strip()
+            if not cand:
+                return current
+            cur = current.strip() if isinstance(current, str) else ""
+            return candidate if not cur else current
+        return candidate if current is None else current
+
     for day_result in all_day_results:
         day_date = day_result.get("date")
         # comp_prices holds prices for ALL scraped comps (not just top_k).
@@ -189,6 +268,11 @@ def _build_daily_transparent_result(
                     "max_query_nights": qn,
                 }
             else:
+                item = comparable_index[comp_id]["item"]
+                for key in ("title", "propertyType", "location", "url"):
+                    item[key] = _prefer_better_comp_value(item.get(key), comp.get(key))
+                for key in ("accommodates", "bedrooms", "baths", "rating", "reviews"):
+                    item[key] = _prefer_better_comp_value(item.get(key), comp.get(key))
                 comparable_index[comp_id]["score_sum"] += score
                 comparable_index[comp_id]["count"] += 1
                 if qn > comparable_index[comp_id]["max_query_nights"]:
@@ -756,6 +840,7 @@ def run_scrape(
                     "lng": target.lng,
                     "source": _coord_source,
                 }
+            _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
             _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
 
             logger.info(
@@ -1111,15 +1196,15 @@ def run_benchmark_scrape(
                         "id": sec_id,
                         "title": "Secondary benchmark listing",
                         "propertyType": target.property_type or "entire_home",
-                        "accommodates": int(target.accommodates or 1),
-                        "bedrooms": int(target.bedrooms or 1),
-                        "baths": round(float(target.baths or 1), 1),
+                        "accommodates": None,
+                        "bedrooms": None,
+                        "baths": None,
                         "nightlyPrice": avg_sec_price,
                         "currency": "USD",
                         "similarity": 0.95,
                         "rating": None,
                         "reviews": None,
-                        "location": target.location or None,
+                        "location": None,
                         "url": sec_url,
                         "isPinnedBenchmark": True,
                     })
@@ -1148,6 +1233,7 @@ def run_benchmark_scrape(
                 extraction_warnings=extraction_warnings,
                 benchmark_info=benchmark_info,
             )
+            _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
             _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
 
             logger.info(

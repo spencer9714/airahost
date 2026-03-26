@@ -10,6 +10,7 @@ Extracted from price_estimator.py for modularity.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -28,6 +29,12 @@ from worker.scraper.target_extractor import (
 )
 
 logger = logging.getLogger("worker.scraper.comparable_collector")
+
+
+_SEARCH_CARD_LOCATION_PATTERNS = [
+    r"(?:entire\s+\w+|private\s+room|shared\s+room|hotel\s+room)\s+in\s+(.+?)(?:[\n\u00b7\u2022\u2605]|$)",
+    r"(?:room|home|apartment|condo|townhouse|rental unit|villa|cabin)\s+in\s+(.+?)(?:[\n\u00b7\u2022\u2605]|$)",
+]
 
 
 def build_search_url(
@@ -429,6 +436,23 @@ def scroll_and_collect(
     return list(all_cards.values())
 
 
+def extract_search_result_location(text: str) -> str:
+    """Extract the Airbnb card location, e.g. 'Seattle, Washington'."""
+    cleaned = clean(text)
+    if not cleaned:
+        return ""
+
+    for pattern in _SEARCH_CARD_LOCATION_PATTERNS:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if not match:
+            continue
+        location = clean(match.group(1))
+        location = re.split(r"[\u00b7\u2022\u2605]", location, maxsplit=1)[0].strip(" ,")
+        if location:
+            return location
+    return ""
+
+
 def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
     """Convert a raw card dict into a ListingSpec.
 
@@ -473,6 +497,7 @@ def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
     return ListingSpec(
         url=str(card.get("url") or ""),
         title=clean(card.get("title") or ""),
+        location=extract_search_result_location(text),
         accommodates=extract_first_int(text, [GUEST_RE]),
         bedrooms=extract_first_int(text, [BEDROOM_RE]),
         beds=extract_first_int(text, [BED_RE]),

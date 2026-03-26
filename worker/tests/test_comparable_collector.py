@@ -13,7 +13,10 @@ Includes:
 import re
 from typing import Optional
 
-from worker.scraper.comparable_collector import parse_card_to_spec
+from worker.scraper.comparable_collector import (
+    extract_search_result_location,
+    parse_card_to_spec,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +238,47 @@ class TestParseCardToSpec:
         }
         spec = parse_card_to_spec(card)
         assert spec.nightly_price == 210.0
+
+    def test_extracts_search_card_location(self):
+        card = {
+            "url": "https://www.airbnb.com/rooms/700",
+            "title": "Sunset Hill - Ballard 5bed/3bath",
+            "text": "Entire home in Seattle, Washington\n16+ guests · 5 bedrooms · 11 beds · 3 baths",
+            "price_text": "499.0",
+            "price_value": 499.0,
+            "price_kind": "nightly_standard",
+            "price_source": "dom",
+        }
+        spec = parse_card_to_spec(card)
+        assert spec.location == "Seattle, Washington"
+        assert spec.accommodates == 16
+        assert spec.bedrooms == 5
+        assert spec.baths == 3.0
+
+    def test_extracts_abbreviated_bd_ba_fields(self):
+        card = {
+            "url": "https://www.airbnb.com/rooms/701",
+            "title": "Modern retreat",
+            "text": "Entire home in Seattle, Washington\n10 guests · 5 bd · 8 beds · 5 ba",
+            "price_text": "450.0",
+            "price_value": 450.0,
+            "price_kind": "nightly_standard",
+            "price_source": "dom",
+        }
+        spec = parse_card_to_spec(card)
+        assert spec.accommodates == 10
+        assert spec.bedrooms == 5
+        assert spec.baths == 5.0
+
+
+class TestExtractSearchResultLocation:
+    def test_entire_home_pattern(self):
+        text = "Entire home in Edmonds, Washington\n10 guests · 5 bedrooms · 8 beds · 5 baths"
+        assert extract_search_result_location(text) == "Edmonds, Washington"
+
+    def test_badge_suffix_is_stripped(self):
+        text = "Private room in Seattle · Guest favorite · ★4.9"
+        assert extract_search_result_location(text) == "Seattle"
 
 
 # ---------------------------------------------------------------------------

@@ -59,12 +59,12 @@ class ListingSpec:
 MONEY_RE = re.compile(
     r"(?<!\w)(?:US)?\s?\$?\s?(\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?!\w)"
 )
-BEDROOM_RE = re.compile(r"(\d+)\s*(?:bedroom|bedrooms|間臥室|卧室)", re.I)
+BEDROOM_RE = re.compile(r"(\d+)\s*(?:bedroom|bedrooms|bd|bdrm|間臥室|卧室)", re.I)
 BED_RE = re.compile(r"(\d+)\s*(?:bed|beds|張床|床)", re.I)
 BATH_RE = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(?:bath|baths|衛浴|浴室|衛生間|卫生间)", re.I
+    r"(\d+(?:\.\d+)?)\s*(?:bath|baths|ba|衛浴|浴室|衛生間|卫生间)", re.I
 )
-GUEST_RE = re.compile(r"(\d+)\s*(?:guest|guests|位|人)", re.I)
+GUEST_RE = re.compile(r"(\d+)(?:\+)?\s*(?:guest|guests|位|人)", re.I)
 PROPERTY_TYPE_HINTS = {
     "entire_home": [
         "entire home",

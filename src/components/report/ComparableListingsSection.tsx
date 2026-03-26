@@ -88,6 +88,22 @@ function formatPropertyType(type: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function formatComparableSpecs(listing: ComparableListing): string {
+  const parts = [formatPropertyType(listing.propertyType)];
+
+  if (typeof listing.accommodates === "number") {
+    parts.push(`${listing.accommodates} guest${listing.accommodates !== 1 ? "s" : ""}`);
+  }
+  if (typeof listing.bedrooms === "number") {
+    parts.push(`${listing.bedrooms} bd`);
+  }
+  if (typeof listing.baths === "number") {
+    parts.push(`${listing.baths} ba`);
+  }
+
+  return parts.join(" · ");
+}
+
 // ── Skeleton ────────────────────────────────────────────────────
 
 function SkeletonCard() {
@@ -170,13 +186,7 @@ function ComparableCard({
             )}
           </div>
           <p className="mt-0.5 text-sm text-gray-600">
-            {formatPropertyType(listing.propertyType)}
-            {" · "}
-            {listing.accommodates} guest{listing.accommodates !== 1 ? "s" : ""}
-            {" · "}
-            {listing.bedrooms} bd
-            {" · "}
-            {listing.baths} ba
+            {formatComparableSpecs(listing)}
           </p>
         </div>
 
