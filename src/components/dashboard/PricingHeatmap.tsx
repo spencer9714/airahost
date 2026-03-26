@@ -38,16 +38,14 @@ function Sparkline({ values, min, max }: { values: number[]; min: number; max: n
   );
 }
 
-function tileBg(ratio: number, isWeekend: boolean): string {
-  if (ratio < 0.33) return isWeekend ? "bg-emerald-100/80 border-emerald-200/70" : "bg-emerald-50/70 border-emerald-100/80";
-  if (ratio < 0.66) return isWeekend ? "bg-sky-100/80 border-sky-200/70" : "bg-sky-50/70 border-sky-100/80";
-  return isWeekend ? "bg-indigo-100/80 border-indigo-200/70" : "bg-indigo-50/70 border-indigo-100/80";
+function tileBg(_ratio: number, isWeekend: boolean): string {
+  return isWeekend ? "bg-gray-50/70 border-gray-100/80" : "bg-white border-gray-100/60";
 }
 
 function tilePrice(ratio: number): string {
-  if (ratio < 0.33) return "text-emerald-700";
-  if (ratio < 0.66) return "text-sky-700";
-  return "text-indigo-700";
+  if (ratio < 0.33) return "text-emerald-700/80";
+  if (ratio < 0.66) return "text-foreground/70";
+  return "text-indigo-600/85";
 }
 
 export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
@@ -106,11 +104,11 @@ export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
           return (
             <div
               key={day.date}
-              className={`rounded-xl border p-2.5 ${tileBg(ratio, day.isWeekend)}`}
+              className={`rounded-xl border p-2 ${tileBg(ratio, day.isWeekend)}`}
             >
-              <p className="text-[11px] font-semibold text-foreground/60">{dayName}</p>
-              <p className="text-[10px] text-foreground/40">{monthDay}</p>
-              <p className={`mt-1.5 text-sm font-bold ${tilePrice(ratio)}`}>
+              <p className="text-xs font-medium text-foreground/50">{dayName}</p>
+              <p className="text-[10px] text-foreground/35">{monthDay}</p>
+              <p className={`mt-1.5 text-sm font-bold leading-tight ${tilePrice(ratio)}`}>
                 ${price}
               </p>
             </div>
@@ -119,21 +117,21 @@ export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
       </div>
 
       {/* Legend */}
-      <div className="mt-4 flex items-center gap-5 text-xs text-foreground/50">
+      <div className="mt-4 flex items-center gap-5 text-xs text-foreground/40">
         <span className="flex items-center gap-1.5">
-          <span className="h-2.5 w-2.5 rounded-full bg-emerald-400/80" />
+          <span className="h-2 w-2 rounded-full bg-emerald-500/60" />
           Lower
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="h-2.5 w-2.5 rounded-full bg-sky-400/80" />
+          <span className="h-2 w-2 rounded-full bg-gray-400/60" />
           Mid
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="h-2.5 w-2.5 rounded-full bg-indigo-400/80" />
+          <span className="h-2 w-2 rounded-full bg-indigo-500/60" />
           Higher
         </span>
-        <span className="ml-auto flex items-center gap-1.5 text-foreground/35">
-          <span className="h-2 w-2 rounded-sm bg-current opacity-50" />
+        <span className="ml-auto flex items-center gap-1.5 text-foreground/30">
+          <span className="h-2 w-2 rounded-sm bg-gray-200" />
           Weekend
         </span>
       </div>

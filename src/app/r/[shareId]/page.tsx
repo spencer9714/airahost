@@ -6,7 +6,15 @@ import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { HowWeEstimated } from "@/components/report/HowWeEstimated";
 import { getSupabaseBrowser } from "@/lib/supabase";
-import type { PricingReport, CalendarDay } from "@/lib/schemas";
+import type {
+  PricingReport,
+  CalendarDay,
+  TargetSpec,
+  QueryCriteria,
+  CompsSummary,
+  ComparableListing,
+  BenchmarkInfo,
+} from "@/lib/schemas";
 import { generatePricingReport } from "@/core/pricingCore";
 
 // Find the nearest calendar date that has actual comp price data.
@@ -42,6 +50,14 @@ function getDemoReport(): PricingReport {
   end.setDate(today.getDate() + 30);
   const endDate = end.toISOString().split("T")[0];
 
+  // Four sampled scrape dates spread across the 30-day window.
+  const sampleDates = [0, 7, 14, 21].map((offset) => {
+    const d = new Date(today);
+    d.setDate(today.getDate() + offset);
+    return d.toISOString().split("T")[0];
+  });
+  const [d0, d7, d14, d21] = sampleDates;
+
   const demoAddress = "2847 Hillcrest Drive, Santa Barbara, CA";
   const demoPolicy = {
     weeklyDiscountPct: 10,
@@ -65,6 +81,221 @@ function getDemoReport(): PricingReport {
     endDate,
     discountPolicy: demoPolicy,
   });
+
+  // ── Transparency data ──────────────────────────────────────────
+
+  const targetSpec: TargetSpec = {
+    title: "2847 Hillcrest Drive",
+    location: "Santa Barbara, CA",
+    propertyType: "Entire home",
+    accommodates: 4,
+    bedrooms: 2,
+    beds: 2,
+    baths: 1,
+    amenities: ["Wifi", "Kitchen", "Washer", "Free parking on premises", "Pool"],
+    rating: null,
+    reviews: null,
+  };
+
+  const queryCriteria: QueryCriteria = {
+    locationBasis: "Santa Barbara, CA",
+    searchAdults: 2,
+    checkin: startDate,
+    checkout: endDate,
+    propertyTypeFilter: "entire_home",
+    tolerances: { accommodates: 2, bedrooms: 1, beds: 2, baths: 1 },
+  };
+
+  const benchmarkInfo: BenchmarkInfo = {
+    benchmarkUsed: true,
+    benchmarkUrl: "https://www.airbnb.com/rooms/45892310",
+    benchmarkFetchStatus: "search_hit",
+    benchmarkFetchMethod: "search_result_card",
+    avgBenchmarkPrice: 188,
+    avgMarketPrice: 196,
+    marketAdjustmentPct: 4.3,
+    appliedMarketWeight: 0.35,
+    effectiveMarketWeight: 0.29,
+    maxAdjCap: 0.35,
+    benchmarkTargetSimilarity: 0.93,
+    benchmarkMismatchLevel: "high_match",
+    outlierDays: 1,
+    conflictDetected: false,
+    fallbackReason: null,
+    fetchStats: {
+      searchHits: 28,
+      directFetches: 2,
+      failed: 0,
+      totalDays: 30,
+      highConfidenceDays: 24,
+      mediumConfidenceDays: 4,
+      lowConfidenceDays: 2,
+    },
+    secondaryComps: null,
+    consensusSignal: "strong",
+  };
+
+  const comparableListings: ComparableListing[] = [
+    {
+      id: "comp-sb-1",
+      title: "Charming 2BR Cottage Near State Street",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 185,
+      currency: "USD",
+      similarity: 0.94,
+      rating: 4.87,
+      reviews: 142,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 28,
+      priceByDate: { [d0]: 178, [d7]: 192, [d14]: 201, [d21]: 183 },
+    },
+    {
+      id: "comp-sb-2",
+      title: "Sunny 2-Bedroom Home — Walk to Beach",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 209,
+      currency: "USD",
+      similarity: 0.91,
+      rating: 4.92,
+      reviews: 88,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 26,
+      priceByDate: { [d0]: 199, [d7]: 215, [d14]: 222, [d21]: 204 },
+    },
+    {
+      id: "comp-sb-3",
+      title: "Modern Bungalow with Patio — Eastside SB",
+      propertyType: "Entire home",
+      accommodates: 3,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 172,
+      currency: "USD",
+      similarity: 0.88,
+      rating: 4.78,
+      reviews: 215,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 30,
+      priceByDate: { [d0]: 165, [d7]: 175, [d14]: 182, [d21]: 170 },
+    },
+    {
+      id: "comp-sb-4",
+      title: "Bright 2BD with Private Garden",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 193,
+      currency: "USD",
+      similarity: 0.87,
+      rating: 4.83,
+      reviews: 61,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 24,
+      priceByDate: { [d0]: 186, [d7]: 198, [d14]: 207, [d21]: 190 },
+    },
+    {
+      id: "comp-sb-5",
+      title: "Cozy Craftsman Near Downtown & Funk Zone",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 168,
+      currency: "USD",
+      similarity: 0.85,
+      rating: 4.71,
+      reviews: 307,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 29,
+      priceByDate: { [d0]: 162, [d7]: 172, [d14]: 179, [d21]: 165 },
+    },
+    {
+      id: "comp-sb-6",
+      title: "Santa Barbara Retreat with Pool Access",
+      propertyType: "Entire home",
+      accommodates: 5,
+      bedrooms: 2,
+      baths: 2,
+      nightlyPrice: 228,
+      currency: "USD",
+      similarity: 0.82,
+      rating: 4.95,
+      reviews: 43,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 22,
+      priceByDate: { [d0]: 219, [d7]: 235, [d14]: 248, [d21]: 222 },
+    },
+    {
+      id: "comp-sb-7",
+      title: "Updated 2BR Rancho — Quiet Street",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 176,
+      currency: "USD",
+      similarity: 0.80,
+      rating: 4.68,
+      reviews: 129,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 27,
+      priceByDate: { [d0]: 169, [d7]: 180, [d14]: 188, [d21]: 174 },
+    },
+    {
+      id: "comp-sb-8",
+      title: "Stylish 2BR with Rooftop Deck & Views",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 214,
+      currency: "USD",
+      similarity: 0.77,
+      rating: 4.88,
+      reviews: 76,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 20,
+      priceByDate: { [d0]: 205, [d7]: 220, [d14]: 229, [d21]: 210 },
+    },
+  ];
+
+  const compsSummary: CompsSummary = {
+    collected: 24,
+    afterFiltering: 12,
+    usedForPricing: 8,
+    filterStage: "strict",
+    topSimilarity: 0.94,
+    avgSimilarity: 0.86,
+    sampledDays: 4,
+    interpolatedDays: 26,
+    missingDays: 0,
+    belowSimilarityFloor: 4,
+    filterFloor: 0.65,
+    lowCompConfidenceDays: 0,
+  };
 
   return {
     id: "demo",
@@ -90,7 +321,14 @@ function getDemoReport(): PricingReport {
     inputDateStart: startDate,
     inputDateEnd: endDate,
     discountPolicy: demoPolicy,
-    resultSummary: result.summary,
+    resultSummary: {
+      ...result.summary,
+      targetSpec,
+      queryCriteria,
+      benchmarkInfo,
+      comparableListings,
+      compsSummary,
+    },
     resultCalendar: result.calendar,
     errorMessage: null,
   };

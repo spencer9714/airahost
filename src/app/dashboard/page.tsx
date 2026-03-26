@@ -311,7 +311,7 @@ export default function DashboardPage() {
             </p>
           </div>
           <Link href="/tool?from=dashboard">
-            <Button size="md" variant="secondary">+ New analysis</Button>
+            <Button size="md" variant="secondary">Analyze listing</Button>
           </Link>
         </div>
 
@@ -324,7 +324,7 @@ export default function DashboardPage() {
         {/* ════════════════════════════════════════
             Two-column layout: 280px sidebar + main
         ════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[280px_1fr]">
+        <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-[280px_1fr]">
 
           {/* ── Left: Saved Listings rail ── */}
           <section>
@@ -350,7 +350,7 @@ export default function DashboardPage() {
                 </Link>
               </div>
             ) : (
-              <div className="space-y-1">
+              <div className="space-y-2">
                 {listings.map((listing) => (
                   <ListingCard
                     key={listing.id}
