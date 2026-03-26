@@ -76,6 +76,12 @@ const PROPERTY_TYPE_SHORT: Record<string, string> = {
   hotel_room: "Hotel room",
 };
 
+// Strip common prefixes that add visual noise without adding meaning.
+// "Airbnb Listing #12345" → "Listing #12345"
+function cleanTitle(raw: string): string {
+  return raw.replace(/^Airbnb\s+/i, "").trim();
+}
+
 function todayStr() {
   return new Date().toISOString().split("T")[0];
 }
@@ -285,38 +291,26 @@ export function ListingCard({
 
   return (
     <div
-      className={`group transition-colors ${
+      className={`group transition-all duration-150 rounded-xl ${
         isActive
-          ? "border-l-2 border-l-accent/60 bg-white"
-          : "border-l-2 border-l-transparent hover:bg-white/50"
+          ? "bg-white border border-blue-500/25 shadow-sm"
+          : "border border-transparent hover:bg-white/80 hover:border-gray-100/80"
       }`}
     >
-      {/* ── Main card body ── */}
-      <div
-        className="cursor-pointer px-4 py-3"
-        onClick={onSelect}
-      >
-        {/* Zone 1: Header — name + settings affordance (revealed on hover) */}
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
+      {/* ── Card body (clickable) ── */}
+      <div className="cursor-pointer px-4 py-3.5" onClick={onSelect}>
+
+        {/* Band A: Identity */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
             <span
-              className={`mt-px h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`}
-              title={
-                activeJob ? activeJob.status : latest ? "ready" : "no report"
-              }
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`}
+              title={activeJob ? activeJob.status : latest ? "ready" : "no report"}
             />
-            <p className="truncate text-[13px] font-semibold leading-snug tracking-tight text-foreground">
-              {displayTitle}
+            <p className="truncate text-[13px] font-semibold tracking-tight text-foreground">
+              {cleanTitle(displayTitle)}
             </p>
-            {hasBenchmark && (
-              <span className="shrink-0 text-[10px] font-medium text-foreground/30">
-                {activeBenchmarks.length === 1
-                  ? "benchmark"
-                  : `${activeBenchmarks.length}×`}
-              </span>
-            )}
           </div>
-          {/* Settings — hidden until hover or when panel is open */}
           <button
             type="button"
             onClick={(e) => {
@@ -330,9 +324,9 @@ export function ListingCard({
                 return next;
               });
             }}
-            className={`shrink-0 select-none text-base font-medium leading-none transition-all ${
+            className={`shrink-0 select-none text-sm leading-none transition-all ${
               editOpen
-                ? "text-foreground/50"
+                ? "text-foreground/45"
                 : "text-foreground/20 opacity-0 group-hover:opacity-100"
             }`}
             aria-label="Settings"
@@ -341,59 +335,61 @@ export function ListingCard({
           </button>
         </div>
 
-        {/* Zone 2: Property meta */}
+        {/* Band B: Property metadata */}
         {factsLine && (
-          <p className="mt-1 truncate text-[11px] text-foreground/35">
+          <p className="mt-1.5 truncate text-[10px] font-medium text-foreground/35">
             {factsLine}
           </p>
         )}
 
-        {/* Zone 3: Pricing signal */}
-        <div className="mt-2 flex items-end justify-between gap-2">
-          <div>
-            {suggestedPrice != null ? (
-              <p className="text-lg font-bold leading-none tracking-tight text-foreground">
-                ${suggestedPrice}
-                <span className="ml-1 text-[11px] font-normal text-foreground/30">
-                  /night
-                </span>
-              </p>
-            ) : activeJob?.status === "running" ||
-              activeJob?.status === "queued" ? (
-              <p className="text-xs text-foreground/40">Analyzing…</p>
-            ) : (
-              <p className="text-xs text-foreground/30">No analysis yet</p>
-            )}
-          </div>
-          {analysisDate && (
-            <span className="shrink-0 text-[10px] text-foreground/25">
-              {analysisDate}
-            </span>
-          )}
-        </div>
-
-        {/* Zone 4: Actions */}
+        {/* Band C: Pricing signal + action — separated by a faint rule */}
         <div
-          className="mt-3 flex items-center justify-between gap-2"
+          className="mt-3 flex items-end justify-between border-t border-gray-100 pt-3"
           onClick={(e) => e.stopPropagation()}
         >
-          <button
-            type="button"
-            onClick={handleRunClick}
-            disabled={isRunning}
-            className="rounded-md bg-gray-100/70 px-3 py-1.5 text-[11px] font-semibold text-foreground/55 transition-colors hover:bg-gray-200/70 hover:text-foreground disabled:opacity-40"
-          >
-            {isRunning ? "Analyzing…" : "Analyze"}
-          </button>
-          {latest?.share_id && (
-            <Link
-              href={`/r/${latest.share_id}`}
-              className="text-[11px] font-medium text-foreground/30 transition-colors hover:text-foreground/60"
-              onClick={(e) => e.stopPropagation()}
+          {/* Left: price stack */}
+          <div>
+            <p className="text-[9px] font-bold uppercase tracking-widest text-foreground/30">
+              Suggested
+            </p>
+            {suggestedPrice != null ? (
+              <div className="mt-0.5 flex items-baseline gap-0.5">
+                <span className="text-base font-bold tracking-tight text-foreground">
+                  ${suggestedPrice}
+                </span>
+                <span className="text-[10px] text-foreground/30">/nt</span>
+              </div>
+            ) : activeJob?.status === "running" ||
+              activeJob?.status === "queued" ? (
+              <p className="mt-0.5 text-xs text-foreground/40">Analyzing…</p>
+            ) : (
+              <p className="mt-0.5 text-xs text-foreground/30">—</p>
+            )}
+            {analysisDate && (
+              <p className="mt-0.5 text-[9px] text-foreground/25">{analysisDate}</p>
+            )}
+          </div>
+
+          {/* Right: primary action + quiet link */}
+          <div className="flex flex-col items-end gap-1.5">
+            <button
+              type="button"
+              onClick={handleRunClick}
+              disabled={isRunning}
+              className="rounded-lg bg-blue-600 px-3 py-1.5 text-[11px] font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:opacity-40"
             >
-              Report →
-            </Link>
-          )}
+              {isRunning ? "…" : "Analyze"}
+            </button>
+            {latest?.share_id && (
+              <Link
+                href={`/r/${latest.share_id}`}
+                className="text-[10px] font-medium text-foreground/30 transition-colors hover:text-foreground/60"
+                onClick={(e) => e.stopPropagation()}
+              >
+                View →
+              </Link>
+            )}
+          </div>
         </div>
       </div>
 

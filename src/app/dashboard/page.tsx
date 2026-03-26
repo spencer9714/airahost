@@ -350,7 +350,7 @@ export default function DashboardPage() {
                 </Link>
               </div>
             ) : (
-              <div className="overflow-hidden rounded-2xl border border-gray-200/50 bg-gray-50/30 divide-y divide-gray-100/80">
+              <div className="space-y-1">
                 {listings.map((listing) => (
                   <ListingCard
                     key={listing.id}
