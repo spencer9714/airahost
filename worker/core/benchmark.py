@@ -48,6 +48,7 @@ from worker.scraper.comparable_collector import (
     build_search_url,
     parse_card_to_spec,
     scroll_and_collect,
+    wait_for_cards,
 )
 from worker.scraper.target_extractor import (
     ListingSpec,
@@ -202,8 +203,13 @@ def probe_benchmark_discounts(
     start_date: date,
 ) -> Dict[str, Any]:
     """
-    Probes the benchmark listing for structural discounts (Weekly, Monthly)
-    and Last Minute behavior by executing targeted multi-night queries.
+    Probes the benchmark listing for the weekly discount by executing two
+    targeted listing-page fetches (1-night base + 7-night weekly).
+
+    Previously also probed monthly (28-night) and last-minute (tomorrow), but
+    those added 2 extra page loads (~4s) per job for rarely-configured discounts.
+    Monthly and last-minute probes were dropped in the first performance pass;
+    they can be re-enabled individually if the signal proves valuable.
     """
     results = {
         "weeklyDiscountPct": 0.0,
@@ -213,16 +219,14 @@ def probe_benchmark_discounts(
     }
 
     checkin_iso = start_date.isoformat()
-    
-    # Helper to fetch price with retries inside the probe
+
     def _fetch(in_date: str, out_date: str) -> Optional[float]:
-        p, conf = _extract_benchmark_price_with_min_stay_fallback(
+        p, _conf = _extract_benchmark_price_with_min_stay_fallback(
             page, benchmark_url, in_date, out_date
         )
         return p
 
-    # 1. Base Reference (1 Night) - consistent with main loop logic
-    # We re-fetch this here to ensure apples-to-apples comparison within this function session
+    # 1. Base reference (1 night)
     d1_out = (start_date + timedelta(days=1)).isoformat()
     base_price = _fetch(checkin_iso, d1_out)
 
@@ -230,39 +234,17 @@ def probe_benchmark_discounts(
         logger.warning("[benchmark-probe] Could not fetch base 1-night price, skipping probes.")
         return results
 
-    # 2. Weekly Probe (7 Nights)
+    # 2. Weekly probe (7 nights) — most commonly configured discount
     d7_out = (start_date + timedelta(days=7)).isoformat()
     weekly_price = _fetch(checkin_iso, d7_out)
-    
+
     if weekly_price:
-        # Calculate effective discount (inclusive of fees dilution)
         results["weeklyDiscountPct"] = _calculate_discount_pct(base_price, weekly_price)
         results["details"]["weekly"] = {"base": base_price, "effective": weekly_price}
 
-    # 3. Monthly Probe (28 Nights)
-    d28_out = (start_date + timedelta(days=28)).isoformat()
-    monthly_price = _fetch(checkin_iso, d28_out)
-
-    if monthly_price:
-        results["monthlyDiscountPct"] = _calculate_discount_pct(base_price, monthly_price)
-        results["details"]["monthly"] = {"base": base_price, "effective": monthly_price}
-
-    # 4. Last Minute Probe (Tomorrow)
-    # Check if competitor drops price for immediate bookings.
-    # Only valid if the main report is for a future date (> 7 days away).
-    days_until_start = (start_date - date.today()).days
-    if days_until_start > 7:
-        tmr = date.today() + timedelta(days=1)
-        tmr_out = tmr + timedelta(days=1)
-        lm_price = _fetch(tmr.isoformat(), tmr_out.isoformat())
-        
-        if lm_price:
-            results["lastMinuteDiscountPct"] = _calculate_discount_pct(base_price, lm_price)
-            results["details"]["lastMinute"] = {"futureBase": base_price, "tomorrow": lm_price}
-
     logger.info(
-        f"[benchmark-probe] Base=${base_price}, Weekly=${weekly_price} (-{results['weeklyDiscountPct']}%), "
-        f"Monthly=${monthly_price} (-{results['monthlyDiscountPct']}%)"
+        f"[benchmark-probe] Base=${base_price}, "
+        f"Weekly=${weekly_price} (-{results['weeklyDiscountPct']}%)"
     )
     return results
 
@@ -353,7 +335,7 @@ def estimate_benchmark_price_for_date(
             logger.info(f"[benchmark] {checkin_str}: {query_nights}-night benchmark search (primary=2)")
 
             page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(700)
+            wait_for_cards(page)
             try:
                 page.keyboard.press("Escape")
             except Exception:
@@ -418,7 +400,10 @@ def estimate_benchmark_price_for_date(
         logger.info(
             f"[benchmark] {checkin_str}: trying benchmark listing page first"
         )
-        time.sleep(rate_limit_seconds)
+        # Use half the configured rate limit before direct benchmark page fetches.
+        # The search page and listing page are different domains in Airbnb's eyes;
+        # the full rate_limit_seconds (1.0s) is overly conservative here.
+        time.sleep(min(rate_limit_seconds * 0.5, 0.5))
         direct_price, direct_confidence = _extract_benchmark_price_with_min_stay_fallback(
             page, benchmark_url, checkin_str, _bm_checkout_str
         )

@@ -102,6 +102,44 @@ def sync_linked_listing_attributes(
     ).eq("id", listing_id).execute()
 
 
+def update_progress(
+    client: Client,
+    report_id: str,
+    worker_token: uuid.UUID,
+    *,
+    pct: int,
+    stage: str,
+    message: str,
+    est_seconds_remaining: Optional[int] = None,
+) -> bool:
+    """Update heartbeat + progress metadata atomically.
+
+    Returns True if the token still owns the job (row was updated).
+    Safe to call from both the heartbeat thread and the main thread.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    meta: Dict[str, Any] = {
+        "pct": max(0, min(100, pct)),
+        "stage": stage,
+        "message": message,
+        "updated_at": now,
+    }
+    if est_seconds_remaining is not None:
+        meta["est_seconds_remaining"] = max(0, est_seconds_remaining)
+    result = (
+        client.table("pricing_reports")
+        .update({
+            "worker_heartbeat_at": now,
+            "progress_meta": meta,
+        })
+        .eq("id", report_id)
+        .eq("worker_claim_token", str(worker_token))
+        .execute()
+    )
+    return bool(result.data)
+
+
 def fail_job(
     client: Client,
     report_id: str,

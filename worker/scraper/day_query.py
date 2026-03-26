@@ -52,6 +52,7 @@ from worker.scraper.comparable_collector import (
     extract_comp_coords,
     parse_card_to_spec,
     scroll_and_collect,
+    wait_for_cards,
 )
 from worker.scraper.target_extractor import ListingSpec
 
@@ -207,7 +208,7 @@ def estimate_base_price_for_date(
             logger.info(f"[day_query] {checkin_str}: {query_nights}-night search (primary=2)")
 
             page.goto(search_url, wait_until="domcontentloaded", timeout=PER_DAY_TIMEOUT_S * 1000)
-            page.wait_for_timeout(700)
+            wait_for_cards(page)
 
             try:
                 page.keyboard.press("Escape")
@@ -502,7 +503,7 @@ def detect_discount_evidence(
 
         time.sleep(rate_limit_seconds)
         page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(700)
+        wait_for_cards(page)
 
         try:
             page.keyboard.press("Escape")

@@ -50,5 +50,7 @@ export async function GET(
     recommendedPrice: summary?.recommendedPrice ?? null,
     comparableListings: summary?.comparableListings ?? null,
     benchmarkInfo: summary?.benchmarkInfo ?? null,
+    progressMeta: data.progress_meta ?? null,
+    workerHeartbeatAt: data.worker_heartbeat_at ?? null,
   });
 }

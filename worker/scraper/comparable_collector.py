@@ -351,6 +351,38 @@ def collect_search_cards(page, stay_nights: int = 1) -> List[Dict[str, Any]]:
     )
 
 
+# CSS selector that matches Airbnb listing cards once React has rendered them.
+# Used by wait_for_cards() below to replace fixed post-goto timeouts.
+_CARD_READY_SELECTOR = (
+    'div[data-testid="card-container"], '
+    'div[data-testid^="listing-card"], '
+    'a[href*="/rooms/"]'
+)
+_CARD_READY_TIMEOUT_MS = 3000   # max time to wait for first card
+_CARD_READY_FALLBACK_MS = 300   # short fallback when selector never appears
+
+
+def wait_for_cards(page) -> None:
+    """Wait until Airbnb listing cards appear in the DOM after navigation.
+
+    Replaces the previous blanket ``page.wait_for_timeout(700)`` calls that
+    followed every ``page.goto()``.  If cards appear in 200 ms we return
+    immediately; if they never appear (zero-results page, captcha, layout
+    change) we fall through to a short fixed fallback so callers stay stable.
+    """
+    try:
+        page.wait_for_selector(
+            _CARD_READY_SELECTOR,
+            timeout=_CARD_READY_TIMEOUT_MS,
+            state="attached",
+        )
+    except Exception:
+        try:
+            page.wait_for_timeout(_CARD_READY_FALLBACK_MS)
+        except Exception:
+            pass
+
+
 def scroll_and_collect(
     page,
     max_rounds: int = 12,
@@ -365,7 +397,10 @@ def scroll_and_collect(
 
     for rd in range(1, max_rounds + 1):
         try:
-            page.wait_for_timeout(400)
+            # No per-round fixed wait here.  Round 1 is covered by
+            # wait_for_cards() called immediately after page.goto() in the
+            # caller.  Rounds 2+ are covered by the pause_ms sleep that
+            # follows each scroll at the bottom of this loop.
             cards = collect_search_cards(page, stay_nights=stay_nights)
         except Exception:
             cards = []

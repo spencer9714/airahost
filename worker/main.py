@@ -21,7 +21,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 
@@ -438,6 +438,31 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     )
     hb_thread.start()
 
+    def _progress(pct: int, stage: str, message: str, est: Optional[int] = None) -> None:
+        """Update progress metadata in DB.  Non-fatal on error."""
+        try:
+            db_helpers.update_progress(
+                client, report_id, worker_token,
+                pct=pct, stage=stage, message=message,
+                est_seconds_remaining=est,
+            )
+        except Exception as _pe:
+            logger.warning(f"[{report_id}] Progress update failed (non-fatal): {_pe}")
+
+    def _make_day_callback(start_pct: int, end_pct: int, stage: str, message_prefix: str) -> Callable[[int, int], None]:
+        """Factory: maps (completed, total) day counts to a pct range and calls _progress."""
+        def _cb(completed: int, total: int) -> None:
+            if total <= 0:
+                return
+            frac = completed / total
+            pct = round(start_pct + frac * (end_pct - start_pct))
+            remaining_days = total - completed
+            est = round(remaining_days * MAX_RUNTIME_SECONDS / max(total, 1)) if remaining_days > 0 else None
+            _progress(pct, stage, f"{message_prefix} ({completed}/{total} days)", est)
+        return _cb
+
+    _progress(5, "connecting", "Connecting to browser...")
+
     try:
         address = job.get("input_address", "")
         attributes = job.get("input_attributes") or {}
@@ -611,6 +636,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             logger.info(
                 f"[{report_id}] Mode C (benchmark-first): {primary_benchmark_url}"
             )
+            _progress(10, "fetching_benchmark", "Fetching benchmark listing data...")
             try:
                 from worker.scraper.price_estimator import run_benchmark_scrape
 
@@ -629,6 +655,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
+                    progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
                 )
 
                 # Save benchmark transparency now — before any fallback overwrites transparent_result.
@@ -664,6 +691,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         if not _mode_c_succeeded and listing_url:
             # Mode A: URL scrape — user provided a listing URL
             logger.info(f"[{report_id}] Mode A (URL scrape): {listing_url}")
+            _progress(10, "extracting_target", "Extracting listing details...")
             try:
                 from worker.scraper.price_estimator import run_scrape
 
@@ -681,6 +709,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
+                    progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -723,6 +752,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         elif not _mode_c_succeeded and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
             # Mode B: Criteria search — find best matching listing, then scrape comps
             logger.info(f"[{report_id}] Mode B (criteria search, mode={input_mode}): {address}")
+            _progress(10, "searching_comps", "Searching for comparable listings...")
             try:
                 from worker.scraper.price_estimator import run_criteria_search
 
@@ -741,6 +771,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
+                    progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -785,6 +816,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             )
             return
 
+        _progress(80, "pricing", "Computing final pricing estimates...")
+
         total_ms = round((time.time() - start_time) * 1000)
 
         debug = (transparent_result or {}).get("debug") or {}
@@ -810,6 +843,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             bm_info = transparent_result.get("benchmarkInfo") or _saved_benchmark_info
             if bm_info:
                 summary["benchmarkInfo"] = bm_info
+
+        _progress(90, "saving_results", "Saving results...")
 
         # Write results
         db_helpers.complete_job(

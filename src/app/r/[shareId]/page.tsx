@@ -96,7 +96,33 @@ function getDemoReport(): PricingReport {
 
 // Polling config
 const POLL_INTERVAL_MS = 2_000;
-const SLOW_THRESHOLD_MS = 120_000; // 2 minutes
+
+// Staleness tiers based on worker_heartbeat_at age
+const STALE_FRESH_MS = 45_000;    // < 45s  → fresh (normal spinner)
+const STALE_SLOW_MS = 90_000;     // 45–90s → slow (mild warning)
+const STALE_DELAYED_MS = 300_000; // 90–300s → delayed (strong warning)
+// > 300s → unavailable
+
+type StalenessTier = "fresh" | "slow" | "delayed" | "unavailable";
+
+function getStaleness(workerHeartbeatAt: string | null | undefined): StalenessTier {
+  if (!workerHeartbeatAt) return "fresh"; // no heartbeat yet = just started
+  const ageMs = Date.now() - new Date(workerHeartbeatAt).getTime();
+  if (ageMs < STALE_FRESH_MS) return "fresh";
+  if (ageMs < STALE_SLOW_MS) return "slow";
+  if (ageMs < STALE_DELAYED_MS) return "delayed";
+  return "unavailable";
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  connecting: "Connecting to browser",
+  extracting_target: "Extracting listing details",
+  fetching_benchmark: "Fetching benchmark listing",
+  searching_comps: "Searching comparable listings",
+  pricing: "Computing pricing estimates",
+  saving_results: "Saving results",
+  completed: "Complete",
+};
 
 function getFriendlyReportError(message: string | null | undefined) {
   if (!message) {
@@ -134,8 +160,6 @@ export default function ResultsPage({
   const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
 
   // Polling state
-  const [pollStartedAt] = useState(() => Date.now());
-  const [isSlow, setIsSlow] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Auth state
@@ -184,9 +208,6 @@ export default function ResultsPage({
     // Start polling
     pollRef.current = setInterval(() => {
       fetchReport();
-      if (Date.now() - pollStartedAt > SLOW_THRESHOLD_MS) {
-        setIsSlow(true);
-      }
     }, POLL_INTERVAL_MS);
 
     return () => {
@@ -195,7 +216,7 @@ export default function ResultsPage({
         pollRef.current = null;
       }
     };
-  }, [shareId, fetchReport, pollStartedAt]);
+  }, [shareId, fetchReport]);
 
   useEffect(() => {
     const supabase = getSupabaseBrowser();
@@ -268,28 +289,90 @@ export default function ResultsPage({
     (report.status === "queued" || report.status === "running") &&
     !error
   ) {
+    const staleness = getStaleness(report.workerHeartbeatAt);
+    const progress = report.progressMeta;
+    const pct = progress?.pct ?? 0;
+    const stageLabel = progress?.stage ? (STAGE_LABELS[progress.stage] ?? progress.stage) : null;
+    const estSec = progress?.est_seconds_remaining;
+
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="mx-auto max-w-md text-center">
-          <div className="mx-auto mb-6 h-10 w-10 animate-spin rounded-full border-3 border-accent border-t-transparent" />
-          <h2 className="mb-2 text-xl font-semibold">Analyzing your market</h2>
-          <p className="mb-1 text-sm text-muted">
-            {report.status === "queued"
-              ? "Your report is in the queue..."
-              : "Crunching the numbers..."}
-          </p>
-          <p className="text-sm text-muted">
-            This typically takes 30 to 90 seconds.
-          </p>
+        <div className="mx-auto w-full max-w-md text-center">
+          {staleness !== "unavailable" && (
+            <div className="mx-auto mb-6 h-10 w-10 animate-spin rounded-full border-3 border-accent border-t-transparent" />
+          )}
+          {staleness === "unavailable" && (
+            <div className="mx-auto mb-6 flex h-10 w-10 items-center justify-center rounded-full bg-rose-100 text-rose-500">
+              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M12 3a9 9 0 100 18A9 9 0 0012 3z" />
+              </svg>
+            </div>
+          )}
 
-          {isSlow && (
-            <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4">
-              <p className="text-sm font-medium text-amber-800">
-                This is taking longer than usual
-              </p>
+          <h2 className="mb-2 text-xl font-semibold">
+            {staleness === "unavailable" ? "Worker unreachable" : "Analyzing your market"}
+          </h2>
+
+          {/* Progress bar — shown once worker has sent first progress update */}
+          {progress && staleness !== "unavailable" && (
+            <div className="mb-4 px-2">
+              <div className="mb-1 flex items-center justify-between text-xs text-muted">
+                <span>{stageLabel ?? "Working..."}</span>
+                <span>{pct}%</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-surface-alt">
+                <div
+                  className="h-full rounded-full bg-accent transition-all duration-500"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              {estSec != null && estSec > 0 && (
+                <p className="mt-1 text-xs text-muted">
+                  ~{estSec < 60 ? `${estSec}s` : `${Math.round(estSec / 60)}m`} remaining
+                </p>
+              )}
+            </div>
+          )}
+
+          {!progress && (
+            <p className="mb-1 text-sm text-muted">
+              {report.status === "queued"
+                ? "Your report is in the queue..."
+                : "Crunching the numbers..."}
+            </p>
+          )}
+
+          {progress?.message && staleness !== "unavailable" && (
+            <p className="mb-1 text-sm text-muted">{progress.message}</p>
+          )}
+
+          {staleness === "fresh" && !progress && (
+            <p className="text-sm text-muted">This typically takes 30 to 90 seconds.</p>
+          )}
+
+          {staleness === "slow" && (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm font-medium text-amber-800">Taking a bit longer than usual</p>
               <p className="mt-1 text-xs text-amber-700">
-                The worker may be busy or temporarily offline. Your report will
-                be processed as soon as possible.
+                The worker is still running — hold tight.
+              </p>
+            </div>
+          )}
+
+          {staleness === "delayed" && (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm font-medium text-amber-800">This is taking longer than expected</p>
+              <p className="mt-1 text-xs text-amber-700">
+                The worker may be overloaded. Your report will be processed as soon as possible.
+              </p>
+            </div>
+          )}
+
+          {staleness === "unavailable" && (
+            <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4">
+              <p className="text-sm font-medium text-rose-800">Worker appears to be offline</p>
+              <p className="mt-1 text-xs text-rose-700">
+                No heartbeat received in over 5 minutes. Your report will resume automatically when the worker comes back online.
               </p>
             </div>
           )}

@@ -23,7 +23,7 @@ import re
 import statistics
 import time
 from datetime import datetime as dt, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM
 from worker.core.similarity import (
@@ -36,6 +36,7 @@ from worker.scraper.comparable_collector import (
     build_search_url,
     parse_card_to_spec,
     scroll_and_collect,
+    wait_for_cards,
 )
 from worker.scraper.day_query import (
     DAY_MAX_CARDS,
@@ -491,6 +492,7 @@ def run_scrape(
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -679,6 +681,11 @@ def run_scrape(
 
                 if result is not None:
                     sampled_results.append(result)
+                if progress_callback is not None:
+                    try:
+                        progress_callback(idx_pos + 1, len(sample_indices))
+                    except Exception:
+                        pass
 
             timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
 
@@ -788,6 +795,7 @@ def run_benchmark_scrape(
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> tuple:
     """
     Benchmark-first pipeline.
@@ -990,6 +998,11 @@ def run_benchmark_scrape(
                     max_radius_km=_effective_radius,
                 )
                 sampled_results.append(result)
+                if progress_callback is not None:
+                    try:
+                        progress_callback(idx_pos + 1, len(sample_indices))
+                    except Exception:
+                        pass
 
             timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
 
@@ -1217,6 +1230,7 @@ def run_criteria_search(
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Criteria-based search: search Airbnb for listings matching the user's
@@ -1335,7 +1349,7 @@ def run_criteria_search(
 
             time.sleep(rate_limit_seconds)
             page.goto(search_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(900)
+            wait_for_cards(page)
 
             # Dismiss modals
             try:
@@ -1440,6 +1454,7 @@ def run_criteria_search(
         target_lat=target_lat,
         target_lng=target_lng,
         max_radius_km=max_radius_km,
+        progress_callback=progress_callback,
     )
 
     # Merge criteria-specific info into the transparent result

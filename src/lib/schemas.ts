@@ -323,6 +323,21 @@ export interface BenchmarkInfo {
   consensusSignal?: "strong" | "mixed" | "divergent" | null;
 }
 
+// ── Worker Progress ──────────────────────────────────────────────
+
+export interface ProgressMeta {
+  /** 0–100 percentage complete */
+  pct: number;
+  /** Stage identifier: "connecting" | "extracting_target" | "fetching_benchmark" | "searching_comps" | "pricing" | "saving_results" | "completed" */
+  stage: string;
+  /** Human-readable status message for the frontend */
+  message: string;
+  /** ISO-8601 UTC timestamp when this progress was last written */
+  updated_at: string;
+  /** Optional estimated seconds remaining */
+  est_seconds_remaining?: number | null;
+}
+
 // ── Summary & Report ────────────────────────────────────────────
 
 export interface ReportSummary {
@@ -381,6 +396,10 @@ export interface PricingReport {
   recommendedPrice?: RecommendedPrice | null;
   comparableListings?: ComparableListing[] | null;
   benchmarkInfo?: BenchmarkInfo | null;
+  /** Worker progress snapshot. Null until the worker first calls update_progress(). */
+  progressMeta?: ProgressMeta | null;
+  /** ISO-8601 UTC timestamp of last worker heartbeat. Null for cached/old reports. */
+  workerHeartbeatAt?: string | null;
 }
 
 // ── Saved Listings ─────────────────────────────────────────────
