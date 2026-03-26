@@ -13,9 +13,11 @@ import type {
   DiscountPolicy,
   ReportSummary,
   CalendarDay,
+  RecommendedPrice,
+  PriceDistribution,
 } from "@/lib/schemas";
 
-const CORE_VERSION = "mock-v1.0.0";
+const CORE_VERSION = "airahost-v1.0";
 
 // ── Deterministic hash ──────────────────────────────────────────
 
@@ -242,14 +244,37 @@ export function generatePricingReport(
     selectedRangeAvgNightly * 30 * (occupancyPct / 100)
   );
 
-  const marketMedian = Math.round(median * (0.9 + rand() * 0.3));
-  const priceDiff = marketMedian - median;
+  // Keep this rand() call so the seed sequence stays stable for all inputs.
+  const _unusedMarketRand = rand();
+
+  // Recommended price: 3–8% above median, with weekday/weekend awareness.
+  const recNightly = Math.round(median * (1.03 + rand() * 0.05));
+  const recommendedPrice: RecommendedPrice = {
+    nightly: recNightly,
+    weekdayEstimate: Math.round(weekdayAvg * (1.02 + rand() * 0.04)),
+    weekendEstimate: Math.round(weekendAvg * (1.03 + rand() * 0.05)),
+    discountApplied: 0,
+    notes: "Based on comparable listings in your area, adjusted for property type and local demand patterns.",
+  };
+
+  // Price distribution from sorted comp prices (quartiles).
+  const p25 = sorted[Math.floor(sorted.length * 0.25)];
+  const p75 = sorted[Math.floor(sorted.length * 0.75)];
+  const priceDistribution: PriceDistribution = {
+    min,
+    p25,
+    median,
+    p75,
+    max,
+    currency: "USD",
+  };
+
   const insightHeadline =
-    priceDiff > 5
-      ? `You may be underpricing by ~$${priceDiff} per night.`
-      : priceDiff < -5
-        ? `You're pricing $${Math.abs(priceDiff)} above the local median — consider if your amenities justify this.`
-        : `Your pricing is well-aligned with the local market.`;
+    recNightly > median + 5
+      ? `We recommend $${recNightly}/night — positioning your listing $${recNightly - median} above the local median.`
+      : recNightly < median - 5
+        ? `This market is competitive. We suggest $${recNightly}/night to stay well-booked against nearby listings.`
+        : `Your listing is well-matched to local rates. We recommend $${recNightly}/night based on comparable properties nearby.`;
 
   const weeklyStayAvgNightly = averageRefundablePriceForStay(
     basePrices,
@@ -283,6 +308,8 @@ export function generatePricingReport(
       selectedRangeNights: totalDays,
       selectedRangeAvgNightly,
       stayLengthAverages,
+      recommendedPrice,
+      priceDistribution,
     },
     calendar,
   };

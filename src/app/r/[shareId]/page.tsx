@@ -34,27 +34,36 @@ function snapToNearestSampledDate(
   return nearest;
 }
 
-// Demo report (unchanged)
+// Demo report — realistic property, dynamic date range (next 30 days).
 function getDemoReport(): PricingReport {
+  const today = new Date();
+  const startDate = today.toISOString().split("T")[0];
+  const end = new Date(today);
+  end.setDate(today.getDate() + 30);
+  const endDate = end.toISOString().split("T")[0];
+
+  const demoAddress = "2847 Hillcrest Drive, Santa Barbara, CA";
+  const demoPolicy = {
+    weeklyDiscountPct: 10,
+    monthlyDiscountPct: 20,
+    refundable: true,
+    nonRefundableDiscountPct: 10,
+    stackingMode: "compound" as const,
+    maxTotalDiscountPct: 40,
+  };
+
   const result = generatePricingReport({
     listing: {
-      address: "742 Evergreen Terrace, Springfield, OR",
+      address: demoAddress,
       propertyType: "entire_home",
-      bedrooms: 3,
-      bathrooms: 2,
-      maxGuests: 6,
-      amenities: ["wifi", "kitchen", "washer", "dryer", "free_parking", "bbq"],
+      bedrooms: 2,
+      bathrooms: 1,
+      maxGuests: 4,
+      amenities: ["wifi", "kitchen", "washer", "free_parking", "pool"],
     },
-    startDate: "2026-03-01",
-    endDate: "2026-03-31",
-    discountPolicy: {
-      weeklyDiscountPct: 10,
-      monthlyDiscountPct: 20,
-      refundable: true,
-      nonRefundableDiscountPct: 10,
-      stackingMode: "compound",
-      maxTotalDiscountPct: 40,
-    },
+    startDate,
+    endDate,
+    discountPolicy: demoPolicy,
   });
 
   return {
@@ -63,14 +72,14 @@ function getDemoReport(): PricingReport {
     createdAt: new Date().toISOString(),
     status: "ready",
     coreVersion: result.coreVersion,
-    inputAddress: "742 Evergreen Terrace, Springfield, OR",
+    inputAddress: demoAddress,
     inputAttributes: {
-      address: "742 Evergreen Terrace, Springfield, OR",
+      address: demoAddress,
       propertyType: "entire_home",
-      bedrooms: 3,
-      bathrooms: 2,
-      maxGuests: 6,
-      amenities: ["wifi", "kitchen", "washer", "dryer", "free_parking", "bbq"],
+      bedrooms: 2,
+      bathrooms: 1,
+      maxGuests: 4,
+      amenities: ["wifi", "kitchen", "washer", "free_parking", "pool"],
       lastMinuteStrategy: {
         mode: "auto",
         aggressiveness: 50,
@@ -78,16 +87,9 @@ function getDemoReport(): PricingReport {
         cap: 1.05,
       },
     },
-    inputDateStart: "2026-03-01",
-    inputDateEnd: "2026-03-31",
-    discountPolicy: {
-      weeklyDiscountPct: 10,
-      monthlyDiscountPct: 20,
-      refundable: true,
-      nonRefundableDiscountPct: 10,
-      stackingMode: "compound",
-      maxTotalDiscountPct: 40,
-    },
+    inputDateStart: startDate,
+    inputDateEnd: endDate,
+    discountPolicy: demoPolicy,
     resultSummary: result.summary,
     resultCalendar: result.calendar,
     errorMessage: null,
@@ -494,8 +496,28 @@ export default function ResultsPage({
             arr.findIndex((x) => x.stayLength === point.stayLength) === idx
         );
 
+  const suggestedNightly = s.recommendedPrice?.nightly ?? s.nightlyMedian;
+
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
+      {/* Sample report banner */}
+      {shareId === "demo" && (
+        <div className="mb-6 flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+          <span className="shrink-0 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
+            Sample
+          </span>
+          <p className="text-sm text-blue-800">
+            This is a generated example report using illustrative data.{" "}
+            <Link
+              href="/tool"
+              className="font-medium underline underline-offset-2 hover:text-blue-900"
+            >
+              Analyze your own listing →
+            </Link>
+          </p>
+        </div>
+      )}
+
       {/* Address header */}
       <p className="mb-1 text-sm text-muted">Revenue report for</p>
       <h1 className="mb-8 text-2xl font-bold">{report.inputAddress}</h1>
@@ -503,9 +525,14 @@ export default function ResultsPage({
       {/* Section 1 - Revenue Opportunity */}
       <Card className="mb-6 border-accent/20 bg-accent/[0.02]">
         <p className="text-sm font-medium text-accent">Revenue Opportunity</p>
-        <p className="mt-2 text-xl font-semibold">{s.insightHeadline}</p>
-        <p className="mt-2 text-sm text-muted">
-          Estimated monthly revenue at current pricing:{" "}
+        {/* Suggested nightly rate — hero metric */}
+        <div className="mt-3 flex items-baseline gap-2">
+          <span className="text-4xl font-bold tracking-tight">${suggestedNightly}</span>
+          <span className="text-sm text-muted">/night suggested</span>
+        </div>
+        <p className="mt-2 text-sm text-muted">{s.insightHeadline}</p>
+        <p className="mt-3 text-sm text-muted">
+          Estimated monthly revenue:{" "}
           <span className="font-semibold text-foreground">
             ${s.estimatedMonthlyRevenue.toLocaleString()}
           </span>
@@ -745,8 +772,9 @@ export default function ResultsPage({
 
       {/* Meta */}
       <p className="mt-8 text-center text-xs text-muted">
-        Report generated by {report.coreVersion} on{" "}
-        {new Date(report.createdAt).toLocaleDateString()}
+        {shareId === "demo"
+          ? "Sample report — values are illustrative, not from live market data"
+          : `Report generated by ${report.coreVersion} on ${new Date(report.createdAt).toLocaleDateString()}`}
       </p>
     </div>
   );
