@@ -343,10 +343,7 @@ export function ListingCard({
         )}
 
         {/* Band C: Pricing signal + action — separated by a faint rule */}
-        <div
-          className="mt-3 flex items-end justify-between border-t border-gray-100 pt-3"
-          onClick={(e) => e.stopPropagation()}
-        >
+        <div className="mt-3 flex items-end justify-between border-t border-gray-100 pt-3">
           {/* Left: price stack */}
           <div>
             <p className="text-[9px] font-bold uppercase tracking-widest text-foreground/30">
@@ -370,8 +367,11 @@ export function ListingCard({
             )}
           </div>
 
-          {/* Right: primary action + quiet link */}
-          <div className="flex flex-col items-end gap-1.5">
+          {/* Right: primary action + quiet link — stop propagation only on buttons */}
+          <div
+            className="flex flex-col items-end gap-1.5"
+            onClick={(e) => e.stopPropagation()}
+          >
             <button
               type="button"
               onClick={handleRunClick}
@@ -384,7 +384,6 @@ export function ListingCard({
               <Link
                 href={`/r/${latest.share_id}`}
                 className="text-[10px] font-medium text-foreground/30 transition-colors hover:text-foreground/60"
-                onClick={(e) => e.stopPropagation()}
               >
                 View →
               </Link>
