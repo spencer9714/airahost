@@ -76,8 +76,15 @@ def collect_search_cards(page, stay_nights: int = 1) -> List[Dict[str, Any]]:
             // Most reliable: "for N nights" (Airbnb trip-total aria-label)
             const m = text.match(/for\s+(\d+)\s+nights?/i);
             if (m) { const n = parseInt(m[1], 10); if (n >= 2) return n; }
-            // Secondary: bare "N nights" when query length matches (multi-night criteria search)
-            if (stayNights >= 2 && new RegExp('\\b' + stayNights + '\\s+nights?\\b', 'i').test(text)) {
+            // Secondary: bare "N nights" when query length matches (multi-night criteria search).
+            // Guard: skip when the text already contains a per-night indicator ("/night",
+            // "per night").  A card showing "$150/night  2 nights minimum" should be
+            // treated as nightly ($150), NOT as a trip-total halved to $75.
+            // Without this guard, switching to 2-night-primary queries (stayNights=2)
+            // caused per-night prices to be halved whenever "2 nights" appeared anywhere
+            // in the card element's text — this is the primary driver of the "prices too
+            // low" symptom.
+            if (!isPerNight(text) && stayNights >= 2 && new RegExp('\\b' + stayNights + '\\s+nights?\\b', 'i').test(text)) {
               return stayNights;
             }
             return 0;
@@ -126,6 +133,13 @@ def collect_search_cards(page, stay_nights: int = 1) -> List[Dict[str, Any]]:
               const relevantPart = label.slice(0, cut);
 
               // Extract the first valid price in the relevant portion.
+              // Priority: explicit "per night" text always means nightly (price_nights=1),
+              // even when detectTripNights also matched.  The "for N nights" primary check
+              // in detectTripNights IS authoritative enough to override isPerNight (e.g.
+              // "$300 for 2 nights, $150 per night"), so only suppress when the trip-nights
+              // signal came from the weaker secondary check — which is already gated by
+              // !isPerNight() above, so labelTripNights>0 here only fires on explicit
+              // "for N nights" aria-label text.
               const priceRe = /(?:US\$|CA\$|AU\$|NZ\$|\$)\s*(\d{1,4}(?:,\d{3})*(?:\.\d{1,2})?)/g;
               let match;
               while ((match = priceRe.exec(relevantPart)) !== null) {
@@ -434,6 +448,7 @@ def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
         reviews=card.get("reviews"),
         amenities=extract_amenities(text),
         scrape_nights=price_nights,
+        price_kind=str(price_kind),
     )
 
 

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM, apply_geo_filter
 from worker.core.price_band import apply_price_band_filter
 from worker.core.price_sanity import apply_price_sanity
 from worker.core.similarity import (
@@ -281,16 +282,20 @@ def estimate_benchmark_price_for_date(
     max_cards: int = BENCHMARK_MAX_CARDS,
     rate_limit_seconds: float = 1.0,
     top_k: int = BENCHMARK_TOP_K,
+    max_radius_km: float = DEFAULT_MAX_RADIUS_KM,
 ) -> BenchmarkDayResult:
     """
-    Execute a 1-night benchmark-first query for *date_i*.
+    Execute a 2-night-primary benchmark-first query for *date_i*.
 
-    1. Run a 1-night Airbnb search (fast-path: fewer rounds/cards) to collect
-       market comps and locate the benchmark card if present.
-    2. Always attempt benchmark direct-page extraction first so the anchor price
+    1. Run a 2-night Airbnb search first (fast-path: fewer rounds/cards) to
+       collect market comps and locate the benchmark card if present.
+       Falls back to a 1-night search only when the 2-night search returns
+       zero priced comps.
+    2. Always attempt benchmark direct-page extraction so the anchor price
        comes from the listing page booking widget's discounted/current nightly rate.
     3. If direct-page extraction fails and the benchmark appeared in results,
-       fall back to its search-result card price.
+       fall back to its search-result card price (per-night, already normalised
+       by parse_card_to_spec when price_kind is trip_total_*).
     4. Remaining market comps → compute market adjustment.
     5. Return blended final price.
     """
@@ -340,12 +345,12 @@ def estimate_benchmark_price_for_date(
     try:
         query_nights_used = 1
         comps: List[ListingSpec] = []
-        for query_nights in (1, 2):
+        for query_nights in (2, 1):
             checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
             search_url = build_search_url(
                 base_origin, target.location, checkin_str, checkout_str, adults,
             )
-            logger.info(f"[benchmark] {checkin_str}: {query_nights}-night benchmark search")
+            logger.info(f"[benchmark] {checkin_str}: {query_nights}-night benchmark search (primary=2)")
 
             page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
             page.wait_for_timeout(700)
@@ -369,6 +374,22 @@ def estimate_benchmark_price_for_date(
                 break
 
         comps = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
+
+        # ── Phase 3B: Geographic distance filter (benchmark path) ────────
+        # Mirror the same filter applied in day_query.  The benchmark card is
+        # excluded from market_comps downstream, so filtering it here is safe.
+        # Comps without coords always pass through — never blocked on missing data.
+        _bm_geo_excluded = 0
+        if target.lat is not None and target.lng is not None:
+            try:
+                comps, _bm_geo_excluded = apply_geo_filter(
+                    comps, target.lat, target.lng, max_radius_km
+                )
+            except Exception as _bm_geo_exc:
+                logger.warning(
+                    f"[benchmark] {checkin_str}: geo filter failed (non-fatal): {_bm_geo_exc}"
+                )
+
         comps_collected = len(comps)
 
         # Build full comp_prices map for priceByDate tracking.
@@ -411,6 +432,24 @@ def estimate_benchmark_price_for_date(
             )
         elif benchmark_comp and benchmark_comp.nightly_price:
             benchmark_price = benchmark_comp.nightly_price
+            # Per-night normalization: parse_card_to_spec divides by scrape_nights only
+            # when price_kind is "trip_total_*" AND price_nights > 1.
+            # Detection gap: JS correctly identifies the card as a trip_total but reads
+            # the wrong night count (e.g. scrape_nights=1 when query was for 2 nights).
+            # Fix: if price_kind is trip_total_* and scrape_nights < query_nights_used,
+            # the price is a multi-night total that wasn't divided — divide now.
+            # We do NOT divide when price_kind is "nightly_*" because parse_card_to_spec
+            # already trusted the per-night value from the JS extractor.
+            if (
+                query_nights_used > 1
+                and benchmark_comp.scrape_nights < query_nights_used
+                and benchmark_comp.price_kind.startswith("trip_total")
+            ):
+                benchmark_price = round(benchmark_price / query_nights_used, 2)
+                logger.info(
+                    f"[benchmark] {checkin_str}: search-hit price normalized ÷{query_nights_used} "
+                    f"nights (price_kind={benchmark_comp.price_kind}) → ${benchmark_price:.2f}"
+                )
             benchmark_fetch_status = FETCH_STATUS_SEARCH_HIT
             fetch_confidence = "high"
             logger.info(

@@ -4,9 +4,9 @@ Playwright-based Airbnb price estimator — orchestrator.
 Connects to a local Chrome instance via CDP (Chrome DevTools Protocol)
 to scrape target listing specs and nearby comparable listings.
 
-Uses day-by-day 1-night queries to get accurate nightly prices.  See
-day_query.py for the rationale (Airbnb search cards display total trip
-prices for multi-night stays, which inflates extracted nightly rates).
+Uses day-by-day 2-night-primary queries to get accurate nightly prices and
+maximize comp pool coverage (minimum-stay=2 listings).  See day_query.py
+for the rationale and per-night normalisation details.
 
 This module orchestrates the pipeline by delegating to:
   - target_extractor: listing page spec extraction
@@ -22,9 +22,10 @@ import logging
 import re
 import statistics
 import time
-from datetime import datetime as dt
+from datetime import datetime as dt, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM
 from worker.core.similarity import (
     SIMILARITY_FLOOR,
     comp_urls_match,
@@ -158,6 +159,11 @@ def _build_daily_transparent_result(
         if "low_comp_confidence" in (r.get("flags") or [])
     )
 
+    def _date_add(date_str: str, n: int) -> str:
+        """Add n days to a YYYY-MM-DD string, return YYYY-MM-DD."""
+        d = dt.strptime(date_str, "%Y-%m-%d") + timedelta(days=n)
+        return d.strftime("%Y-%m-%d")
+
     comparable_index: Dict[str, Dict[str, Any]] = {}
     for day_result in all_day_results:
         day_date = day_result.get("date")
@@ -172,22 +178,31 @@ def _build_daily_transparent_result(
             score = float(comp.get("similarity") or 0.0)
             # Prefer comp_prices for the day's price; fall back to top_comps value.
             price = day_comp_prices.get(comp_id) or comp.get("nightlyPrice")
+            qn = int(comp.get("queryNights") or 1)
             if comp_id not in comparable_index:
                 comparable_index[comp_id] = {
                     "item": dict(comp),
                     "score_sum": score,
                     "count": 1,
                     "price_by_date": {},
-                    "max_query_nights": int(comp.get("queryNights") or 1),
+                    "max_query_nights": qn,
                 }
             else:
                 comparable_index[comp_id]["score_sum"] += score
                 comparable_index[comp_id]["count"] += 1
-                qn = int(comp.get("queryNights") or 1)
                 if qn > comparable_index[comp_id]["max_query_nights"]:
                     comparable_index[comp_id]["max_query_nights"] = qn
             if day_date and isinstance(price, (int, float)) and price > 0:
-                comparable_index[comp_id]["price_by_date"][day_date] = round(float(price), 2)
+                _price_rounded = round(float(price), 2)
+                # Always write the primary check-in night.
+                comparable_index[comp_id]["price_by_date"][day_date] = _price_rounded
+                # Expand to all nights covered by this query (queryNights > 1 means
+                # the price was a multi-night total normalized to per-night; each of
+                # those nights should show the same per-night rate).
+                for i in range(1, qn):
+                    night = _date_add(day_date, i)
+                    # Only fill expanded nights when not already set by a direct query.
+                    comparable_index[comp_id]["price_by_date"].setdefault(night, _price_rounded)
 
         # Second pass: fill priceByDate for comps already in the index that
         # appeared in this day's full results but not in top_comps.
@@ -195,6 +210,11 @@ def _build_daily_transparent_result(
             for comp_id, price in day_comp_prices.items():
                 if comp_id in comparable_index and day_date not in comparable_index[comp_id]["price_by_date"]:
                     comparable_index[comp_id]["price_by_date"][day_date] = price
+                    # Also expand to covered nights using the stored max_query_nights.
+                    qn = comparable_index[comp_id].get("max_query_nights", 1)
+                    for i in range(1, qn):
+                        night = _date_add(day_date, i)
+                        comparable_index[comp_id]["price_by_date"].setdefault(night, price)
 
     comparable_listings: List[Dict[str, Any]] = []
     for state in comparable_index.values():
@@ -470,6 +490,7 @@ def run_scrape(
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
+    max_radius_km: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -534,10 +555,22 @@ def run_scrape(
             extraction_warnings.extend(warnings)
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
 
-            # Inject geocoded coordinates (passed from main.py via job's saved listing)
-            if target_lat is not None and target_lng is not None:
-                target.lat = target_lat
-                target.lng = target_lng
+            # Phase 3B: coordinate priority — page-extracted > geocoded > none.
+            # extract_target_spec() may populate target.lat/lng from JSON-LD geo.
+            # Only fall back to geocoded coords when the page gave us nothing.
+            if target.lat is None or target.lng is None:
+                if target_lat is not None and target_lng is not None:
+                    target.lat = target_lat
+                    target.lng = target_lng
+                    logger.debug("[run_scrape] Using geocoded target coords (page gave none)")
+            else:
+                logger.info(
+                    f"[run_scrape] Using page-extracted target coords "
+                    f"({target.lat:.5f}, {target.lng:.5f})"
+                )
+
+            # Resolve adaptive radius — use caller-supplied value or fall back to default
+            _effective_radius = max_radius_km if max_radius_km is not None else DEFAULT_MAX_RADIUS_KM
 
             if not target.location:
                 # Try "... in City, State" pattern first
@@ -635,6 +668,7 @@ def run_scrape(
                         rate_limit_seconds=rate_limit_seconds,
                         top_k=top_k,
                         preferred_comps=preferred_comps,
+                        max_radius_km=_effective_radius,
                     )
                     if result.median_price is not None:
                         break
@@ -703,6 +737,18 @@ def run_scrape(
                     preferred_comps,
                 ),
             )
+            # Phase 3B: surface page-extracted coords so main.py can write them back to DB
+            if target.lat is not None and target.lng is not None:
+                _coord_source = (
+                    "page" if (target.lat != target_lat or target.lng != target_lng
+                               or target_lat is None)
+                    else "geocoded"
+                )
+                transparent["pageExtractedCoords"] = {
+                    "lat": target.lat,
+                    "lng": target.lng,
+                    "source": _coord_source,
+                }
             _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
 
             logger.info(
@@ -741,6 +787,7 @@ def run_benchmark_scrape(
     user_attributes: Optional[Dict[str, Any]] = None,
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
+    max_radius_km: Optional[float] = None,
 ) -> tuple:
     """
     Benchmark-first pipeline.
@@ -845,10 +892,14 @@ def run_benchmark_scrape(
 
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
 
-            # Inject geocoded coordinates
-            if target_lat is not None and target_lng is not None:
-                target.lat = target_lat
-                target.lng = target_lng
+            # Phase 3B: coordinate priority — page-extracted > geocoded > none.
+            if target.lat is None or target.lng is None:
+                if target_lat is not None and target_lng is not None:
+                    target.lat = target_lat
+                    target.lng = target_lng
+
+            # Resolve adaptive radius
+            _effective_radius = max_radius_km if max_radius_km is not None else DEFAULT_MAX_RADIUS_KM
 
             # ── Benchmark-to-target similarity (computed once per job) ────────
             # Compare the benchmark listing's extracted spec against the user's
@@ -936,6 +987,7 @@ def run_benchmark_scrape(
                     max_cards=BENCHMARK_MAX_CARDS,
                     rate_limit_seconds=rate_limit_seconds,
                     top_k=BENCHMARK_TOP_K,
+                    max_radius_km=_effective_radius,
                 )
                 sampled_results.append(result)
 
@@ -1164,6 +1216,7 @@ def run_criteria_search(
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
+    max_radius_km: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Criteria-based search: search Airbnb for listings matching the user's
@@ -1384,6 +1437,9 @@ def run_criteria_search(
         rate_limit_seconds=rate_limit_seconds,
         cdp_connect_timeout_ms=cdp_connect_timeout_ms,
         preferred_comps=preferred_comps,
+        target_lat=target_lat,
+        target_lng=target_lng,
+        max_radius_km=max_radius_km,
     )
 
     # Merge criteria-specific info into the transparent result

@@ -344,3 +344,96 @@ class TestCardSurvivalPipeline:
         assert len(surviving) == 3, "3 of 4 cards have valid prices"
         prices = {s.nightly_price for s in surviving}
         assert prices == {220.0, 189.0, 310.0}
+
+
+# ---------------------------------------------------------------------------
+# Regression: 2-night-primary detectTripNights false-positive halving
+# ---------------------------------------------------------------------------
+
+class TestTwoNightSecondaryDetection:
+    """
+    Regression test for the "prices too low" bug introduced when 2-night-primary
+    queries were adopted.
+
+    Root cause: the JS detectTripNights() secondary check fires whenever the card
+    element's text contains "2 nights" AND stayNights=2.  Without the !isPerNight()
+    guard, a DOM element showing "$150/night  2 nights minimum" was classified as
+    price_kind="trip_total_*" with price_nights=2, causing parse_card_to_spec to
+    halve the price to $75.
+
+    After the fix: the secondary check is gated by !isPerNight(text), so a card
+    with a per-night indicator is always treated as nightly regardless of surrounding
+    "N nights" context text.
+
+    These Python tests simulate the CARD DICT that the corrected JS produces and
+    verify parse_card_to_spec handles each outcome correctly.
+    """
+
+    def test_per_night_card_with_minimum_stay_text_not_halved(self):
+        """
+        Bug scenario: card showing '$150/night' also contains '2 nights minimum'.
+        Before fix: JS set price_nights=2, price_kind='trip_total_standard' → $75.
+        After fix: JS sets price_nights=1, price_kind='nightly_standard' → $150.
+        """
+        card = {
+            "url": "https://www.airbnb.com/rooms/700",
+            "title": "Min-stay-2 listing",
+            "text": "Entire home · 4 guests · 2 bedrooms",
+            "price_text": "150.0",
+            "price_value": 150.0,
+            # Correct JS output after fix: per-night was detected; "2 nights" in
+            # surrounding text did NOT override it.
+            "price_kind": "nightly_standard",
+            "price_nights": 1,
+            "price_source": "dom",
+        }
+        spec = parse_card_to_spec(card)
+        assert spec.nightly_price == 150.0, (
+            "Per-night price must not be halved even when '2 nights' appears in card text"
+        )
+        assert spec.scrape_nights == 1
+
+    def test_genuine_trip_total_still_divided(self):
+        """
+        Legitimate trip-total card (e.g., "$300 for 2 nights" aria-label).
+        JS correctly sets price_kind='trip_total_from_aria', price_nights=2.
+        parse_card_to_spec must still divide → $150/night.
+        """
+        card = {
+            "url": "https://www.airbnb.com/rooms/701",
+            "title": "Min-stay-2 listing",
+            "text": "Entire home · 4 guests · 2 bedrooms",
+            "price_text": "300.0",
+            "price_value": 300.0,
+            "price_kind": "trip_total_from_aria",
+            "price_nights": 2,
+            "price_source": "aria",
+        }
+        spec = parse_card_to_spec(card)
+        assert spec.nightly_price == 150.0, "Trip-total $300/2 nights must divide to $150/night"
+        assert spec.scrape_nights == 2
+
+    def test_buggy_js_output_would_have_halved_per_night(self):
+        """
+        Documents the BEFORE-FIX JS output for a per-night card that also had
+        '2 nights' text: price_kind='trip_total_standard', price_nights=2,
+        price_value=150.  parse_card_to_spec would have produced $75.
+        This test is kept as documentation of the regression.
+        """
+        buggy_card = {
+            "url": "https://www.airbnb.com/rooms/702",
+            "title": "Min-stay-2 listing",
+            "text": "Entire home · 4 guests · 2 bedrooms",
+            "price_text": "150.0",
+            "price_value": 150.0,
+            # This is what the buggy JS would have produced:
+            "price_kind": "trip_total_standard",
+            "price_nights": 2,
+            "price_source": "dom",
+        }
+        spec = parse_card_to_spec(buggy_card)
+        # Confirm the Python code DID halve it — the bug was in JS, not Python.
+        assert spec.nightly_price == 75.0, (
+            "parse_card_to_spec faithfully divides trip_total by price_nights — "
+            "the fix must be in the JS detectTripNights guard, not here"
+        )

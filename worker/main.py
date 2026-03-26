@@ -571,6 +571,35 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     f"[{report_id}] Target coord resolution failed (non-fatal): {_geo_exc}"
                 )
 
+        # ── Phase 3B: Adaptive radius selection ──────────────────────────
+        _job_radius_km: float = 30.0  # default; overwritten below if pool data available
+        if _listing_id_for_geocode:
+            try:
+                from worker.core.geo_radius import select_adaptive_radius
+                _pool_rows = (
+                    client.table("comparable_pool_entries")
+                    .select("distance_to_target_km")
+                    .eq("saved_listing_id", _listing_id_for_geocode)
+                    .eq("status", "active")
+                    .execute()
+                )
+                _pool_distances = [
+                    r.get("distance_to_target_km")
+                    for r in (_pool_rows.data or [])
+                ]
+                _pool_active_size = len([d for d in _pool_distances if d is not None])
+                _job_radius_km, _radius_reason = select_adaptive_radius(
+                    pool_distances=_pool_distances,
+                    active_pool_size=_pool_active_size or None,
+                )
+                logger.info(
+                    f"[{report_id}] Adaptive radius: {_job_radius_km:.0f} km — {_radius_reason}"
+                )
+            except Exception as _radius_exc:
+                logger.warning(
+                    f"[{report_id}] Radius selection failed (using 30 km default): {_radius_exc}"
+                )
+
         _mode_c_succeeded = False
         # benchmarkInfo is preserved here even when Mode C falls back to Mode B/A.
         # Without this, a failed-but-attempted benchmark run would lose all transparency.
@@ -599,6 +628,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     user_attributes=attributes,
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
+                    max_radius_km=_job_radius_km,
                 )
 
                 # Save benchmark transparency now — before any fallback overwrites transparent_result.
@@ -650,6 +680,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     preferred_comps=preferred_comps,
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
+                    max_radius_km=_job_radius_km,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -709,6 +740,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     preferred_comps=preferred_comps,
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
+                    max_radius_km=_job_radius_km,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -809,6 +841,43 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
             except Exception as exc:
                 logger.warning(f"[{report_id}] Failed to write geocoded coords (non-fatal): {exc}")
+
+        # Phase 3B: write back page-extracted coords when the listing page gave us
+        # better coordinates than geocoding (URL mode and benchmark mode).
+        if _listing_id_for_geocode and transparent_result:
+            _page_coords = (transparent_result or {}).get("pageExtractedCoords")
+            if _page_coords and _page_coords.get("source") == "page":
+                _pc_lat = _page_coords.get("lat")
+                _pc_lng = _page_coords.get("lng")
+                if _pc_lat is not None and _pc_lng is not None:
+                    try:
+                        client.table("saved_listings").update({
+                            "target_lat": _pc_lat,
+                            "target_lng": _pc_lng,
+                        }).eq("id", _listing_id_for_geocode).execute()
+                        logger.info(
+                            f"[{report_id}] Saved page-extracted coords "
+                            f"({_pc_lat:.5f}, {_pc_lng:.5f}) to listing {_listing_id_for_geocode}"
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"[{report_id}] Failed to write page-extracted coords (non-fatal): {exc}"
+                        )
+
+        # Phase 3B: write back the adaptive radius used this run
+        if _listing_id_for_geocode:
+            try:
+                client.table("saved_listings").update({
+                    "comp_pool_target_radius_km": _job_radius_km,
+                }).eq("id", _listing_id_for_geocode).execute()
+                logger.debug(
+                    f"[{report_id}] Saved comp_pool_target_radius_km={_job_radius_km} "
+                    f"to listing {_listing_id_for_geocode}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[{report_id}] Failed to write target radius (non-fatal): {exc}"
+                )
 
         # Seed comparable pool (Phase 2) — non-fatal, runs after job is marked ready
         _listing_id = job.get("listing_id")

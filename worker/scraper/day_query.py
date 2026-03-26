@@ -1,16 +1,28 @@
 """
-Day-by-day 1-night query engine.
+Day-by-day 2-night-primary query engine.
 
-WHY 1-NIGHT QUERIES:
-Airbnb search cards display *total trip prices* for multi-night stays, not
-nightly prices.  For example, a 30-night search shows "$4,500" on a card that
-actually costs $150/night.  The previous pipeline treated that total as a
-nightly rate, inflating every price by the stay length.
+WHY 2-NIGHT-PRIMARY:
+Airbnb search cards display *total trip prices* for multi-night stays.  The
+JS extractor in comparable_collector.py detects "for N nights" in the
+aria-label / DOM text and divides the total by N to produce a correct
+per-night rate, so 2-night query results are already normalised.
 
-By querying one night at a time (checkin=day_i, checkout=day_i+1), Airbnb
-cards show the actual nightly price.  We collect these correct per-night
-prices, then apply our own discount policy (weekly/monthly/non-refundable)
-on top.
+Using 2-night queries as the primary strategy improves comp pool coverage:
+listings with minimum_stay=2 only appear (and show a price) in queries that
+match their minimum stay.  A 1-night query silently excludes them, biasing
+the comp pool towards listings that accept single-night bookings.
+
+Strategy:
+  1. Try a 2-night query first (checkin=day_i, checkout=day_i+2).
+  2. Fall back to a 1-night query only when the 2-night search returns zero
+     priced comps (rare).
+
+Per-night normalisation is handled in parse_card_to_spec: when the JS
+extractor reports price_kind="trip_total_*" and price_nights=N, the
+raw total is divided by N before the price is stored.
+
+priceByDate expansion (covering both nights of a 2-night query) is handled
+in price_estimator._build_daily_transparent_result via queryNights metadata.
 """
 
 from __future__ import annotations
@@ -65,7 +77,7 @@ DAY_MAX_CARDS = int(os.getenv("DAY_QUERY_MAX_CARDS", "30"))
 
 @dataclass
 class DayResult:
-    """Result of a single 1-night query (or an interpolated placeholder)."""
+    """Result of a single day query (2-night primary, 1-night fallback) or interpolated placeholder."""
 
     date: str                                        # "YYYY-MM-DD"
     median_price: Optional[float] = None             # weighted mean from comps
@@ -134,6 +146,7 @@ def estimate_base_price_for_date(
     rate_limit_seconds: float = 1.0,
     top_k: int = 10,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    max_radius_km: float = DEFAULT_MAX_RADIUS_KM,
 ) -> DayResult:
     """
     Execute a 1-night Airbnb search for date_i -> date_i+1.
@@ -186,12 +199,12 @@ def estimate_base_price_for_date(
         priced: List[ListingSpec] = []
         query_nights_used = 1
 
-        for query_nights in (1, 2):
+        for query_nights in (2, 1):
             checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
             search_url = build_search_url(
                 base_origin, target.location, checkin_str, checkout_str, adults,
             )
-            logger.info(f"[day_query] {checkin_str}: {query_nights}-night search")
+            logger.info(f"[day_query] {checkin_str}: {query_nights}-night search (primary=2)")
 
             page.goto(search_url, wait_until="domcontentloaded", timeout=PER_DAY_TIMEOUT_S * 1000)
             page.wait_for_timeout(700)
@@ -252,7 +265,7 @@ def estimate_base_price_for_date(
         if target.lat is not None and target.lng is not None:
             try:
                 comps, geo_excluded_count = apply_geo_filter(
-                    comps, target.lat, target.lng, DEFAULT_MAX_RADIUS_KM
+                    comps, target.lat, target.lng, max_radius_km
                 )
             except Exception as _geo_exc:
                 logger.warning(f"[day_query] Geo filter failed (non-fatal): {_geo_exc}")

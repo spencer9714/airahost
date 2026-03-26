@@ -29,8 +29,22 @@ function nextDay(dateStr: string): string {
 
 function listingUrlForDate(url: string, date: string): string {
   const checkout = nextDay(date);
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}checkin=${date}&checkout=${checkout}`;
+  try {
+    // Canonicalize: strip any existing date params (old or new key names),
+    // then inject the correct Airbnb params check_in / check_out.
+    const u = new URL(url, "https://www.airbnb.com");
+    u.searchParams.delete("checkin");
+    u.searchParams.delete("checkout");
+    u.searchParams.delete("check_in");
+    u.searchParams.delete("check_out");
+    u.searchParams.set("check_in", date);
+    u.searchParams.set("check_out", checkout);
+    return u.toString();
+  } catch {
+    // Fallback for relative or malformed URLs — safe append.
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}check_in=${date}&check_out=${checkout}`;
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────

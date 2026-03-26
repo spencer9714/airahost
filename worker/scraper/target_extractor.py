@@ -43,6 +43,8 @@ class ListingSpec:
     # Number of nights the scraped price covered before per-night normalization.
     # 1 = normal 1-night search card; 2 = "for 2 nights" trip total, divided by 2; etc.
     scrape_nights: int = 1
+    # Raw price_kind from JS extractor: "trip_total_*", "nightly_*", or "unknown".
+    price_kind: str = "unknown"
     # Approximate WGS-84 coordinates (optional — best-effort from geocoding or page state).
     lat: Optional[float] = None
     lng: Optional[float] = None
@@ -416,6 +418,10 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
         except Exception:
             pass
 
+    # Phase 3B: coordinates extracted from this page (populated in JSON-LD loop below)
+    spec_lat: Optional[float] = None
+    spec_lng: Optional[float] = None
+
     # Enrich from JSON-LD if available
     if isinstance(ld, list) and ld:
         for block in ld:
@@ -463,6 +469,23 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
                                 reviews = int(agg["reviewCount"])
                             except Exception:
                                 pass
+                    # Phase 3B: geo coordinates from JSON-LD (best-effort)
+                    geo_block = it.get("geo") or {}
+                    if isinstance(geo_block, dict):
+                        try:
+                            _lat = float(geo_block.get("latitude") or 0)
+                            _lng = float(geo_block.get("longitude") or 0)
+                            if (-90 <= _lat <= 90) and (-180 <= _lng <= 180) and (_lat != 0 or _lng != 0):
+                                # Only set if not already populated by a prior block
+                                if spec_lat is None:
+                                    spec_lat = _lat
+                                    spec_lng = _lng
+                                    logger.info(
+                                        f"Target coords from JSON-LD geo: "
+                                        f"({spec_lat:.5f}, {spec_lng:.5f})"
+                                    )
+                        except Exception:
+                            pass
                     break
 
     amenities = extract_amenities(body_text)
@@ -479,6 +502,8 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
         amenities=amenities,
         rating=rating,
         reviews=reviews,
+        lat=spec_lat,
+        lng=spec_lng,
     )
 
     return spec, warnings
