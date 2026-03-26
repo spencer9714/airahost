@@ -34,6 +34,7 @@ type ListingData = {
     bathrooms?: number;
     maxGuests?: number;
     beds?: number;
+    listingUrl?: string | null;
     preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
   };
   default_date_mode?: DateMode;
@@ -395,12 +396,31 @@ export function ListingCard({
             {/* ── § 0 Property address / URL — read-only ── */}
             <div className="space-y-2">
               <p className="text-sm font-semibold text-foreground/55">Property</p>
-              {looksLikeUrl(listing.input_address) ? (
+              {attrs.listingUrl ? (
+                <div className="space-y-1.5">
+                  <a
+                    href={attrs.listingUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 rounded-lg border border-gray-200/60 bg-white/80 px-3 py-2.5 transition-colors hover:bg-blue-50/60"
+                  >
+                    <span className="flex-1 truncate font-mono text-xs text-blue-600">
+                      {shortenUrl(attrs.listingUrl)}
+                    </span>
+                    <span className="shrink-0 text-xs text-blue-400">↗</span>
+                  </a>
+                  {listing.input_address && (
+                    <p className="truncate px-1 text-xs text-foreground/40">
+                      {listing.input_address}
+                    </p>
+                  )}
+                </div>
+              ) : looksLikeUrl(listing.input_address) ? (
                 <a
                   href={listing.input_address}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-2 rounded-lg border border-gray-100 bg-gray-50 px-3 py-2.5 transition-colors hover:bg-blue-50/60"
+                  className="flex items-center gap-2 rounded-lg border border-gray-200/60 bg-white/80 px-3 py-2.5 transition-colors hover:bg-blue-50/60"
                 >
                   <span className="flex-1 truncate font-mono text-xs text-blue-600">
                     {shortenUrl(listing.input_address)}

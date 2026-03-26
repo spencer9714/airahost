@@ -62,6 +62,7 @@ type ListingRow = {
     beds?: number;
     amenities?: string[];
     address?: string;
+    listingUrl?: string | null;
     preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
   };
   created_at: string;
