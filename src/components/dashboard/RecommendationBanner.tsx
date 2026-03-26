@@ -61,36 +61,39 @@ export function RecommendationBanner({
   const stats = [
     {
       label: "Market median",
-      value: median ? `$${median}` : "-",
+      value: median ? `$${median}` : "—",
     },
     {
       label: "Occupancy est.",
-      value: summary.occupancyPct ? `${summary.occupancyPct}%` : "-",
+      value: summary.occupancyPct ? `${summary.occupancyPct}%` : "—",
+    },
+    {
+      label: "Weekday avg",
+      value: summary.weekdayAvg ? `$${summary.weekdayAvg}` : "—",
+    },
+    {
+      label: "Weekend avg",
+      value: summary.weekendAvg ? `$${summary.weekendAvg}` : "—",
     },
     {
       label: "Monthly est.",
       value: summary.estimatedMonthlyRevenue
         ? `$${summary.estimatedMonthlyRevenue.toLocaleString()}`
-        : "-",
-    },
-    {
-      label: "Weekend avg",
-      value: summary.weekendAvg ? `$${summary.weekendAvg}` : "-",
+        : "—",
     },
   ];
 
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm">
-      <div className="flex flex-col gap-6 p-6 sm:flex-row sm:items-start sm:justify-between sm:p-7">
-        <div className="space-y-3">
+      {/* ── Hero: price + CTAs ── */}
+      <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between sm:p-7">
+        {/* Left: price block */}
+        <div className="space-y-2">
           <div>
-            <p className="text-sm font-semibold text-foreground/65">
-              {listingName}
-            </p>
             <p className="text-xs font-semibold uppercase tracking-widest text-foreground/40">
               Suggested nightly rate
             </p>
-            <div className="mt-1 flex items-baseline gap-3">
+            <div className="mt-1.5 flex items-baseline gap-3">
               <p className="text-5xl font-bold tracking-tight">${suggested}</p>
               {badge && (
                 <span
@@ -100,11 +103,16 @@ export function RecommendationBanner({
                 </span>
               )}
             </div>
+            {median > 0 && suggested !== median && (
+              <p className="mt-1 text-sm text-foreground/50">
+                Market median: <span className="font-semibold text-foreground/70">${median}</span>
+              </p>
+            )}
           </div>
 
-          <div className="space-y-1">
+          <div className="space-y-0.5">
             {propertyMeta && (
-              <p className="text-sm text-foreground/60">
+              <p className="text-sm text-foreground/55">
                 {propertyMeta.propertyType} · {propertyMeta.guests} guest
                 {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
                 {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
@@ -122,7 +130,7 @@ export function RecommendationBanner({
                     href={benchmarkMeta.primaryUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="max-w-[280px] truncate text-amber-700 hover:underline"
+                    className="max-w-65 truncate text-amber-700 hover:underline"
                   >
                     Primary benchmark
                   </a>
@@ -130,33 +138,40 @@ export function RecommendationBanner({
               </div>
             ) : null}
             {lastAnalysisDate && (
-              <p className="text-xs text-foreground/40">
+              <p className="text-xs text-foreground/35">
                 Analysis from {new Date(lastAnalysisDate).toLocaleDateString()}
               </p>
             )}
           </div>
         </div>
 
-        <div className="flex shrink-0 flex-col gap-2">
+        {/* Right: CTAs */}
+        <div className="flex shrink-0 flex-col gap-2 sm:items-end">
           <Link href={`/r/${reportShareId}`}>
             <Button size="md">View full report</Button>
           </Link>
           <Button
             size="sm"
-            variant="ghost"
+            variant="secondary"
             onClick={onRerun}
             disabled={isRerunning}
           >
-            {isRerunning ? "Re-analyzing..." : "Re-run analysis"}
+            {isRerunning ? "Re-analyzing…" : "Re-run analysis"}
           </Button>
+          <p className="hidden text-right text-[11px] text-foreground/35 sm:block">
+            {listingName}
+          </p>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 divide-x divide-y divide-border border-t border-border sm:grid-cols-4 sm:divide-y-0">
+      {/* ── KPI stats row ── */}
+      <div className="grid grid-cols-3 divide-x divide-y divide-border border-t border-border sm:grid-cols-5 sm:divide-y-0">
         {stats.map((stat) => (
-          <div key={stat.label} className="px-5 py-4">
-            <p className="text-xs text-foreground/40">{stat.label}</p>
-            <p className="mt-0.5 text-base font-semibold text-foreground">
+          <div key={stat.label} className="px-4 py-3.5">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-foreground/40">
+              {stat.label}
+            </p>
+            <p className="mt-0.5 text-base font-bold text-foreground">
               {stat.value}
             </p>
           </div>

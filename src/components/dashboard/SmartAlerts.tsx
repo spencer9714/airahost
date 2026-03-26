@@ -6,16 +6,41 @@ import type {
 
 interface Alert {
   id: string;
-  color: "emerald" | "amber" | "rose" | "blue";
+  severity: "info" | "warning" | "danger" | "positive";
   title: string;
   description: string;
 }
 
-const DOT_COLORS = {
-  emerald: "bg-emerald-500",
-  amber: "bg-amber-500",
-  rose: "bg-rose-500",
-  blue: "bg-blue-500",
+const SEVERITY_STYLES: Record<Alert["severity"], {
+  card: string;
+  icon: string;
+  title: string;
+  iconSymbol: string;
+}> = {
+  positive: {
+    card: "bg-emerald-50 border-emerald-200",
+    icon: "bg-emerald-500 text-white",
+    title: "text-emerald-900",
+    iconSymbol: "↑",
+  },
+  info: {
+    card: "bg-blue-50 border-blue-200",
+    icon: "bg-blue-500 text-white",
+    title: "text-blue-900",
+    iconSymbol: "i",
+  },
+  warning: {
+    card: "bg-amber-50 border-amber-200",
+    icon: "bg-amber-500 text-white",
+    title: "text-amber-900",
+    iconSymbol: "!",
+  },
+  danger: {
+    card: "bg-rose-50 border-rose-200",
+    icon: "bg-rose-500 text-white",
+    title: "text-rose-900",
+    iconSymbol: "↑",
+  },
 };
 
 function deriveAlerts(
@@ -33,28 +58,28 @@ function deriveAlerts(
     if (premiumPct > 10) {
       alerts.push({
         id: "weekend-premium",
-        color: "emerald",
+        severity: "positive",
         title: "Strong weekend demand",
         description: `Weekend rates are ${premiumPct}% higher than weekdays. Consider dynamic pricing to capture this premium.`,
       });
     }
   }
 
-  // 2. Under-market
+  // 2. Under / above market
   const recNightly = summary.recommendedPrice?.nightly;
   if (recNightly && summary.nightlyMedian) {
     const diff = Math.round(summary.nightlyMedian - recNightly);
     if (diff > 5) {
       alerts.push({
         id: "under-market",
-        color: "amber",
+        severity: "warning",
         title: "Priced below market",
         description: `Your recommended price is $${diff} below the market median. This may attract more bookings but reduce revenue.`,
       });
     } else if (diff < -10) {
       alerts.push({
         id: "above-market",
-        color: "rose",
+        severity: "danger",
         title: "Priced above market",
         description: `Your recommended price is $${Math.abs(diff)} above the median. Ensure your amenities and reviews justify the premium.`,
       });
@@ -65,7 +90,7 @@ function deriveAlerts(
   if (comps && comps.collected < 10 && comps.filterStage !== "mock") {
     alerts.push({
       id: "comp-scarcity",
-      color: "amber",
+      severity: "warning",
       title: "Limited comparable data",
       description: `Only ${comps.collected} comparable listings were found. Results may be less accurate in this area.`,
     });
@@ -77,7 +102,7 @@ function deriveAlerts(
     if (spread > 0.5) {
       alerts.push({
         id: "price-spread",
-        color: "blue",
+        severity: "info",
         title: "Wide price range",
         description: `Prices in your area range from $${dist.min} to $${dist.max}. Position based on your unique selling points.`,
       });
@@ -88,7 +113,7 @@ function deriveAlerts(
   if (summary.occupancyPct && summary.occupancyPct < 60) {
     alerts.push({
       id: "low-occupancy",
-      color: "rose",
+      severity: "danger",
       title: "Lower occupancy expected",
       description: `Estimated occupancy is ${summary.occupancyPct}%. Consider lowering prices or improving listing quality.`,
     });
@@ -108,29 +133,45 @@ export function SmartAlerts({
 }) {
   const alerts = deriveAlerts(summary, compsSummary, priceDistribution);
 
-  if (alerts.length === 0) {
-    return (
-      <div className="rounded-2xl border border-border bg-white p-6">
-        <p className="text-base text-foreground/60">
-          No alerts right now. Your pricing looks good!
-        </p>
-      </div>
-    );
-  }
-
   return (
-    <div className="rounded-2xl border border-border bg-white divide-y divide-border">
-      {alerts.map((alert) => (
-        <div key={alert.id} className="flex items-start gap-4 px-6 py-5">
-          <span
-            className={`mt-1.5 h-3 w-3 shrink-0 rounded-full ${DOT_COLORS[alert.color]}`}
-          />
-          <div>
-            <p className="text-base font-semibold">{alert.title}</p>
-            <p className="mt-1 text-sm text-foreground/60">{alert.description}</p>
-          </div>
+    <div className="rounded-2xl border border-border bg-white p-5 sm:p-6">
+      <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-foreground/35">
+        Alerts
+      </p>
+
+      {alerts.length === 0 ? (
+        <div className="flex items-center gap-3 rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-xs font-bold text-white">
+            ✓
+          </span>
+          <p className="text-sm font-medium text-emerald-900">
+            No alerts — your pricing looks good!
+          </p>
         </div>
-      ))}
+      ) : (
+        <div className="space-y-2">
+          {alerts.map((alert) => {
+            const s = SEVERITY_STYLES[alert.severity];
+            return (
+              <div
+                key={alert.id}
+                className={`flex items-start gap-3 rounded-xl border px-4 py-3.5 ${s.card}`}
+              >
+                <span
+                  className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${s.icon}`}
+                  aria-hidden="true"
+                >
+                  {s.iconSymbol}
+                </span>
+                <div>
+                  <p className={`text-sm font-semibold ${s.title}`}>{alert.title}</p>
+                  <p className="mt-0.5 text-sm text-foreground/60">{alert.description}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

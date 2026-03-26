@@ -14,7 +14,13 @@ interface ReportSnapshot {
     nightlyMin?: number;
     nightlyMedian?: number;
     nightlyMax?: number;
+    occupancyPct?: number;
+    weekdayAvg?: number;
+    weekendAvg?: number;
     estimatedMonthlyRevenue?: number;
+    recommendedPrice?: Record<string, unknown>;
+    compsSummary?: Record<string, unknown>;
+    priceDistribution?: Record<string, unknown>;
   } | null;
   result_calendar?: Array<{
     date: string;
@@ -31,7 +37,16 @@ interface ListingReportLinkRow {
   pricing_report_id: string;
   created_at: string;
   trigger: "manual" | "rerun" | "scheduled";
-  pricing_reports: ReportSnapshot | null;
+  pricing_reports: ReportSnapshot | ReportSnapshot[] | null;
+}
+
+function normalizeReportRelation(
+  relation: ReportSnapshot | ReportSnapshot[] | null | undefined
+): ReportSnapshot | null {
+  if (Array.isArray(relation)) {
+    return relation[0] ?? null;
+  }
+  return relation ?? null;
 }
 
 export async function GET() {
@@ -104,23 +119,71 @@ export async function GET() {
       }
     }
 
-    const latestByListing = new Map<string, ListingReportLinkRow>();
+    // ── Two-pass per-listing selection ───────────────────────────
+    // latestJobByListing  → most recent link of ANY status (for active-job tracking)
+    // latestReadyByListing → most recent link whose report is status="ready" (for pricing display)
+    //
+    // This decouples "what is running right now" from "what pricing data to show".
+    // If the newest run failed or is still in-progress, we still surface the last
+    // successful report's pricing rather than blanking the dashboard.
+    const latestJobByListing = new Map<
+      string,
+      { row: ListingReportLinkRow; report: ReportSnapshot | null }
+    >();
+    const latestReadyByListing = new Map<
+      string,
+      { row: ListingReportLinkRow; report: ReportSnapshot }
+    >();
+
     for (const row of links) {
-      if (!latestByListing.has(row.saved_listing_id)) {
-        latestByListing.set(row.saved_listing_id, {
-          ...row,
-          pricing_reports:
-            row.pricing_reports ?? fallbackById.get(row.pricing_report_id) ?? null,
-        });
+      const report =
+        normalizeReportRelation(row.pricing_reports) ??
+        fallbackById.get(row.pricing_report_id) ??
+        null;
+
+      const id = row.saved_listing_id;
+
+      // Most recent link overall (first seen per listing since links are DESC)
+      if (!latestJobByListing.has(id)) {
+        latestJobByListing.set(id, { row, report });
+      }
+
+      // Most recent READY report (keep iterating until we find one)
+      if (report?.status === "ready" && !latestReadyByListing.has(id)) {
+        latestReadyByListing.set(id, { row, report });
       }
     }
 
     const listingsWithLatest = listingRows.map((listing) => {
-      const latest = latestByListing.get(listing.id);
+      const readyEntry = latestReadyByListing.get(listing.id);
+      const jobEntry = latestJobByListing.get(listing.id);
+
+      const jobStatus = (jobEntry?.report?.status ?? null) as
+        | "queued"
+        | "running"
+        | "error"
+        | "ready"
+        | null;
+
+      // activeJob is only set when the most recent linked report is NOT ready.
+      // This tells the UI a new analysis is running or the last one failed,
+      // so it can show a banner while still displaying the ready report's pricing.
+      const activeJob =
+        jobStatus && jobStatus !== "ready"
+          ? {
+              status: jobStatus as "queued" | "running" | "error",
+              linkedAt: jobEntry!.row.created_at,
+              shareId: jobEntry!.report?.share_id ?? null,
+            }
+          : null;
+
       return {
         ...listing,
-        latestReport: latest?.pricing_reports ?? null,
-        latestLinkedAt: latest?.created_at ?? null,
+        // latestReport is ALWAYS the most recent ready report (or null if none exist).
+        latestReport: readyEntry?.report ?? null,
+        // latestLinkedAt reflects when the ready report was linked — used as "last analysed" date.
+        latestLinkedAt: readyEntry?.row.created_at ?? null,
+        activeJob,
       };
     });
 
@@ -129,11 +192,14 @@ export async function GET() {
       nameById.set(listing.id, listing.name);
     }
 
+    // recentReports shows all linked reports (any status) sorted by recency, for the history panel.
     const recentReports = links
       .map((r) => ({
         ...r,
         pricing_reports:
-          r.pricing_reports ?? fallbackById.get(r.pricing_report_id) ?? null,
+          normalizeReportRelation(r.pricing_reports) ??
+          fallbackById.get(r.pricing_report_id) ??
+          null,
       }))
       .filter((r) => !!r.pricing_reports)
       .slice(0, 5)

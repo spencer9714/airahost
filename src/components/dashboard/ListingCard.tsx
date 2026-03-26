@@ -6,7 +6,7 @@ import type { RecommendedPrice, CalendarDay, DateMode } from "@/lib/schemas";
 type LatestReport = {
   id: string;
   share_id: string;
-  status: "queued" | "running" | "ready" | "error";
+  status: "ready";
   created_at: string;
   input_date_start: string;
   input_date_end: string;
@@ -17,6 +17,12 @@ type LatestReport = {
     recommendedPrice?: RecommendedPrice;
   } | null;
   result_calendar?: CalendarDay[];
+} | null;
+
+type ActiveJob = {
+  status: "queued" | "running" | "error";
+  linkedAt: string;
+  shareId: string | null;
 } | null;
 
 type ListingData = {
@@ -36,6 +42,7 @@ type ListingData = {
   default_end_date?: string | null;
   latestReport: LatestReport;
   latestLinkedAt: string | null;
+  activeJob: ActiveJob;
 };
 
 interface Props {
@@ -116,12 +123,13 @@ export function ListingCard({
   const displayTitle =
     listing.name?.trim() || listing.input_address || "Listing";
   const latest = listing.latestReport;
+  const { activeJob } = listing;
 
-  const range =
-    latest?.result_summary?.nightlyMin !== undefined &&
-    latest?.result_summary?.nightlyMax !== undefined
-      ? `$${latest.result_summary.nightlyMin}–$${latest.result_summary.nightlyMax}`
-      : null;
+  // Canonical suggested price — same derivation as banner and Recent Reports.
+  const suggestedPrice =
+    latest?.result_summary?.recommendedPrice?.nightly ??
+    latest?.result_summary?.nightlyMedian ??
+    null;
 
   const attrs = listing.input_attributes;
   const activeBenchmarks = (attrs.preferredComps ?? []).filter(
@@ -129,15 +137,34 @@ export function ListingCard({
   );
   const hasBenchmark = activeBenchmarks.length > 0;
 
-  const statusDot =
-    latest?.status === "ready"
+  // Status dot: driven by activeJob first, then latestReport (ready), else idle.
+  const statusColor =
+    activeJob?.status === "running" || activeJob?.status === "queued"
+      ? "bg-amber-400 animate-pulse"
+      : activeJob?.status === "error"
+      ? "bg-rose-400"
+      : latest !== null
       ? "bg-emerald-500"
-      : latest?.status === "running" || latest?.status === "queued"
-      ? "bg-amber-400"
       : "bg-gray-300";
 
   const typeLabel = attrs.propertyType
     ? (PROPERTY_TYPE_SHORT[attrs.propertyType] ?? attrs.propertyType)
+    : null;
+
+  const factsLine = [
+    typeLabel,
+    attrs.bedrooms != null ? `${attrs.bedrooms}bd` : null,
+    attrs.bathrooms != null ? `${attrs.bathrooms}ba` : null,
+    attrs.maxGuests ? `${attrs.maxGuests} guests` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const analysisDate = listing.latestLinkedAt
+    ? new Date(listing.latestLinkedAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+      })
     : null;
 
   useEffect(() => {
@@ -258,94 +285,42 @@ export function ListingCard({
 
   return (
     <div
-      className={`transition-colors ${
+      className={`group transition-colors ${
         isActive
-          ? "border-l-[3px] border-l-accent bg-blue-50/20"
-          : "border-l-[3px] border-l-transparent hover:bg-gray-50/60"
+          ? "border-l-2 border-l-accent/60 bg-white"
+          : "border-l-2 border-l-transparent hover:bg-white/50"
       }`}
     >
-      {/* ── Main row ── */}
+      {/* ── Main card body ── */}
       <div
-        className="flex items-center gap-3 px-5 py-4 cursor-pointer"
+        className="cursor-pointer px-4 py-3"
         onClick={onSelect}
       >
-        {/* Status indicator */}
-        <span
-          className={`mt-0.5 h-2 w-2 shrink-0 rounded-full ${statusDot}`}
-          title={latest?.status ?? "No report"}
-        />
-
-        {/* Listing info */}
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 mb-0.5">
-            <h3 className="truncate text-sm font-semibold text-foreground">
+        {/* Zone 1: Header — name + settings affordance (revealed on hover) */}
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className={`mt-px h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`}
+              title={
+                activeJob ? activeJob.status : latest ? "ready" : "no report"
+              }
+            />
+            <p className="truncate text-[13px] font-semibold leading-snug tracking-tight text-foreground">
               {displayTitle}
-            </h3>
+            </p>
             {hasBenchmark && (
-              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
-                Benchmark
+              <span className="shrink-0 text-[10px] font-medium text-foreground/30">
+                {activeBenchmarks.length === 1
+                  ? "benchmark"
+                  : `${activeBenchmarks.length}×`}
               </span>
             )}
           </div>
-          <p className="text-xs text-foreground/50">
-            {[
-              typeLabel,
-              attrs.maxGuests ? `${attrs.maxGuests} guests` : null,
-              attrs.bedrooms != null
-                ? `${attrs.bedrooms} bed${attrs.bedrooms !== 1 ? "s" : ""}`
-                : null,
-              attrs.bathrooms != null
-                ? `${attrs.bathrooms} bath${attrs.bathrooms !== 1 ? "s" : ""}`
-                : null,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
-          <div className="mt-1 flex items-center gap-2">
-            {range ? (
-              <span className="text-sm font-semibold text-foreground">
-                {range}
-                <span className="ml-1 text-xs font-normal text-foreground/40">
-                  /night
-                </span>
-              </span>
-            ) : (
-              <span className="text-xs text-foreground/40">No report yet</span>
-            )}
-            {listing.latestLinkedAt && (
-              <span className="text-xs text-foreground/35">
-                · {new Date(listing.latestLinkedAt).toLocaleDateString()}
-              </span>
-            )}
-          </div>
-          {!hasBenchmark && (
-            <Link
-              href={`/dashboard/listings/${listing.id}`}
-              className="mt-1 inline-block text-xs text-amber-700 hover:underline"
-              onClick={(e) => e.stopPropagation()}
-            >
-              + Add benchmark — improves accuracy
-            </Link>
-          )}
-        </div>
-
-        {/* Actions */}
-        <div
-          className="flex shrink-0 items-center gap-2"
-          onClick={(e) => e.stopPropagation()}
-        >
-          {latest?.share_id && latest.status === "ready" && (
-            <Link
-              href={`/r/${latest.share_id}`}
-              className="hidden text-xs font-medium text-foreground/50 hover:text-foreground transition-colors sm:inline"
-            >
-              View report
-            </Link>
-          )}
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
+          {/* Settings — hidden until hover or when panel is open */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
               setEditOpen((v) => {
                 const next = !v;
                 if (next) {
@@ -355,72 +330,131 @@ export function ListingCard({
                 return next;
               });
             }}
+            className={`shrink-0 select-none text-base font-medium leading-none transition-all ${
+              editOpen
+                ? "text-foreground/50"
+                : "text-foreground/20 opacity-0 group-hover:opacity-100"
+            }`}
+            aria-label="Settings"
           >
-            {editOpen ? "Close" : "Edit"}
-          </Button>
-          <Button size="sm" onClick={handleRunClick} disabled={isRunning}>
-            {isRunning ? "Running…" : "Analyze"}
-          </Button>
+            ···
+          </button>
+        </div>
+
+        {/* Zone 2: Property meta */}
+        {factsLine && (
+          <p className="mt-1 truncate text-[11px] text-foreground/35">
+            {factsLine}
+          </p>
+        )}
+
+        {/* Zone 3: Pricing signal */}
+        <div className="mt-2 flex items-end justify-between gap-2">
+          <div>
+            {suggestedPrice != null ? (
+              <p className="text-lg font-bold leading-none tracking-tight text-foreground">
+                ${suggestedPrice}
+                <span className="ml-1 text-[11px] font-normal text-foreground/30">
+                  /night
+                </span>
+              </p>
+            ) : activeJob?.status === "running" ||
+              activeJob?.status === "queued" ? (
+              <p className="text-xs text-foreground/40">Analyzing…</p>
+            ) : (
+              <p className="text-xs text-foreground/30">No analysis yet</p>
+            )}
+          </div>
+          {analysisDate && (
+            <span className="shrink-0 text-[10px] text-foreground/25">
+              {analysisDate}
+            </span>
+          )}
+        </div>
+
+        {/* Zone 4: Actions */}
+        <div
+          className="mt-3 flex items-center justify-between gap-2"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={handleRunClick}
+            disabled={isRunning}
+            className="rounded-md bg-gray-100/70 px-3 py-1.5 text-[11px] font-semibold text-foreground/55 transition-colors hover:bg-gray-200/70 hover:text-foreground disabled:opacity-40"
+          >
+            {isRunning ? "Analyzing…" : "Analyze"}
+          </button>
+          {latest?.share_id && (
+            <Link
+              href={`/r/${latest.share_id}`}
+              className="text-[11px] font-medium text-foreground/30 transition-colors hover:text-foreground/60"
+              onClick={(e) => e.stopPropagation()}
+            >
+              Report →
+            </Link>
+          )}
         </div>
       </div>
 
-      {/* ── Edit panel ── */}
+      {/* ── Settings / edit panel ── */}
       {editOpen && (
         <div
-          className="border-t border-border px-5 pb-5 pt-4"
+          className="border-t border-gray-100 px-4 pb-4 pt-3"
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="space-y-5 rounded-xl border border-border bg-gray-50/70 p-4">
+          <div className="space-y-4 rounded-xl border border-gray-100 bg-white/80 p-3">
+
             {/* Rename */}
-            <div className="space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-foreground/40">
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-foreground/35">
                 Rename
               </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={draftName}
-                  onChange={(e) => setDraftName(e.target.value)}
-                  onBlur={() => void commitRename()}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void commitRename();
-                    }
-                  }}
-                  aria-label="Rename listing title"
-                  className="w-full max-w-sm rounded-lg border border-border bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-accent"
-                />
+              <input
+                ref={inputRef}
+                type="text"
+                value={draftName}
+                onChange={(e) => setDraftName(e.target.value)}
+                onBlur={() => void commitRename()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void commitRename();
+                  }
+                }}
+                aria-label="Rename listing"
+                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm font-semibold outline-none focus:border-accent"
+              />
+              <div className="flex items-center gap-2">
                 {showRenameSuccess && (
                   <span className="text-xs font-medium text-emerald-600" role="status" aria-live="polite">
                     Saved
                   </span>
                 )}
+                {renameError && (
+                  <p className="text-xs text-rose-600" role="status" aria-live="polite">
+                    {renameError}
+                  </p>
+                )}
               </div>
-              {renameError && (
-                <p className="text-xs text-rose-600" role="status" aria-live="polite">
-                  {renameError}
-                </p>
-              )}
             </div>
 
             {/* Analysis window */}
-            <div className="space-y-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-foreground/40">
+            <div className="space-y-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-foreground/35">
                 Analysis window
               </p>
-              <div className="inline-flex gap-1 rounded-lg border border-border bg-gray-100/80 p-1">
+              <div className="inline-flex gap-0.5 rounded-lg border border-gray-200 bg-gray-100/60 p-0.5">
                 <button
                   type="button"
                   onClick={() => handleDateModeChange("next_30")}
                   className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
                     dateMode === "next_30"
                       ? "bg-white text-foreground shadow-sm"
-                      : "text-foreground/50 hover:text-foreground"
+                      : "text-foreground/45 hover:text-foreground"
                   }`}
                 >
-                  Next 30 days
+                  Next 30d
                 </button>
                 <button
                   type="button"
@@ -428,32 +462,32 @@ export function ListingCard({
                   className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
                     dateMode === "custom"
                       ? "bg-white text-foreground shadow-sm"
-                      : "text-foreground/50 hover:text-foreground"
+                      : "text-foreground/45 hover:text-foreground"
                   }`}
                 >
-                  Custom range
+                  Custom
                 </button>
               </div>
 
               {dateMode === "custom" && (
-                <div className="flex flex-wrap items-center gap-4">
+                <div className="grid grid-cols-2 gap-2">
                   <label className="space-y-1">
-                    <span className="text-xs font-medium text-foreground/50">Start</span>
+                    <span className="text-xs font-medium text-foreground/45">Start</span>
                     <input
                       type="date"
                       value={customStart}
                       onChange={(e) => handleCustomStartChange(e.target.value)}
-                      className="block rounded-lg border border-border bg-white px-3 py-1.5 text-sm outline-none focus:border-accent"
+                      className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-accent"
                     />
                   </label>
                   <label className="space-y-1">
-                    <span className="text-xs font-medium text-foreground/50">End</span>
+                    <span className="text-xs font-medium text-foreground/45">End</span>
                     <input
                       type="date"
                       value={customEnd}
                       onChange={(e) => handleCustomEndChange(e.target.value)}
                       min={customStart}
-                      className="block rounded-lg border border-border bg-white px-3 py-1.5 text-sm outline-none focus:border-accent"
+                      className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs outline-none focus:border-accent"
                     />
                   </label>
                 </div>
@@ -461,25 +495,27 @@ export function ListingCard({
             </div>
 
             {/* Benchmark listings */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-foreground/40">
-                  Benchmark listings
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-foreground/35">
+                  Benchmarks
                 </p>
                 {hasBenchmark && (
-                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                  <span className="text-[10px] font-medium text-foreground/35">
                     {activeBenchmarks.length} active
                   </span>
                 )}
               </div>
               <div className="space-y-2">
                 {benchmarkDrafts.map((comp, idx) => (
-                  <div key={idx} className={`rounded-lg border p-3 ${idx === 0 ? "border-amber-300 bg-amber-50/60" : "border-border bg-white"}`}>
-                    {/* Row header */}
-                    <div className="mb-2 flex items-center justify-between">
+                  <div
+                    key={idx}
+                    className="rounded-lg border border-gray-200 bg-white p-2.5"
+                  >
+                    <div className="mb-1.5 flex items-center justify-between">
                       {idx === 0 ? (
-                        <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
-                          ★ Primary benchmark
+                        <span className="text-[10px] font-semibold text-foreground/45">
+                          Primary
                         </span>
                       ) : benchmarkDrafts.length > 1 ? (
                         <button
@@ -490,19 +526,21 @@ export function ListingCard({
                             next.unshift(picked);
                             setBenchmarkDrafts(next);
                           }}
-                          className="rounded-full border border-gray-300 px-2 py-0.5 text-[10px] font-medium text-gray-500 hover:border-amber-400 hover:text-amber-700 transition-colors"
+                          className="rounded-full border border-gray-200 px-1.5 py-px text-[10px] font-medium text-foreground/40 hover:border-gray-300 hover:text-foreground/70 transition-colors"
                         >
-                          Set as primary
+                          Set primary
                         </button>
                       ) : null}
                       <button
                         type="button"
                         onClick={() =>
                           setBenchmarkDrafts((prev) =>
-                            prev.length > 1 ? prev.filter((_, i) => i !== idx) : [{ listingUrl: "", note: "" }]
+                            prev.length > 1
+                              ? prev.filter((_, i) => i !== idx)
+                              : [{ listingUrl: "", note: "" }]
                           )
                         }
-                        className="ml-auto text-xs text-foreground/45 hover:text-rose-600"
+                        className="ml-auto text-xs text-foreground/30 hover:text-foreground/60 transition-colors"
                       >
                         Remove
                       </button>
@@ -517,11 +555,14 @@ export function ListingCard({
                           next[idx] = { ...next[idx], listingUrl: e.target.value };
                           setBenchmarkDrafts(next);
                         }}
-                        className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-accent"
+                        className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs outline-none focus:border-accent"
                       />
-                      {comp.listingUrl && !comp.listingUrl.includes("airbnb.com/rooms/") && (
-                        <p className="text-xs text-rose-600">Must be a valid Airbnb room URL.</p>
-                      )}
+                      {comp.listingUrl &&
+                        !comp.listingUrl.includes("airbnb.com/rooms/") && (
+                          <p className="text-[10px] text-rose-600">
+                            Must be a valid Airbnb room URL.
+                          </p>
+                        )}
                       <input
                         type="text"
                         placeholder="Optional note"
@@ -531,7 +572,7 @@ export function ListingCard({
                           next[idx] = { ...next[idx], note: e.target.value };
                           setBenchmarkDrafts(next);
                         }}
-                        className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-accent"
+                        className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-xs outline-none focus:border-accent"
                       />
                     </div>
                   </div>
@@ -541,16 +582,20 @@ export function ListingCard({
                 <button
                   type="button"
                   onClick={() =>
-                    setBenchmarkDrafts((prev) => [...prev, { listingUrl: "", note: "" }])
+                    setBenchmarkDrafts((prev) => [
+                      ...prev,
+                      { listingUrl: "", note: "" },
+                    ])
                   }
-                  className="text-xs font-medium text-amber-700 hover:underline"
+                  className="text-xs font-medium text-foreground/40 transition-colors hover:text-foreground/70 hover:underline"
                 >
-                  + Add benchmark listing
+                  + Add benchmark
                 </button>
               )}
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
+                  className="px-3 py-1.5 text-xs"
                   onClick={handleSaveBenchmarks}
                   disabled={
                     benchmarkSaving ||
@@ -561,44 +606,67 @@ export function ListingCard({
                     )
                   }
                 >
-                  {benchmarkSaving ? "Saving..." : "Save benchmarks"}
+                  {benchmarkSaving ? "Saving…" : "Save benchmarks"}
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
-                  onClick={() => setBenchmarkDrafts([{ listingUrl: "", note: "" }])}
+                  className="px-3 py-1.5 text-xs"
+                  onClick={() =>
+                    setBenchmarkDrafts([{ listingUrl: "", note: "" }])
+                  }
                   disabled={benchmarkSaving}
                 >
-                  Clear draft
+                  Clear
                 </Button>
                 {benchmarkMessage && (
-                  <span className="text-xs text-foreground/55" role="status" aria-live="polite">
+                  <span
+                    className="text-xs text-foreground/45"
+                    role="status"
+                    aria-live="polite"
+                  >
                     {benchmarkMessage}
                   </span>
                 )}
               </div>
             </div>
 
-            {/* Run */}
-            <Button size="sm" onClick={handleRunClick} disabled={isRunning}>
+            {/* Run analysis */}
+            <Button
+              size="sm"
+              className="w-full py-2 text-xs"
+              onClick={handleRunClick}
+              disabled={isRunning}
+            >
               {isRunning ? "Queued…" : "Run analysis"}
             </Button>
 
-            {/* Footer: secondary actions */}
-            <div className="flex items-center justify-between border-t border-border pt-3">
-              <button
-                type="button"
-                onClick={onViewHistory}
-                className="text-xs font-medium text-foreground/50 hover:text-foreground transition-colors"
-              >
-                All reports →
-              </button>
+            {/* Footer: secondary links */}
+            <div className="flex items-center justify-between border-t border-gray-100 pt-3">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={onViewHistory}
+                  className="text-xs font-medium text-foreground/35 transition-colors hover:text-foreground"
+                >
+                  All reports →
+                </button>
+                {latest?.share_id && (
+                  <Link
+                    href={`/r/${latest.share_id}`}
+                    className="text-xs font-medium text-foreground/35 transition-colors hover:text-foreground"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    Latest report →
+                  </Link>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={onDelete}
-                className="text-xs font-medium text-rose-500 hover:text-rose-700 transition-colors"
+                className="text-xs font-medium text-rose-400 transition-colors hover:text-rose-600"
               >
-                Delete listing
+                Delete
               </button>
             </div>
           </div>
