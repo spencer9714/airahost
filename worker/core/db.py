@@ -57,13 +57,25 @@ def complete_job(
     debug: Optional[Dict[str, Any]] = None,
     input_attributes: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Mark a job as ready with results. Idempotent — overwrites existing results."""
+    """Mark a job as ready with results. Idempotent — overwrites existing results.
+
+    Sets completed_at and market_captured_at to the current UTC time.
+    For fresh scrapes both fields are equal.  For forecast_snapshot reports the
+    caller is responsible for overriding market_captured_at after this call if
+    the underlying market basis was captured at a different time.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+
     update: Dict[str, Any] = {
         "status": "ready",
         "core_version": core_version,
         "result_summary": summary,
         "result_calendar": calendar,
         "error_message": None,
+        # Explicit freshness timestamps (migration 010)
+        "completed_at": now,
+        "market_captured_at": now,  # fresh scrape: capture time == completion time
     }
     if debug:
         update["result_core_debug"] = debug

@@ -249,10 +249,11 @@ export async function POST(req: NextRequest) {
     // Check cache — if hit, create report as ready immediately
     let cachedSummary = null;
     let cachedCalendar = null;
+    let cacheEntryCreatedAt: string | null = null;
     try {
       const { data: cacheRows } = await supabase
         .from("pricing_cache")
-        .select("summary, calendar")
+        .select("summary, calendar, created_at")
         .eq("cache_key", cacheKey)
         .gt("expires_at", new Date().toISOString())
         .limit(1);
@@ -260,6 +261,9 @@ export async function POST(req: NextRequest) {
       if (cacheRows && cacheRows.length > 0) {
         cachedSummary = cacheRows[0].summary;
         cachedCalendar = cacheRows[0].calendar;
+        // Preserve when the cache entry was originally created so we can set
+        // market_captured_at correctly — the market data may be older than now().
+        cacheEntryCreatedAt = (cacheRows[0].created_at as string) ?? null;
       }
     } catch {
       // Cache lookup failed — proceed as queued
@@ -285,6 +289,14 @@ export async function POST(req: NextRequest) {
       core_version: isCacheHit ? "cache-hit" : "pending",
       result_summary: cachedSummary,
       result_calendar: cachedCalendar,
+      // Explicit freshness timestamps (migration 010).
+      // Cache hits are finalised immediately by the API, not the worker.
+      // market_captured_at uses the cache entry's created_at so freshness
+      // reflects the actual data age, not when this request arrived.
+      completed_at: isCacheHit ? new Date().toISOString() : null,
+      market_captured_at: isCacheHit
+        ? (cacheEntryCreatedAt ?? new Date().toISOString())
+        : null,
       result_core_debug: {
         cache_hit: isCacheHit,
         cache_key: cacheKey,

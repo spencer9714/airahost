@@ -10,6 +10,7 @@ import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
+import { resolveMarketCapturedAt } from "@/lib/freshness";
 import type {
   PropertyType,
   CalendarDay,
@@ -27,6 +28,10 @@ type LatestReport = {
   status: "ready";
   report_type?: "live_analysis" | "forecast_snapshot";
   created_at: string;
+  /** Set when status transitions to ready (migration 010). Null for older reports. */
+  completed_at?: string | null;
+  /** When Airbnb market data was captured (migration 010). Use for freshness. */
+  market_captured_at?: string | null;
   input_date_start: string;
   input_date_end: string;
   result_summary: {
@@ -532,7 +537,7 @@ export default function DashboardPage() {
 
                 {/* ── Market basis / freshness ── */}
                 <ForecastBasis
-                  linkedAt={activeListing.latestLinkedAt}
+                  marketCapturedAt={resolveMarketCapturedAt(activeReport, activeListing.latestLinkedAt)}
                   dateStart={activeReport.input_date_start}
                   dateEnd={activeReport.input_date_end}
                   reportType={activeReport.report_type}

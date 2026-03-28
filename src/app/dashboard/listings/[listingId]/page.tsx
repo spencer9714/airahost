@@ -9,6 +9,7 @@ import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
+import { resolveMarketCapturedAt } from "@/lib/freshness";
 
 type ReportSnapshot = {
   id: string;
@@ -16,6 +17,8 @@ type ReportSnapshot = {
   status: "queued" | "running" | "ready" | "error";
   report_type?: "live_analysis" | "forecast_snapshot";
   created_at: string;
+  completed_at?: string | null;
+  market_captured_at?: string | null;
   input_date_start: string;
   input_date_end: string;
   result_summary: {
@@ -356,7 +359,10 @@ export default function ListingHistoryPage() {
 
             {/* Market basis */}
             <ForecastBasis
-              linkedAt={latestReadyRow.row.created_at}
+              marketCapturedAt={resolveMarketCapturedAt(
+                latestReadyRow.report,
+                latestReadyRow.row.created_at
+              )}
               dateStart={latestReadyRow.report.input_date_start}
               dateEnd={latestReadyRow.report.input_date_end}
               reportType={latestReadyRow.report.report_type}
