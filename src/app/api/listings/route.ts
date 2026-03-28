@@ -7,6 +7,7 @@ interface ReportSnapshot {
   id: string;
   share_id: string;
   status: string;
+  report_type?: string;
   created_at: string;
   input_date_start: string;
   input_date_end: string;
@@ -84,7 +85,7 @@ export async function GET() {
     const { data: linkedRows, error: linkedError } = await supabase
       .from("listing_reports")
       .select(
-        "saved_listing_id, pricing_report_id, created_at, trigger, pricing_reports:pricing_report_id(id, share_id, status, created_at, input_date_start, input_date_end, result_summary, result_calendar)"
+        "saved_listing_id, pricing_report_id, created_at, trigger, pricing_reports:pricing_report_id(id, share_id, status, report_type, created_at, input_date_start, input_date_end, result_summary, result_calendar)"
       )
       .in("saved_listing_id", listingIds)
       .order("created_at", { ascending: false });
@@ -110,7 +111,7 @@ export async function GET() {
       const { data: fallbackRows } = await admin
         .from("pricing_reports")
         .select(
-          "id, share_id, status, created_at, input_date_start, input_date_end, result_summary, result_calendar"
+          "id, share_id, status, report_type, created_at, input_date_start, input_date_end, result_summary, result_calendar"
         )
         .in("id", missingReportIds);
 

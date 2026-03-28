@@ -5,13 +5,16 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
+import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
+import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { getSupabaseBrowser } from "@/lib/supabase";
-import type { RecommendedPrice } from "@/lib/schemas";
+import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
 
 type ReportSnapshot = {
   id: string;
   share_id: string;
   status: "queued" | "running" | "ready" | "error";
+  report_type?: "live_analysis" | "forecast_snapshot";
   created_at: string;
   input_date_start: string;
   input_date_end: string;
@@ -19,6 +22,7 @@ type ReportSnapshot = {
     nightlyMedian?: number;
     recommendedPrice?: RecommendedPrice;
     comparableListings?: Array<unknown> | null;
+    compsSummary?: { usedForPricing?: number } | null;
     benchmarkInfo?: {
       benchmarkUsed?: boolean | null;
       benchmarkFetchStatus?: string | null;
@@ -32,6 +36,7 @@ type ReportSnapshot = {
       } | null;
     } | null;
   } | null;
+  result_calendar?: CalendarDay[];
   error_message?: string | null;
 };
 
@@ -68,6 +73,14 @@ export default function ListingHistoryPage() {
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [rerunningId, setRerunningId] = useState<string | null>(null);
+  const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
+  const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
+  const [customEnd, setCustomEnd] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 30);
+    return d.toISOString().split("T")[0];
+  });
+  const [isRunningCustom, setIsRunningCustom] = useState(false);
 
   // Preferred comps state (list)
   const [showPinnedComps, setShowPinnedComps] = useState(false);
@@ -174,6 +187,38 @@ export default function ListingHistoryPage() {
     }
   }
 
+  async function handleRunCustomAnalysis() {
+    if (!customStart || !customEnd) return;
+    setIsRunningCustom(true);
+    try {
+      const res = await fetch(`/api/listings/${listingId}/rerun`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dates: { startDate: customStart, endDate: customEnd } }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      const data = await res.json();
+      if (data.shareId) {
+        router.push(`/r/${data.shareId}`);
+      } else {
+        await loadData();
+      }
+    } catch {
+      // silently fail; user can retry
+    } finally {
+      setIsRunningCustom(false);
+    }
+  }
+
+  // Derive latest ready report for the forecast section.
+  const latestReadyRow = useMemo(() => {
+    for (const row of rows) {
+      const report = getReport(row);
+      if (report?.status === "ready") return { row, report };
+    }
+    return null;
+  }, [rows]);
+
   async function handleSavePinnedComps() {
     const valid = pinnedCompsList.filter((c) => c.listingUrl.includes("airbnb.com/rooms/"));
     setPinnedCompSaving(true);
@@ -232,16 +277,14 @@ export default function ListingHistoryPage() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-6 py-10">
-      {/* Header */}
+
+      {/* ── Header ── */}
       <div>
-        <Link
-          href="/dashboard"
-          className="text-sm text-muted hover:text-foreground"
-        >
-          &larr; Dashboard
+        <Link href="/dashboard" className="text-sm text-muted hover:text-foreground">
+          ← Dashboard
         </Link>
-        <h1 className="mt-2 text-2xl font-bold">
-          {listing?.name ?? "Listing"} — Report History
+        <h1 className="mt-2 text-2xl font-bold tracking-tight">
+          {listing?.name ?? "Listing"}
         </h1>
         {listing?.input_address && (
           <p className="mt-0.5 text-sm text-muted">{listing.input_address}</p>
@@ -254,6 +297,139 @@ export default function ListingHistoryPage() {
         </Card>
       )}
 
+      {/* ════════════════════════════════════════
+          Section 1: Current Forecast
+      ════════════════════════════════════════ */}
+      <div className="space-y-4">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+          Current Forecast
+        </p>
+
+        {latestReadyRow ? (
+          <>
+            {/* Pricing summary strip */}
+            {(() => {
+              const r = latestReadyRow.report;
+              const suggested = r.result_summary?.recommendedPrice?.nightly;
+              const median = r.result_summary?.nightlyMedian;
+              return (suggested != null || median != null) ? (
+                <div className="flex items-baseline gap-3 rounded-2xl border border-border bg-white px-6 py-4">
+                  {suggested != null && (
+                    <div>
+                      <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">
+                        Suggested nightly
+                      </p>
+                      <p className="mt-0.5 text-3xl font-bold tracking-tight text-foreground">
+                        ${suggested}
+                      </p>
+                    </div>
+                  )}
+                  {median != null && (
+                    <div className="ml-4 border-l border-gray-100 pl-4">
+                      <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">
+                        Market median
+                      </p>
+                      <p className="mt-0.5 text-lg font-semibold text-foreground/60">
+                        ${median}
+                      </p>
+                    </div>
+                  )}
+                  <Link
+                    href={`/r/${latestReadyRow.report.share_id}`}
+                    className="ml-auto shrink-0 text-xs font-semibold text-accent hover:underline"
+                  >
+                    View full report →
+                  </Link>
+                </div>
+              ) : null;
+            })()}
+
+            {/* 14-day pricing calendar */}
+            {latestReadyRow.report.result_calendar &&
+              latestReadyRow.report.result_calendar.length > 0 && (
+                <PricingHeatmap
+                  calendar={latestReadyRow.report.result_calendar}
+                  pricingMode={pricingMode}
+                  onModeChange={setPricingMode}
+                />
+              )}
+
+            {/* Market basis */}
+            <ForecastBasis
+              linkedAt={latestReadyRow.row.created_at}
+              dateStart={latestReadyRow.report.input_date_start}
+              dateEnd={latestReadyRow.report.input_date_end}
+              reportType={latestReadyRow.report.report_type}
+              shareId={latestReadyRow.report.share_id}
+              compsUsed={
+                latestReadyRow.report.result_summary?.compsSummary?.usedForPricing ?? null
+              }
+            />
+          </>
+        ) : (
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-12 text-center">
+            <p className="text-sm font-medium text-foreground/50">No forecast yet</p>
+            <p className="mt-1 text-xs text-foreground/35">
+              Run a live analysis below to generate your first pricing forecast.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ════════════════════════════════════════
+          Section 2: Run Custom Analysis
+      ════════════════════════════════════════ */}
+      <div className="space-y-3">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+          Run Custom Analysis
+        </p>
+        <div className="rounded-2xl border border-border bg-white p-5 sm:p-6">
+          <p className="mb-0.5 text-sm font-semibold text-foreground/80">
+            Fresh live analysis
+          </p>
+          <p className="mb-4 text-xs text-foreground/50">
+            Scrapes fresh Airbnb market data for any date range. You can also re-analyse
+            dates already covered by the current forecast. Results open as a full report.
+          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <label className="flex-1 space-y-1.5">
+              <span className="block text-xs font-medium text-foreground/50">Start date</span>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </label>
+            <label className="flex-1 space-y-1.5">
+              <span className="block text-xs font-medium text-foreground/50">End date</span>
+              <input
+                type="date"
+                value={customEnd}
+                min={customStart}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={isRunningCustom || !customStart || !customEnd}
+              onClick={handleRunCustomAnalysis}
+              className="shrink-0 rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
+            >
+              {isRunningCustom ? "Starting…" : "Run analysis"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ════════════════════════════════════════
+          Section 3: Benchmark / Pinned comps
+      ════════════════════════════════════════ */}
+      <div className="space-y-3">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+          Benchmark Settings
+        </p>
       {/* Benchmark / Pinned comps card */}
       {(() => {
         const currentComps = listing?.input_attributes?.preferredComps ?? [];
@@ -412,28 +588,39 @@ export default function ListingHistoryPage() {
           </Card>
         );
       })()}
+      </div>{/* end Section 3 */}
 
-      {/* Filters */}
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-muted">Filter:</span>
-        {(["all", "ready", "error"] as StatusFilter[]).map((f) => (
-          <button
-            key={f}
-            type="button"
-            onClick={() => setStatusFilter(f)}
-            className={`rounded-lg px-3 py-1.5 text-xs transition-colors ${
-              statusFilter === f
-                ? "bg-foreground text-white"
-                : "bg-white text-muted border border-border hover:text-foreground"
-            }`}
-          >
-            {f === "all" ? "All" : f === "ready" ? "Ready" : "Error"}
-          </button>
-        ))}
-        <span className="ml-auto text-xs text-muted">
-          {filteredRows.length} report{filteredRows.length !== 1 ? "s" : ""}
-        </span>
-      </div>
+      {/* ════════════════════════════════════════
+          Section 4: Live Analysis Report History
+      ════════════════════════════════════════ */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+            Live Analysis History
+          </p>
+          <span className="text-xs text-muted">
+            {filteredRows.length} report{filteredRows.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+
+        {/* Filters */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted">Filter:</span>
+          {(["all", "ready", "error"] as StatusFilter[]).map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setStatusFilter(f)}
+              className={`rounded-lg px-3 py-1.5 text-xs transition-colors ${
+                statusFilter === f
+                  ? "bg-foreground text-white"
+                  : "bg-white text-muted border border-border hover:text-foreground"
+              }`}
+            >
+              {f === "all" ? "All" : f === "ready" ? "Ready" : "Error"}
+            </button>
+          ))}
+        </div>
 
       {/* Report list */}
       {filteredRows.length === 0 ? (
@@ -597,6 +784,8 @@ export default function ListingHistoryPage() {
           </div>
         </Card>
       )}
+      </div>{/* end Section 4 */}
+
     </div>
   );
 }

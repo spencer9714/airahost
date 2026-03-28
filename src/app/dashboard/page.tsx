@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import { RecommendationBanner } from "@/components/dashboard/RecommendationBanner";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
+import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
 import type {
@@ -24,6 +25,7 @@ type LatestReport = {
   id: string;
   share_id: string;
   status: "ready";
+  report_type?: "live_analysis" | "forecast_snapshot";
   created_at: string;
   input_date_start: string;
   input_date_end: string;
@@ -107,6 +109,13 @@ export default function DashboardPage() {
   const [rerunningId, setRerunningId] = useState<string | null>(null);
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
   const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
+  const [showCustomPanel, setShowCustomPanel] = useState(false);
+  const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
+  const [customEnd, setCustomEnd] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 30);
+    return d.toISOString().split("T")[0];
+  });
 
   const loadDashboardData = useCallback(async () => {
     setLoading(true);
@@ -373,19 +382,86 @@ export default function DashboardPage() {
             )}
           </section>
 
-          {/* ── Right: Pricing Insights main panel ── */}
+          {/* ── Right: Forecast main panel ── */}
           <section>
             {activeListing && activeSummary && activeReport ? (
               <div className="space-y-4">
-                {/* Section label */}
+
+                {/* ── Panel header ── */}
                 <div className="flex items-center justify-between px-0.5">
-                  <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-                    Pricing Insights
-                  </p>
-                  <p className="text-xs text-foreground/35">{activeListing.name}</p>
+                  <div className="flex items-center gap-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+                      30-Day Forecast
+                    </p>
+                    {/* Report type badge */}
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                      activeReport.report_type === "forecast_snapshot"
+                        ? "bg-violet-100 text-violet-700"
+                        : "bg-blue-50 text-blue-600"
+                    }`}>
+                      {activeReport.report_type === "forecast_snapshot" ? "Forecast" : "Live"}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomPanel((v) => !v)}
+                    className={`text-xs font-semibold transition-colors ${
+                      showCustomPanel
+                        ? "text-foreground/55"
+                        : "text-blue-600 hover:text-blue-700"
+                    }`}
+                  >
+                    {showCustomPanel ? "Cancel" : "Run custom analysis ↗"}
+                  </button>
                 </div>
 
-                {/* Active job banner — show above pricing when a newer run is in flight */}
+                {/* ── Custom analysis panel ── */}
+                {showCustomPanel && (
+                  <div className="rounded-2xl border border-blue-100 bg-blue-50/40 p-5">
+                    <p className="mb-0.5 text-sm font-semibold text-foreground/80">
+                      Custom Live Analysis
+                    </p>
+                    <p className="mb-4 text-xs text-foreground/50">
+                      Scrapes fresh Airbnb market data for any date range. You&apos;ll be taken to the full report.
+                    </p>
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">Start date</span>
+                        <input
+                          type="date"
+                          value={customStart}
+                          onChange={(e) => setCustomStart(e.target.value)}
+                          className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                        />
+                      </label>
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">End date</span>
+                        <input
+                          type="date"
+                          value={customEnd}
+                          min={customStart}
+                          onChange={(e) => setCustomEnd(e.target.value)}
+                          className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={!customStart || !customEnd || rerunningId === activeListing.id}
+                        onClick={() => {
+                          void handleRunAnalysis(activeListing.id, {
+                            startDate: customStart,
+                            endDate: customEnd,
+                          });
+                        }}
+                        className="shrink-0 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
+                      >
+                        {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Active job banner ── */}
                 {activeListing.activeJob && (
                   <div
                     className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-xs font-medium ${
@@ -408,6 +484,7 @@ export default function DashboardPage() {
                   </div>
                 )}
 
+                {/* ── Price summary ── */}
                 <RecommendationBanner
                   listingName={activeListing.name}
                   summary={activeSummary}
@@ -444,6 +521,7 @@ export default function DashboardPage() {
                   lastAnalysisDate={activeListing.latestLinkedAt}
                 />
 
+                {/* ── 14-day pricing calendar ── */}
                 {activeCalendar.length > 0 && (
                   <PricingHeatmap
                     calendar={activeCalendar}
@@ -452,6 +530,17 @@ export default function DashboardPage() {
                   />
                 )}
 
+                {/* ── Market basis / freshness ── */}
+                <ForecastBasis
+                  linkedAt={activeListing.latestLinkedAt}
+                  dateStart={activeReport.input_date_start}
+                  dateEnd={activeReport.input_date_end}
+                  reportType={activeReport.report_type}
+                  shareId={activeReport.share_id}
+                  compsUsed={activeSummary.compsSummary?.usedForPricing ?? null}
+                />
+
+                {/* ── Smart alerts ── */}
                 <SmartAlerts
                   summary={activeSummary}
                   compsSummary={activeSummary.compsSummary ?? null}
@@ -460,15 +549,22 @@ export default function DashboardPage() {
               </div>
             ) : activeListing ? (
               /* Listing selected but no ready report */
-              <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-16 text-center">
+              <div className="space-y-4">
+                {/* Panel header */}
+                <div className="px-0.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+                    30-Day Forecast
+                  </p>
+                </div>
+
                 {activeListing.activeJob?.status === "running" ||
                 activeListing.activeJob?.status === "queued" ? (
-                  <>
+                  <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-14 text-center">
                     <span className="mb-3 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-                    <p className="text-sm font-semibold text-foreground/60">
-                      {activeListing.name}
+                    <p className="text-sm font-semibold text-foreground/60">Analysis in progress</p>
+                    <p className="mt-1 text-sm text-foreground/40">
+                      Your first forecast will appear here when complete.
                     </p>
-                    <p className="mt-1 text-sm text-foreground/40">Analysis in progress…</p>
                     {activeListing.activeJob.shareId && (
                       <Link
                         href={`/r/${activeListing.activeJob.shareId}`}
@@ -477,60 +573,63 @@ export default function DashboardPage() {
                         View live progress →
                       </Link>
                     )}
-                  </>
-                ) : activeListing.activeJob?.status === "error" ? (
-                  <>
-                    <p className="text-sm font-semibold text-foreground/60">
-                      {activeListing.name}
-                    </p>
-                    <p className="mt-1 text-sm text-foreground/40">
-                      Last analysis failed. Run a new one to see insights.
-                    </p>
-                    <button
-                      className="mt-4 text-sm font-medium text-accent hover:underline"
-                      onClick={() => {
-                        const today = new Date().toISOString().split("T")[0];
-                        const end = new Date();
-                        end.setDate(end.getDate() + 30);
-                        void handleRunAnalysis(activeListing.id, {
-                          startDate: today,
-                          endDate: end.toISOString().split("T")[0],
-                        });
-                      }}
-                    >
-                      Re-run analysis →
-                    </button>
-                  </>
+                  </div>
                 ) : (
-                  <>
+                  /* No report at all — show CTA with date picker */
+                  <div className="rounded-2xl border border-dashed border-border bg-white p-8">
                     <p className="text-sm font-semibold text-foreground/60">
-                      {activeListing.name}
+                      No forecast yet for {activeListing.name}
                     </p>
                     <p className="mt-1 text-sm text-foreground/40">
-                      No analysis yet. Run one to see pricing insights.
+                      Run your first live analysis to generate a pricing forecast.
                     </p>
-                    <button
-                      className="mt-4 text-sm font-medium text-accent hover:underline"
-                      onClick={() => {
-                        const today = new Date().toISOString().split("T")[0];
-                        const end = new Date();
-                        end.setDate(end.getDate() + 30);
-                        void handleRunAnalysis(activeListing.id, {
-                          startDate: today,
-                          endDate: end.toISOString().split("T")[0],
-                        });
-                      }}
-                    >
-                      Run analysis →
-                    </button>
-                  </>
+                    <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end">
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">Start date</span>
+                        <input
+                          type="date"
+                          value={customStart}
+                          onChange={(e) => setCustomStart(e.target.value)}
+                          className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
+                        />
+                      </label>
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">End date</span>
+                        <input
+                          type="date"
+                          value={customEnd}
+                          min={customStart}
+                          onChange={(e) => setCustomEnd(e.target.value)}
+                          className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={rerunningId === activeListing.id}
+                        onClick={() => {
+                          void handleRunAnalysis(activeListing.id, {
+                            startDate: customStart,
+                            endDate: customEnd,
+                          });
+                        }}
+                        className="shrink-0 rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
+                      >
+                        {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
+                      </button>
+                    </div>
+                    {activeListing.activeJob?.status === "error" && (
+                      <p className="mt-3 text-xs text-rose-600">
+                        Last analysis failed. Adjust dates or try again.
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             ) : (
               /* Nothing selected */
               <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-16 text-center">
                 <p className="text-sm text-foreground/35">
-                  Select a listing to view pricing insights
+                  Select a listing to view its forecast
                 </p>
               </div>
             )}
@@ -543,7 +642,7 @@ export default function DashboardPage() {
         {recentReports.length > 0 && (
           <section className="mt-6">
             <p className="mb-2.5 px-0.5 text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-              Recent Reports
+              Recent Live Analysis Reports
             </p>
             <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm divide-y divide-border">
               {recentReports.slice(0, 5).map((item) => (
