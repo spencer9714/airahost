@@ -16,7 +16,7 @@ jobs:
 
     # IMPORTANT: If your secrets are stored in a GitHub Environment (e.g., 'production'),
     # you must uncomment the following line and provide the matching environment name:
-    # environment: production
+    environment: production
 
     permissions:
       contents: read
