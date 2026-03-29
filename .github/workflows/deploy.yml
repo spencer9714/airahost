@@ -10,48 +10,40 @@ on:
 jobs:
   deploy:
     name: Deploy Worker to Server
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     # Only run if the Docker Publish workflow was successful
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    # IMPORTANT: If your secrets are stored in a GitHub Environment (e.g., 'production'),
+    # you must uncomment the following line and provide the matching environment name:
+    # environment: production
+
     permissions:
+      contents: read
       packages: read
 
     steps:
       - name: Get commit SHA and repository name from workflow_run
         run: |
           echo "GITHUB_SHA_FROM_RUN=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_ENV
-          echo "REPO_LOWER=${{ github.repository }}" >> $GITHUB_ENV # Use github.repository directly for consistency
+          echo "REPO_LOWER=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
       - name: Checkout repository (to get deploy.sh)
         uses: actions/checkout@v4
-
-      - name: Copy deploy script to Server
-        uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USERNAME }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "deploy.sh"
-          target: "~/"
+          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Deploy to Server via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USERNAME }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            # Ensure the deploy script is executable
-            chmod +x ~/deploy.sh
-
-            # Execute the deploy script on the remote server
-            # Pass necessary environment variables to the script
-            # These secrets must be configured in your GitHub repository settings
-            SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
-            SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
-            CDP_URL="${{ secrets.CDP_URL }}" \
-            GITHUB_REPOSITORY="${{ env.REPO_LOWER }}" \
-            GITHUB_SHA="${{ env.GITHUB_SHA_FROM_RUN }}" \
-            GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-            GITHUB_ACTOR="${{ github.actor }}" \
-            ~/deploy.sh
+      - name: Execute deploy script locally
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CDP_URL: ${{ secrets.CDP_URL }}
+          GITHUB_REPOSITORY: ${{ env.REPO_LOWER }}
+          GITHUB_SHA: ${{ env.GITHUB_SHA_FROM_RUN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          # 直接在伺服器本地端賦予權限並執行
+          # Provide necessary environment variables to the deploy script
+          chmod +x ./deploy.sh
+          ./deploy.sh
