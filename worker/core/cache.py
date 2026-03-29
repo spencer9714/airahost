@@ -17,6 +17,10 @@ from supabase import Client
 
 CACHE_TTL_HOURS = 24
 
+# Increment this when the pricing algorithm or cache payload structure changes.
+# Must match CACHE_SCHEMA_VERSION in src/lib/cacheKey.ts.
+CACHE_SCHEMA_VERSION = "v1"
+
 
 def compute_cache_key(
     address: str,
@@ -31,22 +35,35 @@ def compute_cache_key(
     Compute a stable cache key from report inputs.
     Canonical JSON ensures deterministic ordering.
     """
+    # Use the first enabled comp in preferredComps as the benchmark URL for cache keying.
+    preferred_comp_listing_url = ""
+    preferred_comps_raw = attributes.get("preferredComps")
+    if isinstance(preferred_comps_raw, list):
+        for pc in preferred_comps_raw:
+            if isinstance(pc, dict) and pc.get("enabled", True):
+                url = str(pc.get("listingUrl") or "").strip()
+                if url:
+                    preferred_comp_listing_url = url
+                    break
+
     payload = {
+        "address": address,
+        "bathrooms": attributes.get("bathrooms", 0),
+        "bedrooms": attributes.get("bedrooms", 0),
+        "cacheSchemaVersion": CACHE_SCHEMA_VERSION,
+        "endDate": end_date,
         "inputMode": input_mode,
         "listing_url": listing_url or "",
-        "address": address,
-        "propertyType": attributes.get("propertyType", ""),
-        "bedrooms": attributes.get("bedrooms", 0),
-        "bathrooms": attributes.get("bathrooms", 0),
         "maxGuests": attributes.get("maxGuests", 0),
-        "startDate": start_date,
-        "endDate": end_date,
-        "weeklyDiscountPct": discount_policy.get("weeklyDiscountPct", 0),
-        "monthlyDiscountPct": discount_policy.get("monthlyDiscountPct", 0),
-        "refundable": discount_policy.get("refundable", True),
-        "nonRefundableDiscountPct": discount_policy.get("nonRefundableDiscountPct", 0),
-        "stackingMode": discount_policy.get("stackingMode", "compound"),
         "maxTotalDiscountPct": discount_policy.get("maxTotalDiscountPct", 40),
+        "monthlyDiscountPct": discount_policy.get("monthlyDiscountPct", 0),
+        "nonRefundableDiscountPct": discount_policy.get("nonRefundableDiscountPct", 0),
+        "preferred_comp_listing_url": preferred_comp_listing_url,
+        "propertyType": attributes.get("propertyType", ""),
+        "refundable": discount_policy.get("refundable", True),
+        "stackingMode": discount_policy.get("stackingMode", "compound"),
+        "startDate": start_date,
+        "weeklyDiscountPct": discount_policy.get("weeklyDiscountPct", 0),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()[:32]

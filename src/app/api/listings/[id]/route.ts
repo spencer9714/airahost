@@ -134,7 +134,7 @@ export async function PATCH(
 
     const { data: currentListing } = await supabase
       .from("saved_listings")
-      .select("id, name, input_address")
+      .select("id, name, input_address, input_attributes")
       .eq("id", id)
       .eq("user_id", user.id)
       .single();
@@ -163,6 +163,19 @@ export async function PATCH(
       updates.default_start_date = parsed.data.defaultStartDate;
     if (parsed.data.defaultEndDate !== undefined)
       updates.default_end_date = parsed.data.defaultEndDate;
+    // preferredComps is stored inside input_attributes as a sub-field
+    if (parsed.data.preferredComps !== undefined) {
+      const currentAttrs = ((currentListing?.input_attributes ?? {}) as Record<string, unknown>);
+      // Apply on top of any inputAttributes update already staged
+      const baseAttrs = (updates.input_attributes as Record<string, unknown> | undefined) ?? currentAttrs;
+      if (parsed.data.preferredComps === null || parsed.data.preferredComps.length === 0) {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { preferredComps: _removed, ...rest } = baseAttrs;
+        updates.input_attributes = rest;
+      } else {
+        updates.input_attributes = { ...baseAttrs, preferredComps: parsed.data.preferredComps };
+      }
+    }
 
     const { data: listing, error } = await supabase
       .from("saved_listings")

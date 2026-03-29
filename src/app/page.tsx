@@ -19,7 +19,7 @@ const steps = [
     number: "3",
     title: "Get your revenue report",
     description:
-      "See your market position, daily pricing calendar, and actionable revenue insights.",
+      "See your suggested nightly rate, market snapshot, 30-day pricing calendar, and smart pricing signals.",
   },
 ];
 

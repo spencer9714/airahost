@@ -30,7 +30,7 @@ export const amenityEnum = z.enum([
 ]);
 
 export const listingInputSchema = z.object({
-  address: z.string().min(5, "Please enter a valid address"),
+  address: z.string().min(1, "Please enter a city or ZIP code"),
   propertyType: propertyTypeEnum,
   bedrooms: z.number().int().min(0).max(20),
   bathrooms: z.number().min(0.5).max(20).multipleOf(0.5),
@@ -83,7 +83,22 @@ export const lastMinuteStrategyPreferenceSchema = z.object({
 
 // ── Input Mode ──────────────────────────────────────────────────
 
-export const inputModeEnum = z.enum(["url", "criteria"]);
+export const inputModeEnum = z.enum(["url", "criteria", "criteria-by-city", "criteria-by-zip"]);
+
+// ── Preferred Comparables ────────────────────────────────────────
+
+export const preferredCompSchema = z.object({
+  listingUrl: z.string().url("Please enter a valid Airbnb listing URL"),
+  name: z.string().max(100).optional(),
+  note: z.string().max(500).optional(),
+  enabled: z.boolean().default(true),
+});
+
+/** A list of up to 10 preferred comparable listings. */
+export const preferredCompsSchema = z.array(preferredCompSchema).max(10);
+
+export type PreferredComp = z.infer<typeof preferredCompSchema>;
+export type PreferredComps = z.infer<typeof preferredCompsSchema>;
 
 // ── Full Report Request ─────────────────────────────────────────
 
@@ -94,6 +109,7 @@ export const createReportRequestSchema = z.object({
   discountPolicy: discountPolicySchema,
   lastMinuteStrategy: lastMinuteStrategyPreferenceSchema.optional(),
   listingUrl: z.string().url().optional(),
+  preferredComps: preferredCompsSchema.optional(),
   saveToListings: z
     .object({
       enabled: z.boolean().default(false),
@@ -178,6 +194,12 @@ export interface CompsSummary {
   sampledDays?: number;
   interpolatedDays?: number;
   missingDays?: number;
+  /** Comps excluded by the similarity floor (score < filterFloor). Present on new reports only. */
+  belowSimilarityFloor?: number;
+  /** The minimum similarity score required for a comp to enter pricing. */
+  filterFloor?: number;
+  /** Days where only 1–2 comps survived the similarity floor (low confidence). */
+  lowCompConfidenceDays?: number;
 }
 
 export interface PriceDistribution {
@@ -197,12 +219,27 @@ export interface ComparableListing {
   bedrooms: number;
   baths: number;
   nightlyPrice: number;
+  /** Nightly price keyed by date ("YYYY-MM-DD"). Present on new reports only. */
+  priceByDate?: Record<string, number>;
   currency: string;
   similarity: number; // 0–1
   rating: number | null;
   reviews: number | null;
   location: string | null;
   url: string | null;
+  /**
+   * Number of nights that the scraped Airbnb card price covered.
+   * 1 = "for 1 night" or "/night" — price is already per-night, no change.
+   * 2 = "for 2 nights" — original price was a 2-night total; divided by 2.
+   * N = "for N nights" — original price was an N-night total; divided by N.
+   * Absent on old reports (treat as 1).
+   */
+  queryNights?: number;
+  /**
+   * Number of sampled days on which this comp appeared in the pricing pool.
+   * Higher = more consistently similar across dates. Present on new reports only.
+   */
+  usedInPricingDays?: number;
 }
 
 export interface RecommendedPrice {
@@ -211,6 +248,94 @@ export interface RecommendedPrice {
   weekendEstimate: number | null;
   discountApplied: number;
   notes: string;
+}
+
+// ── Benchmark Transparency ───────────────────────────────────────
+
+export interface BenchmarkInfo {
+  benchmarkUsed: boolean;
+  benchmarkUrl: string;
+  /** "search_hit" | "direct_page" | "failed" */
+  benchmarkFetchStatus: string;
+  benchmarkFetchMethod: string;
+  avgBenchmarkPrice: number | null;
+  avgMarketPrice: number | null;
+  /** Raw market offset vs benchmark, in percent (e.g. +10.5 or -6.2) */
+  marketAdjustmentPct: number | null;
+  /** Nominal market weight constant (baseline, before confidence/guardrail adjustments) */
+  appliedMarketWeight: number;
+  /**
+   * Average effective market weight actually applied across sampled days.
+   * Lower than appliedMarketWeight when benchmark confidence is high and
+   * comps are plentiful; higher when confidence is low (market corrects more).
+   */
+  effectiveMarketWeight?: number | null;
+  maxAdjCap: number;
+  /**
+   * Structural similarity score (0–1) between the benchmark listing and the
+   * user's target property attributes (bedrooms, baths, accommodates, type).
+   * 1.0 = perfect match; lower = more different.
+   * null when user attributes were not available for comparison.
+   */
+  benchmarkTargetSimilarity?: number | null;
+  /**
+   * Human-readable classification of the benchmark-to-target similarity.
+   * "high_match"          ≥ 0.70 — benchmark is structurally suitable
+   * "moderate_mismatch"   0.45–0.70 — some structural differences
+   * "strong_mismatch"     < 0.45 — benchmark may be a poor anchor
+   * "unknown"             user attributes not provided
+   */
+  benchmarkMismatchLevel?: "high_match" | "moderate_mismatch" | "strong_mismatch" | "unknown" | null;
+  /** Count of sampled days where benchmark vs market gap exceeded 40% */
+  outlierDays?: number | null;
+  /**
+   * True when benchmark and market are in significant conflict:
+   * outlier days > 30% of sampled days, or secondary comps signal "divergent".
+   */
+  conflictDetected?: boolean | null;
+  fallbackReason: string | null;
+  fetchStats: {
+    searchHits: number;
+    directFetches: number;
+    failed: number;
+    totalDays: number;
+    /** Phase 2 — confidence breakdown from extract_nightly_price_from_listing_page() */
+    highConfidenceDays?: number;
+    mediumConfidenceDays?: number;
+    lowConfidenceDays?: number;
+  };
+  /**
+   * Phase 2 stub — preferredComps[1:] prices collected from search results.
+   * Observational only; does NOT affect pricing formula.
+   */
+  secondaryComps?: Array<{
+    url: string;
+    avgPrice: number | null;
+    daysFound: number;
+    totalDays: number;
+  }> | null;
+  /**
+   * Phase 2 stub — whether secondary comps agree with benchmark or market.
+   * "strong"    secondary comps cluster near benchmark price (±20%)
+   * "divergent" secondary comps cluster near market price instead
+   * "mixed"     no clear consensus
+   */
+  consensusSignal?: "strong" | "mixed" | "divergent" | null;
+}
+
+// ── Worker Progress ──────────────────────────────────────────────
+
+export interface ProgressMeta {
+  /** 0–100 percentage complete */
+  pct: number;
+  /** Stage identifier: "connecting" | "extracting_target" | "fetching_benchmark" | "searching_comps" | "pricing" | "saving_results" | "completed" */
+  stage: string;
+  /** Human-readable status message for the frontend */
+  message: string;
+  /** ISO-8601 UTC timestamp when this progress was last written */
+  updated_at: string;
+  /** Optional estimated seconds remaining */
+  est_seconds_remaining?: number | null;
 }
 
 // ── Summary & Report ────────────────────────────────────────────
@@ -240,6 +365,7 @@ export interface ReportSummary {
   priceDistribution?: PriceDistribution;
   recommendedPrice?: RecommendedPrice;
   comparableListings?: ComparableListing[];
+  benchmarkInfo?: BenchmarkInfo;
 }
 
 export interface PricingReport {
@@ -253,6 +379,7 @@ export interface PricingReport {
     inputMode?: InputMode;
     listingUrl?: string | null;
     lastMinuteStrategy?: LastMinuteStrategyPreference;
+    preferredComps?: PreferredComps | null;
   };
   inputDateStart: string;
   inputDateEnd: string;
@@ -268,6 +395,11 @@ export interface PricingReport {
   priceDistribution?: PriceDistribution | null;
   recommendedPrice?: RecommendedPrice | null;
   comparableListings?: ComparableListing[] | null;
+  benchmarkInfo?: BenchmarkInfo | null;
+  /** Worker progress snapshot. Null until the worker first calls update_progress(). */
+  progressMeta?: ProgressMeta | null;
+  /** ISO-8601 UTC timestamp of last worker heartbeat. Null for cached/old reports. */
+  workerHeartbeatAt?: string | null;
 }
 
 // ── Saved Listings ─────────────────────────────────────────────
@@ -290,6 +422,7 @@ export const updateListingSchema = z.object({
   defaultDateMode: dateModeEnum.optional(),
   defaultStartDate: z.string().nullable().optional(),
   defaultEndDate: z.string().nullable().optional(),
+  preferredComps: preferredCompsSchema.nullable().optional(),
 });
 
 export interface SavedListing {
@@ -297,7 +430,7 @@ export interface SavedListing {
   userId: string;
   name: string;
   inputAddress: string;
-  inputAttributes: ListingInput;
+  inputAttributes: ListingInput & { preferredComps?: PreferredComps | null };
   defaultDiscountPolicy: DiscountPolicy | null;
   defaultDateMode: DateMode;
   defaultStartDate: string | null;
@@ -320,6 +453,7 @@ export const rerunListingSchema = z.object({
   discountPolicy: discountPolicySchema.optional(),
   inputMode: inputModeEnum.optional(),
   listingUrl: z.string().url().optional(),
+  preferredComps: preferredCompsSchema.optional(),
 });
 
 export const listingAnalysisSchema = z.object({

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createReportRequestSchema, listingAnalysisSchema } from "@/lib/schemas";
+import { createReportRequestSchema, listingAnalysisSchema, type PreferredComps } from "@/lib/schemas";
 import { generateShareId } from "@/lib/shareId";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
@@ -65,13 +65,15 @@ export async function POST(req: NextRequest) {
       }
 
       const attrs = (listing.input_attributes ?? {}) as Record<string, unknown>;
-      const fallbackInputMode =
-        attrs.inputMode === "url" || attrs.inputMode === "criteria"
-          ? attrs.inputMode
-          : "criteria";
+      const VALID_INPUT_MODES = ["url", "criteria", "criteria-by-city", "criteria-by-zip"];
+      const fallbackInputMode = VALID_INPUT_MODES.includes(attrs.inputMode as string)
+        ? (attrs.inputMode as string)
+        : "criteria";
       const inputMode = listingUrl ? "url" : fallbackInputMode;
       const discountPolicy = listing.default_discount_policy ?? {};
       const address = listing.input_address;
+      // Carry preferred comps from the saved listing's stored attributes
+      const savedPreferredComps = (attrs.preferredComps as PreferredComps | undefined) ?? null;
       const admin = getSupabaseAdmin();
 
       const cacheKey = computeCacheKey(
@@ -84,25 +86,12 @@ export async function POST(req: NextRequest) {
         inputMode
       );
 
-      let cachedSummary = null;
-      let cachedCalendar = null;
-      try {
-        const { data: cacheRows } = await admin
-          .from("pricing_cache")
-          .select("summary, calendar")
-          .eq("cache_key", cacheKey)
-          .gt("expires_at", new Date().toISOString())
-          .limit(1);
-        if (cacheRows && cacheRows.length > 0) {
-          cachedSummary = cacheRows[0].summary;
-          cachedCalendar = cacheRows[0].calendar;
-        }
-      } catch {
-        // Cache miss
-      }
-
-      const isCacheHit = cachedSummary !== null;
+      // Dashboard reruns always queue a fresh job — never serve a cache hit.
+      // Serving cache here would silently skip the worker, making "Rerun" a no-op
+      // whenever the cache is still valid (24 h TTL).
       const shareId = generateShareId();
+
+      const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
 
       const report = {
         id: crypto.randomUUID(),
@@ -110,18 +99,24 @@ export async function POST(req: NextRequest) {
         share_id: shareId,
         listing_id: listingId,
         input_address: address,
-        input_attributes: { ...listing.input_attributes, inputMode },
+        target_env: targetEnv,
+        input_attributes: {
+          ...listing.input_attributes,
+          inputMode,
+          ...(savedPreferredComps?.length ? { preferredComps: savedPreferredComps } : {}),
+        },
         input_date_start: dateRange.startDate,
         input_date_end: dateRange.endDate,
         discount_policy: discountPolicy,
         input_listing_url: listingUrl || null,
         cache_key: cacheKey,
-        status: isCacheHit ? "ready" : "queued",
-        core_version: isCacheHit ? "cache-hit" : "pending",
-        result_summary: cachedSummary,
-        result_calendar: cachedCalendar,
+        status: "queued",
+        core_version: "pending",
+        result_summary: null,
+        result_calendar: null,
         result_core_debug: {
-          cache_hit: isCacheHit,
+          cache_hit: false,
+          force_rerun: true,
           cache_key: cacheKey,
           request_source: "api/reports (listing shorthand)",
           input_mode: inputMode,
@@ -189,6 +184,7 @@ export async function POST(req: NextRequest) {
       discountPolicy,
       lastMinuteStrategy,
       listingUrl,
+      preferredComps,
       saveToListings,
     } = parsed.data;
     const shareId = generateShareId();
@@ -226,10 +222,23 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseAdmin();
 
-    // Compute cache key
+    const enrichedInputAttributes = {
+      ...listing,
+      inputMode,
+      listingUrl: listingUrl || null,
+      preferredComps: preferredComps ?? null,
+      lastMinuteStrategy: lastMinuteStrategy ?? {
+        mode: "auto",
+        aggressiveness: 50,
+        floor: 0.65,
+        cap: 1.05,
+      },
+    };
+
+    // Compute cache key using the exact attributes written to the report
     const cacheKey = computeCacheKey(
       listing.address,
-      listing as unknown as Record<string, unknown>,
+      enrichedInputAttributes as unknown as Record<string, unknown>,
       dates.startDate,
       dates.endDate,
       discountPolicy as unknown as Record<string, unknown>,
@@ -240,10 +249,11 @@ export async function POST(req: NextRequest) {
     // Check cache — if hit, create report as ready immediately
     let cachedSummary = null;
     let cachedCalendar = null;
+    let cacheEntryCreatedAt: string | null = null;
     try {
       const { data: cacheRows } = await supabase
         .from("pricing_cache")
-        .select("summary, calendar")
+        .select("summary, calendar, created_at")
         .eq("cache_key", cacheKey)
         .gt("expires_at", new Date().toISOString())
         .limit(1);
@@ -251,6 +261,9 @@ export async function POST(req: NextRequest) {
       if (cacheRows && cacheRows.length > 0) {
         cachedSummary = cacheRows[0].summary;
         cachedCalendar = cacheRows[0].calendar;
+        // Preserve when the cache entry was originally created so we can set
+        // market_captured_at correctly — the market data may be older than now().
+        cacheEntryCreatedAt = (cacheRows[0].created_at as string) ?? null;
       }
     } catch {
       // Cache lookup failed — proceed as queued
@@ -258,23 +271,14 @@ export async function POST(req: NextRequest) {
 
     const isCacheHit = cachedSummary !== null;
 
-    const enrichedInputAttributes = {
-      ...listing,
-      inputMode,
-      listingUrl: listingUrl || null,
-      lastMinuteStrategy: lastMinuteStrategy ?? {
-        mode: "auto",
-        aggressiveness: 50,
-        floor: 0.65,
-        cap: 1.05,
-      },
-    };
+    const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
 
     const report = {
       id: crypto.randomUUID(),
       user_id: requestUserId,
       share_id: shareId,
       input_address: listing.address,
+      target_env: targetEnv,
       input_attributes: enrichedInputAttributes,
       input_date_start: dates.startDate,
       input_date_end: dates.endDate,
@@ -285,6 +289,14 @@ export async function POST(req: NextRequest) {
       core_version: isCacheHit ? "cache-hit" : "pending",
       result_summary: cachedSummary,
       result_calendar: cachedCalendar,
+      // Explicit freshness timestamps (migration 010).
+      // Cache hits are finalised immediately by the API, not the worker.
+      // market_captured_at uses the cache entry's created_at so freshness
+      // reflects the actual data age, not when this request arrived.
+      completed_at: isCacheHit ? new Date().toISOString() : null,
+      market_captured_at: isCacheHit
+        ? (cacheEntryCreatedAt ?? new Date().toISOString())
+        : null,
       result_core_debug: {
         cache_hit: isCacheHit,
         cache_key: cacheKey,
@@ -326,6 +338,11 @@ export async function POST(req: NextRequest) {
 
     if (saveToListings?.enabled && saveUserId) {
       const listingName = (saveToListings.name || "").trim() || listing.address;
+      // Include preferredComps in the saved listing's input_attributes
+      const listingInputAttrs: Record<string, unknown> = { ...enrichedInputAttributes };
+      if (preferredComps?.length) {
+        listingInputAttrs.preferredComps = preferredComps;
+      }
 
       const { data: listingRow, error: listingErr } = await supabase
         .from("saved_listings")
@@ -333,7 +350,7 @@ export async function POST(req: NextRequest) {
           user_id: saveUserId,
           name: listingName,
           input_address: listing.address,
-          input_attributes: enrichedInputAttributes,
+          input_attributes: listingInputAttrs,
           default_discount_policy: discountPolicy,
           last_used_at: new Date().toISOString(),
         })

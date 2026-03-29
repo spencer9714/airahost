@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { SliderField } from "@/components/ui/SliderField";
 import { getSupabaseBrowser } from "@/lib/supabase";
+import { isValidAirbnbRoomUrl } from "@/lib/benchmarkUrl";
 import type {
   PropertyType,
   Amenity,
@@ -106,7 +107,9 @@ export default function ToolPage() {
   const [listingUrl, setListingUrl] = useState("");
 
   // Step 1 — Listing
-  const [address, setAddress] = useState("");
+  const [street, setStreet] = useState("");
+  const [city, setCity] = useState("");
+  const [zip, setZip] = useState("");
   const [propertyType, setPropertyType] = useState<PropertyType>("entire_home");
   const [bedrooms, setBedrooms] = useState(1);
   const [bathrooms, setBathrooms] = useState(1);
@@ -133,6 +136,11 @@ export default function ToolPage() {
   const [lastMinuteAggressiveness, setLastMinuteAggressiveness] = useState(50);
   const [lastMinuteFloor, setLastMinuteFloor] = useState(0.65);
 
+  // Benchmark listing (formerly preferred comparables)
+  const [preferredCompsList, setPreferredCompsList] = useState<
+    { listingUrl: string; note: string; enabled: boolean; validationState: "idle" | "valid" | "invalid"; cleanedUrl?: string }[]
+  >([{ listingUrl: "", note: "", enabled: true, validationState: "idle" }]);
+
   // Submit
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -158,6 +166,33 @@ export default function ToolPage() {
     setAmenities((prev) =>
       prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a]
     );
+  }
+
+  async function validateCompUrl(idx: number, url: string) {
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setPreferredCompsList((prev) => {
+        const next = [...prev];
+        next[idx] = { ...next[idx], validationState: "idle", cleanedUrl: undefined };
+        return next;
+      });
+      return;
+    }
+    try {
+      const res = await fetch(`/api/validate-benchmark?url=${encodeURIComponent(trimmed)}`);
+      const data: { valid: boolean; cleanedUrl?: string } = await res.json();
+      setPreferredCompsList((prev) => {
+        const next = [...prev];
+        next[idx] = {
+          ...next[idx],
+          validationState: data.valid ? "valid" : "invalid",
+          cleanedUrl: data.valid ? data.cleanedUrl : undefined,
+        };
+        return next;
+      });
+    } catch {
+      // silent — don't block the user on a network error
+    }
   }
 
   async function handleSubmit() {
@@ -195,6 +230,22 @@ export default function ToolPage() {
             cap: 1.05,
           },
           listingUrl: inputMode === "url" ? listingUrl : undefined,
+          preferredComps: (() => {
+            const valid = preferredCompsList.filter(
+              (c) =>
+                c.enabled &&
+                (c.validationState === "valid" ||
+                  (c.validationState === "idle" &&
+                    isValidAirbnbRoomUrl(c.listingUrl)))
+            );
+            return valid.length > 0
+              ? valid.map((c) => ({
+                  listingUrl: (c.cleanedUrl ?? c.listingUrl).trim(),
+                  note: c.note.trim() || undefined,
+                  enabled: true,
+                }))
+              : undefined;
+          })(),
           saveToListings:
             isSignedIn && saveToListings
               ? {
@@ -227,12 +278,16 @@ export default function ToolPage() {
     (new Date(endDate).getTime() - new Date(startDate).getTime()) /
       (1000 * 60 * 60 * 24)
   );
+  const criteriaInvalid =
+    (!city.trim() && !zip.trim()) ||
+    (street.trim().length > 0 && street.trim().length < 3);
+
   const resolvedListingAddress = useMemo(
     () =>
       inputMode === "url"
         ? buildListingAddressFromUrl(listingUrl, propertyType)
-        : address,
-    [inputMode, listingUrl, propertyType, address]
+        : [street.trim(), city.trim(), zip.trim()].filter(Boolean).join(", "),
+    [inputMode, listingUrl, propertyType, street, city, zip]
   );
 
   return (
@@ -303,14 +358,42 @@ export default function ToolPage() {
                 ) : (
                   /* Mode B: Criteria input */
                   <>
-                    <Field label="Address">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Field label="City *">
+                        <input
+                          type="text"
+                          placeholder="e.g. New York, Taipei"
+                          value={city}
+                          onChange={(e) => setCity(e.target.value)}
+                          className="input"
+                        />
+                      </Field>
+                      <Field label="ZIP / Postal code *">
+                        <input
+                          type="text"
+                          placeholder="e.g. 10001, 100"
+                          value={zip}
+                          onChange={(e) => setZip(e.target.value)}
+                          className="input"
+                        />
+                      </Field>
+                    </div>
+                    {!city.trim() && !zip.trim() && (
+                      <p className="text-xs text-warning">
+                        Please enter at least a city or ZIP code.
+                      </p>
+                    )}
+                    <Field label="Street address (optional)">
                       <input
                         type="text"
-                        placeholder="123 Main St, City, State"
-                        value={address}
-                        onChange={(e) => setAddress(e.target.value)}
+                        placeholder="e.g. 123 Main St"
+                        value={street}
+                        onChange={(e) => setStreet(e.target.value)}
                         className="input"
                       />
+                      <p className="mt-1 text-xs text-muted">
+                        Adding a street address helps find more precise comparable listings.
+                      </p>
                     </Field>
 
                     <Field label="Property type">
@@ -407,8 +490,8 @@ export default function ToolPage() {
                   onClick={() => setStep(2)}
                   disabled={
                     inputMode === "url"
-                      ? !listingUrl.includes("airbnb.com/rooms/")
-                      : address.length < 5
+                      ? !isValidAirbnbRoomUrl(listingUrl)
+                      : criteriaInvalid
                   }
                   className="w-full"
                 >
@@ -665,6 +748,114 @@ export default function ToolPage() {
                   </div>
                 )}
 
+                {/* Benchmark listing */}
+                <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4">
+                  <div className="mb-1 flex items-center gap-2">
+                    <p className="text-sm font-semibold text-gray-900">Add your benchmark listing</p>
+                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                      Recommended
+                    </span>
+                  </div>
+                  <p className="mb-3 text-xs text-gray-600">
+                    The single best way to improve accuracy. Paste the URL of the Airbnb listing you compete with most — we&apos;ll anchor your pricing estimate to its real nightly rate.
+                  </p>
+                  <div className="space-y-3">
+                    {preferredCompsList.map((comp, idx) => (
+                      <div key={idx} className={`rounded-lg border p-3 ${idx === 0 ? "border-amber-300 bg-amber-50/60" : "border-gray-200 bg-white"}`}>
+                        {/* Row header: primary badge or set-as-primary button */}
+                        {preferredCompsList.length > 1 && (
+                          <div className="mb-2 flex items-center justify-between">
+                            {idx === 0 ? (
+                              <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+                                ★ Primary benchmark
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next = [...preferredCompsList];
+                                  const [picked] = next.splice(idx, 1);
+                                  next.unshift(picked);
+                                  setPreferredCompsList(next);
+                                }}
+                                className="rounded-full border border-gray-300 px-2 py-0.5 text-[10px] font-medium text-gray-500 hover:border-amber-400 hover:text-amber-700 transition-colors"
+                              >
+                                Set as primary
+                              </button>
+                            )}
+                            <div className="flex items-center gap-2">
+                              <label className="flex cursor-pointer select-none items-center gap-1 text-[11px] text-muted">
+                                <input
+                                  type="checkbox"
+                                  checked={comp.enabled}
+                                  onChange={(e) => {
+                                    const next = [...preferredCompsList];
+                                    next[idx] = { ...next[idx], enabled: e.target.checked };
+                                    setPreferredCompsList(next);
+                                  }}
+                                  className="rounded"
+                                />
+                                Active
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => setPreferredCompsList(preferredCompsList.filter((_, i) => i !== idx))}
+                                className="text-xs text-muted hover:text-warning"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        <div className="space-y-1.5">
+                          <input
+                            type="url"
+                            placeholder="https://airbnb.com/rooms/123... (the listing you compete with most)"
+                            value={comp.listingUrl}
+                            onChange={(e) => {
+                              const next = [...preferredCompsList];
+                              next[idx] = { ...next[idx], listingUrl: e.target.value, validationState: "idle", cleanedUrl: undefined };
+                              setPreferredCompsList(next);
+                            }}
+                            onBlur={() => validateCompUrl(idx, comp.listingUrl)}
+                            className="input w-full text-sm"
+                          />
+                          {comp.listingUrl && comp.validationState === "valid" && (
+                            <p className="text-xs font-medium text-emerald-600">✓ Valid Airbnb listing</p>
+                          )}
+                          {comp.listingUrl && comp.validationState === "invalid" && (
+                            <p className="text-xs text-warning">Not a valid Airbnb listing URL.</p>
+                          )}
+                          {comp.listingUrl && comp.validationState === "idle" && !isValidAirbnbRoomUrl(comp.listingUrl) && (
+                            <p className="text-xs text-warning">Must be a valid Airbnb listing URL (airbnb.com/rooms/...).</p>
+                          )}
+                          <input
+                            type="text"
+                            placeholder="Optional label (e.g. main competitor, same building)"
+                            value={comp.note}
+                            onChange={(e) => {
+                              const next = [...preferredCompsList];
+                              next[idx] = { ...next[idx], note: e.target.value };
+                              setPreferredCompsList(next);
+                            }}
+                            className="input w-full text-sm"
+                            maxLength={500}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    {preferredCompsList.length < 10 && (
+                      <button
+                        type="button"
+                        onClick={() => setPreferredCompsList([...preferredCompsList, { listingUrl: "", note: "", enabled: true, validationState: "idle" }])}
+                        className="text-xs text-accent hover:underline"
+                      >
+                        + Add another listing
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 {error && (
                   <p className="rounded-xl bg-red-50 p-3 text-sm text-warning">
                     {error}
@@ -708,7 +899,12 @@ export default function ToolPage() {
 
                 <Button
                   onClick={handleSubmit}
-                  disabled={loading}
+                  disabled={
+                    loading ||
+                    (inputMode === "url"
+                      ? !isValidAirbnbRoomUrl(listingUrl)
+                      : criteriaInvalid)
+                  }
                   className="w-full"
                   size="lg"
                 >
@@ -737,9 +933,19 @@ export default function ToolPage() {
                 ) : (
                   <>
                     <SummaryRow
-                      label="Address"
-                      value={address || "Not entered yet"}
+                      label="City"
+                      value={city || "—"}
                     />
+                    <SummaryRow
+                      label="ZIP"
+                      value={zip || "—"}
+                    />
+                    {street && (
+                      <SummaryRow
+                        label="Street"
+                        value={street}
+                      />
+                    )}
                     <SummaryRow
                       label="Type"
                       value={
@@ -790,6 +996,19 @@ export default function ToolPage() {
                     lastMinuteMode === "auto"
                       ? "Auto (recommended)"
                       : `Custom (Agg ${lastMinuteAggressiveness}, Floor ${lastMinuteFloor.toFixed(2)})`
+                  }
+                />
+                <SummaryRow
+                  label="Benchmark"
+                  value={
+                    preferredCompsList.some(
+                      (c) =>
+                        c.enabled &&
+                        (c.validationState === "valid" ||
+                          isValidAirbnbRoomUrl(c.listingUrl))
+                    )
+                      ? "Added ✓"
+                      : "Not set"
                   }
                 />
               </div>

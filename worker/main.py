@@ -21,13 +21,13 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 
 # Load .env from worker directory or repo root
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
+load_dotenv(override=True)
 
 from worker.core import db as db_helpers
 from worker.core.cache import compute_cache_key, get_cached, set_cached
@@ -51,6 +51,7 @@ MAX_RUNTIME_SECONDS = int(os.getenv("WORKER_MAX_RUNTIME_SECONDS", "180"))
 CDP_CONNECT_TIMEOUT_MS = int(os.getenv("CDP_CONNECT_TIMEOUT_MS", "15000"))
 WORKER_VERSION = os.getenv("WORKER_VERSION", "worker-0.1.0")
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222")
+WORKER_ENV = os.getenv("WORKER_ENV", "production")
 
 MAX_SCROLL_ROUNDS = int(os.getenv("MAX_SCROLL_ROUNDS", "12"))
 MAX_CARDS = int(os.getenv("MAX_CARDS", "80"))
@@ -339,20 +340,44 @@ def _build_scrape_calendar(
     min_p = sorted_p[0]
     max_p = sorted_p[-1]
 
+    # Weekday/weekend averages: use actual market comparable medians from the
+    # transparent result when available.  These represent what comparable
+    # listings charge on those days — not the user's own adjusted prices.
+    rec_price_info = (transparent_result or {}).get("recommendedPrice") or {}
+    rec = rec_price_info.get("nightly")
+    market_weekday = rec_price_info.get("weekdayEstimate")
+    market_weekend = rec_price_info.get("weekendEstimate")
+
     weekday_p = [d["basePrice"] for d in calendar if not d["isWeekend"]]
     weekend_p = [d["basePrice"] for d in calendar if d["isWeekend"]]
-    weekday_avg = round(sum(weekday_p) / len(weekday_p)) if weekday_p else median
-    weekend_avg = round(sum(weekend_p) / len(weekend_p)) if weekend_p else median
+    weekday_avg = (
+        round(market_weekday) if market_weekday
+        else (round(sum(weekday_p) / len(weekday_p)) if weekday_p else median)
+    )
+    weekend_avg = (
+        round(market_weekend) if market_weekend
+        else (round(sum(weekend_p) / len(weekend_p)) if weekend_p else median)
+    )
 
-    occupancy = 70  # reasonable default for scraped results
+    # Occupancy: there is no way to determine true booking occupancy from search
+    # data alone.  Use a data-quality proxy: higher market data coverage
+    # (fraction of days where we found valid comparable prices) indicates a
+    # more active, higher-demand market → higher occupancy estimate.
+    valid_day_count = sum(1 for dr in daily_results if dr.get("median_price") is not None)
+    coverage_pct = valid_day_count / max(1, len(daily_results))
+    if coverage_pct >= 0.80:
+        occupancy = 73
+    elif coverage_pct >= 0.60:
+        occupancy = 67
+    elif coverage_pct >= 0.40:
+        occupancy = 60
+    else:
+        occupancy = 53
+
     selected_range_avg = average_refundable_price_for_stay(
         base_prices, total_days, discount_policy
     )
     est_monthly = round(selected_range_avg * 30 * (occupancy / 100))
-
-    # Insight from price data
-    rec_price_info = (transparent_result or {}).get("recommendedPrice") or {}
-    rec = rec_price_info.get("nightly")
     if rec and median:
         diff = round(median - rec)
         if abs(diff) <= 5:
@@ -413,6 +438,31 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     )
     hb_thread.start()
 
+    def _progress(pct: int, stage: str, message: str, est: Optional[int] = None) -> None:
+        """Update progress metadata in DB.  Non-fatal on error."""
+        try:
+            db_helpers.update_progress(
+                client, report_id, worker_token,
+                pct=pct, stage=stage, message=message,
+                est_seconds_remaining=est,
+            )
+        except Exception as _pe:
+            logger.warning(f"[{report_id}] Progress update failed (non-fatal): {_pe}")
+
+    def _make_day_callback(start_pct: int, end_pct: int, stage: str, message_prefix: str) -> Callable[[int, int], None]:
+        """Factory: maps (completed, total) day counts to a pct range and calls _progress."""
+        def _cb(completed: int, total: int) -> None:
+            if total <= 0:
+                return
+            frac = completed / total
+            pct = round(start_pct + frac * (end_pct - start_pct))
+            remaining_days = total - completed
+            est = round(remaining_days * MAX_RUNTIME_SECONDS / max(total, 1)) if remaining_days > 0 else None
+            _progress(pct, stage, f"{message_prefix} ({completed}/{total} days)", est)
+        return _cb
+
+    _progress(5, "connecting", "Connecting to browser...")
+
     try:
         address = job.get("input_address", "")
         attributes = job.get("input_attributes") or {}
@@ -421,6 +471,36 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         discount_policy = job.get("discount_policy") or {}
         listing_url = _get_listing_url(job)
         input_mode = attributes.get("inputMode", "criteria")
+        # Extract preferred comps list — only keep items that are enabled
+        preferred_comps_raw = attributes.get("preferredComps")
+        preferred_comps: Optional[list] = None
+        primary_benchmark_url: Optional[str] = None
+        if isinstance(preferred_comps_raw, list):
+            enabled = [
+                pc for pc in preferred_comps_raw
+                if isinstance(pc, dict) and pc.get("enabled", True)
+            ]
+            preferred_comps = enabled if enabled else None
+        if preferred_comps:
+            urls_preview = ", ".join(pc.get("listingUrl", "?") for pc in preferred_comps)
+            logger.info(f"[{job.get('id', '?')}] Preferred comps ({len(preferred_comps)}): {urls_preview}")
+            # The first enabled preferred comp is the primary benchmark
+            first_url = str(preferred_comps[0].get("listingUrl") or "").strip()
+            if first_url:
+                primary_benchmark_url = first_url
+                logger.info(f"[{job.get('id', '?')}] Primary benchmark URL: {primary_benchmark_url}")
+
+        # Secondary benchmark URLs — preferredComps[1:] used for consensus signal only
+        secondary_benchmark_urls: List[str] = [
+            str(pc.get("listingUrl") or "").strip()
+            for pc in (preferred_comps or [])[1:]
+            if isinstance(pc, dict) and str(pc.get("listingUrl") or "").strip()
+        ]
+        if secondary_benchmark_urls:
+            logger.info(
+                f"[{job.get('id', '?')}] Secondary benchmark URLs "
+                f"({len(secondary_benchmark_urls)}): {', '.join(secondary_benchmark_urls)}"
+            )
         finalized_input_attributes = dict(attributes)
         finalized_input_attributes["inputMode"] = input_mode
         finalized_input_attributes["listingUrl"] = listing_url or None
@@ -428,11 +508,15 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             str(input_mode), listing_url
         )
 
-        # Check cache first (except URL mode where we must scrape to extract specs)
+        # Check cache first (except URL mode where we must scrape to extract specs,
+        # or explicit force_rerun jobs submitted from the dashboard).
         cache_key = job.get("cache_key") or compute_cache_key(
             address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
         )
-        cached = None if bypass_precache else get_cached(client, cache_key)
+        force_rerun = bool((job.get("result_core_debug") or {}).get("force_rerun"))
+        cached = None if (bypass_precache or force_rerun) else get_cached(client, cache_key)
+        if force_rerun:
+            logger.info(f"[{report_id}] force_rerun=true — skipping cache lookup")
         if cached:
             summary, calendar = cached
             logger.info(f"[{report_id}] Cache hit for key={cache_key[:12]}...")
@@ -469,9 +553,145 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 },
             )
 
-        if listing_url:
+        # ── Phase 3A: Resolve target coordinates ─────────────────────────
+        # Fetch existing coords from the saved listing, or geocode the address
+        # if they are missing.  Best-effort: failure is logged and skipped.
+        _job_target_lat: Optional[float] = None
+        _job_target_lng: Optional[float] = None
+        _geocoded_now = False  # True if we just geocoded (need to write back)
+
+        _listing_id_for_geocode = job.get("listing_id")
+        if _listing_id_for_geocode:
+            try:
+                _geo_row = (
+                    client.table("saved_listings")
+                    .select("target_lat, target_lng")
+                    .eq("id", _listing_id_for_geocode)
+                    .single()
+                    .execute()
+                )
+                _geo_data = (_geo_row.data or {})
+                _db_lat = _geo_data.get("target_lat")
+                _db_lng = _geo_data.get("target_lng")
+                if _db_lat is not None and _db_lng is not None:
+                    _job_target_lat = float(_db_lat)
+                    _job_target_lng = float(_db_lng)
+                    logger.info(
+                        f"[{report_id}] Target coords from DB: "
+                        f"({_job_target_lat:.5f}, {_job_target_lng:.5f})"
+                    )
+                else:
+                    # Coords not yet stored — geocode the input address
+                    from worker.core.geocoding import geocode_address
+                    _gc = geocode_address(address)
+                    if _gc:
+                        _job_target_lat, _job_target_lng = _gc
+                        _geocoded_now = True
+                        logger.info(
+                            f"[{report_id}] Geocoded target: "
+                            f"({_job_target_lat:.5f}, {_job_target_lng:.5f})"
+                        )
+            except Exception as _geo_exc:
+                logger.warning(
+                    f"[{report_id}] Target coord resolution failed (non-fatal): {_geo_exc}"
+                )
+
+        # ── Phase 3B: Adaptive radius selection ──────────────────────────
+        _job_radius_km: float = 30.0  # default; overwritten below if pool data available
+        if _listing_id_for_geocode:
+            try:
+                from worker.core.geo_radius import select_adaptive_radius
+                _pool_rows = (
+                    client.table("comparable_pool_entries")
+                    .select("distance_to_target_km")
+                    .eq("saved_listing_id", _listing_id_for_geocode)
+                    .eq("status", "active")
+                    .execute()
+                )
+                _pool_distances = [
+                    r.get("distance_to_target_km")
+                    for r in (_pool_rows.data or [])
+                ]
+                _pool_active_size = len([d for d in _pool_distances if d is not None])
+                _job_radius_km, _radius_reason = select_adaptive_radius(
+                    pool_distances=_pool_distances,
+                    active_pool_size=_pool_active_size or None,
+                )
+                logger.info(
+                    f"[{report_id}] Adaptive radius: {_job_radius_km:.0f} km — {_radius_reason}"
+                )
+            except Exception as _radius_exc:
+                logger.warning(
+                    f"[{report_id}] Radius selection failed (using 30 km default): {_radius_exc}"
+                )
+
+        _mode_c_succeeded = False
+        # benchmarkInfo is preserved here even when Mode C falls back to Mode B/A.
+        # Without this, a failed-but-attempted benchmark run would lose all transparency.
+        _saved_benchmark_info: Optional[Dict[str, Any]] = None
+
+        if primary_benchmark_url and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
+            # Mode C: Benchmark-first — use pinned comp as primary anchor.
+            # Only for criteria modes; URL mode already has its own listing to scrape.
+            logger.info(
+                f"[{report_id}] Mode C (benchmark-first): {primary_benchmark_url}"
+            )
+            _progress(10, "fetching_benchmark", "Fetching benchmark listing data...")
+            try:
+                from worker.scraper.price_estimator import run_benchmark_scrape
+
+                daily_results, transparent_result = run_benchmark_scrape(
+                    benchmark_url=primary_benchmark_url,
+                    checkin=start_date,
+                    checkout=end_date,
+                    cdp_url=CDP_URL,
+                    max_scroll_rounds=MAX_SCROLL_ROUNDS,
+                    max_cards=MAX_CARDS,
+                    max_runtime_seconds=MAX_RUNTIME_SECONDS,
+                    rate_limit_seconds=RATE_LIMIT_SECONDS,
+                    cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    secondary_benchmark_urls=secondary_benchmark_urls or None,
+                    user_attributes=attributes,
+                    target_lat=_job_target_lat,
+                    target_lng=_job_target_lng,
+                    max_radius_km=_job_radius_km,
+                    progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
+                )
+
+                # Save benchmark transparency now — before any fallback overwrites transparent_result.
+                _saved_benchmark_info = (transparent_result or {}).get("benchmarkInfo") or None
+
+                valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
+                if daily_results and valid_prices:
+                    result = _build_scrape_calendar(
+                        daily_results, start_date, end_date, discount_policy, transparent_result,
+                    )
+                    if result[0] is not None and result[1] is not None:
+                        summary, calendar = result
+                        core_version = WORKER_VERSION + "+benchmark"
+                        _mode_c_succeeded = True
+                    else:
+                        logger.warning(
+                            f"[{report_id}] Benchmark pipeline returned no valid prices, "
+                            "falling back to criteria search"
+                        )
+                else:
+                    logger.warning(
+                        f"[{report_id}] Benchmark pipeline returned empty results, "
+                        "falling back to criteria search"
+                    )
+
+            except Exception as exc:
+                logger.warning(
+                    f"[{report_id}] Benchmark pipeline failed ({exc}), "
+                    "falling back to criteria search"
+                )
+                transparent_result = None
+
+        if not _mode_c_succeeded and listing_url:
             # Mode A: URL scrape — user provided a listing URL
             logger.info(f"[{report_id}] Mode A (URL scrape): {listing_url}")
+            _progress(10, "extracting_target", "Extracting listing details...")
             try:
                 from worker.scraper.price_estimator import run_scrape
 
@@ -485,6 +705,11 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    preferred_comps=preferred_comps,
+                    target_lat=_job_target_lat,
+                    target_lng=_job_target_lng,
+                    max_radius_km=_job_radius_km,
+                    progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -524,9 +749,10 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 return
 
-        elif input_mode == "criteria":
+        elif not _mode_c_succeeded and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
             # Mode B: Criteria search — find best matching listing, then scrape comps
-            logger.info(f"[{report_id}] Mode B (criteria search): {address}")
+            logger.info(f"[{report_id}] Mode B (criteria search, mode={input_mode}): {address}")
+            _progress(10, "searching_comps", "Searching for comparable listings...")
             try:
                 from worker.scraper.price_estimator import run_criteria_search
 
@@ -541,6 +767,11 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    preferred_comps=preferred_comps,
+                    target_lat=_job_target_lat,
+                    target_lng=_job_target_lng,
+                    max_radius_km=_job_radius_km,
+                    progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -577,13 +808,15 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 return
 
-        else:
+        elif not _mode_c_succeeded:
             # No listing URL and no criteria — cannot proceed
             _fail(
                 "Please provide either a listing URL or search criteria.",
                 "No listing URL and input mode is not criteria",
             )
             return
+
+        _progress(80, "pricing", "Computing final pricing estimates...")
 
         total_ms = round((time.time() - start_time) * 1000)
 
@@ -605,6 +838,13 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             summary["priceDistribution"] = transparent_result.get("priceDistribution")
             summary["recommendedPrice"] = transparent_result.get("recommendedPrice")
             summary["comparableListings"] = transparent_result.get("comparableListings")
+            # Use benchmarkInfo from transparent_result if present; otherwise use the
+            # one saved before Mode C fell back (preserves benchmark data across fallbacks).
+            bm_info = transparent_result.get("benchmarkInfo") or _saved_benchmark_info
+            if bm_info:
+                summary["benchmarkInfo"] = bm_info
+
+        _progress(90, "saving_results", "Saving results...")
 
         # Write results
         db_helpers.complete_job(
@@ -623,6 +863,69 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
             except Exception as exc:
                 logger.warning(f"[{report_id}] Failed to sync linked listing attributes: {exc}")
+
+        # Write back geocoded target coords to saved_listings (Phase 3A)
+        if _geocoded_now and _listing_id_for_geocode and _job_target_lat is not None:
+            try:
+                client.table("saved_listings").update({
+                    "target_lat": _job_target_lat,
+                    "target_lng": _job_target_lng,
+                }).eq("id", _listing_id_for_geocode).execute()
+                logger.info(
+                    f"[{report_id}] Saved geocoded coords to listing {_listing_id_for_geocode}"
+                )
+            except Exception as exc:
+                logger.warning(f"[{report_id}] Failed to write geocoded coords (non-fatal): {exc}")
+
+        # Phase 3B: write back page-extracted coords when the listing page gave us
+        # better coordinates than geocoding (URL mode and benchmark mode).
+        if _listing_id_for_geocode and transparent_result:
+            _page_coords = (transparent_result or {}).get("pageExtractedCoords")
+            if _page_coords and _page_coords.get("source") == "page":
+                _pc_lat = _page_coords.get("lat")
+                _pc_lng = _page_coords.get("lng")
+                if _pc_lat is not None and _pc_lng is not None:
+                    try:
+                        client.table("saved_listings").update({
+                            "target_lat": _pc_lat,
+                            "target_lng": _pc_lng,
+                        }).eq("id", _listing_id_for_geocode).execute()
+                        logger.info(
+                            f"[{report_id}] Saved page-extracted coords "
+                            f"({_pc_lat:.5f}, {_pc_lng:.5f}) to listing {_listing_id_for_geocode}"
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"[{report_id}] Failed to write page-extracted coords (non-fatal): {exc}"
+                        )
+
+        # Phase 3B: write back the adaptive radius used this run
+        if _listing_id_for_geocode:
+            try:
+                client.table("saved_listings").update({
+                    "comp_pool_target_radius_km": _job_radius_km,
+                }).eq("id", _listing_id_for_geocode).execute()
+                logger.debug(
+                    f"[{report_id}] Saved comp_pool_target_radius_km={_job_radius_km} "
+                    f"to listing {_listing_id_for_geocode}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[{report_id}] Failed to write target radius (non-fatal): {exc}"
+                )
+
+        # Seed comparable pool (Phase 2) — non-fatal, runs after job is marked ready
+        _listing_id = job.get("listing_id")
+        if _listing_id and transparent_result:
+            try:
+                from worker.core.pool_seeding import seed_pool_from_report
+                seed_pool_from_report(
+                    client,
+                    saved_listing_id=_listing_id,
+                    comparable_listings=transparent_result.get("comparableListings") or [],
+                )
+            except Exception as exc:
+                logger.warning(f"[{report_id}] Pool seeding failed (non-fatal): {exc}")
 
         # Store in cache (enriched summary includes transparency)
         try:
@@ -672,7 +975,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
 
 def main():
     logger.info(f"AriaHost Worker starting (version={WORKER_VERSION})")
-    logger.info(f"  poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
+    logger.info(f"  env={WORKER_ENV}, poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
     logger.info(f"  heartbeat={HEARTBEAT_SECONDS}s, max_runtime={MAX_RUNTIME_SECONDS}s")
     logger.info(f"  CDP={CDP_URL}, connect_timeout={CDP_CONNECT_TIMEOUT_MS}ms")
 
@@ -683,7 +986,7 @@ def main():
     while not _shutdown_event.is_set():
         try:
             worker_token = uuid.uuid4()
-            job = db_helpers.claim_job(client, worker_token, STALE_MINUTES)
+            job = db_helpers.claim_job(client, worker_token, STALE_MINUTES, WORKER_ENV)
 
             if job is None:
                 # No work — wait with current backoff

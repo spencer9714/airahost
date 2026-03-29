@@ -21,14 +21,14 @@ def get_client() -> Client:
     return create_client(url, key)
 
 
-def claim_job(client: Client, worker_token: uuid.UUID, stale_minutes: int) -> Optional[Dict[str, Any]]:
+def claim_job(client: Client, worker_token: uuid.UUID, stale_minutes: int, target_env: str) -> Optional[Dict[str, Any]]:
     """
-    Atomically claim one queued (or stale-running) job.
+    Atomically claim one queued (or stale-running) job matching target_env.
     Returns the full row dict, or None if no work available.
     """
     result = client.rpc(
         "claim_pricing_report",
-        {"p_worker_token": str(worker_token), "p_stale_minutes": stale_minutes},
+        {"p_worker_token": str(worker_token), "p_stale_minutes": stale_minutes, "p_target_env": target_env},
     ).execute()
 
     rows = result.data
@@ -57,13 +57,25 @@ def complete_job(
     debug: Optional[Dict[str, Any]] = None,
     input_attributes: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Mark a job as ready with results. Idempotent — overwrites existing results."""
+    """Mark a job as ready with results. Idempotent — overwrites existing results.
+
+    Sets completed_at and market_captured_at to the current UTC time.
+    For fresh scrapes both fields are equal.  For forecast_snapshot reports the
+    caller is responsible for overriding market_captured_at after this call if
+    the underlying market basis was captured at a different time.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+
     update: Dict[str, Any] = {
         "status": "ready",
         "core_version": core_version,
         "result_summary": summary,
         "result_calendar": calendar,
         "error_message": None,
+        # Explicit freshness timestamps (migration 010)
+        "completed_at": now,
+        "market_captured_at": now,  # fresh scrape: capture time == completion time
     }
     if debug:
         update["result_core_debug"] = debug
@@ -100,6 +112,44 @@ def sync_linked_listing_attributes(
     client.table("saved_listings").update(
         {"input_attributes": input_attributes}
     ).eq("id", listing_id).execute()
+
+
+def update_progress(
+    client: Client,
+    report_id: str,
+    worker_token: uuid.UUID,
+    *,
+    pct: int,
+    stage: str,
+    message: str,
+    est_seconds_remaining: Optional[int] = None,
+) -> bool:
+    """Update heartbeat + progress metadata atomically.
+
+    Returns True if the token still owns the job (row was updated).
+    Safe to call from both the heartbeat thread and the main thread.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    meta: Dict[str, Any] = {
+        "pct": max(0, min(100, pct)),
+        "stage": stage,
+        "message": message,
+        "updated_at": now,
+    }
+    if est_seconds_remaining is not None:
+        meta["est_seconds_remaining"] = max(0, est_seconds_remaining)
+    result = (
+        client.table("pricing_reports")
+        .update({
+            "worker_heartbeat_at": now,
+            "progress_meta": meta,
+        })
+        .eq("id", report_id)
+        .eq("worker_claim_token", str(worker_token))
+        .execute()
+    )
+    return bool(result.data)
 
 
 def fail_job(

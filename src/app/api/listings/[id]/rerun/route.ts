@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { rerunListingSchema } from "@/lib/schemas";
+import { rerunListingSchema, type PreferredComps } from "@/lib/schemas";
 import { generateShareId } from "@/lib/shareId";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
@@ -47,30 +47,40 @@ export async function POST(
     }
 
     const attrs = (listing.input_attributes ?? {}) as Record<string, unknown>;
-    const fallbackInputMode =
-      attrs.inputMode === "url" || attrs.inputMode === "criteria"
-        ? attrs.inputMode
-        : "criteria";
+    const VALID_INPUT_MODES = ["url", "criteria", "criteria-by-city", "criteria-by-zip"];
+    const fallbackInputMode = VALID_INPUT_MODES.includes(attrs.inputMode as string)
+      ? (attrs.inputMode as string)
+      : "criteria";
     const fallbackListingUrl =
       typeof attrs.listingUrl === "string" ? attrs.listingUrl : undefined;
+    // Carry preferred comps from saved listing; body can override
+    const savedPreferredComps = (attrs.preferredComps as PreferredComps | undefined) ?? null;
 
     const {
       dates,
       inputMode = fallbackInputMode,
       listingUrl = fallbackListingUrl,
+      preferredComps = savedPreferredComps ?? undefined,
     } = parsed.data;
     const discountPolicy =
       parsed.data.discountPolicy ?? listing.default_discount_policy ?? {};
     const attributes = listing.input_attributes;
     const address = listing.input_address;
 
+    // Merged attributes — mirrors what will be written to report.input_attributes
+    const mergedAttributes = {
+      ...(attributes as Record<string, unknown>),
+      inputMode,
+      ...(preferredComps?.length ? { preferredComps } : {}),
+    };
+
     // Use admin client for cache + report creation (bypasses RLS for pricing_cache)
     const admin = getSupabaseAdmin();
 
-    // Cache key
+    // Cache key uses merged attributes so it matches report.input_attributes exactly
     const cacheKey = computeCacheKey(
       address,
-      attributes as Record<string, unknown>,
+      mergedAttributes,
       dates.startDate,
       dates.endDate,
       discountPolicy as Record<string, unknown>,
@@ -106,7 +116,11 @@ export async function POST(
       share_id: shareId,
       listing_id: id,
       input_address: address,
-      input_attributes: { ...attributes, inputMode },
+      input_attributes: {
+        ...attributes,
+        inputMode,
+        ...(preferredComps?.length ? { preferredComps } : {}),
+      },
       input_date_start: dates.startDate,
       input_date_end: dates.endDate,
       discount_policy: discountPolicy,

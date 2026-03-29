@@ -3,6 +3,50 @@
 import { useState, useMemo } from "react";
 import type { ComparableListing, CompsSummary } from "@/lib/schemas";
 
+// Match Airbnb room IDs extracted from URLs for pinned-comp detection.
+function extractRoomId(url: string): string | null {
+  const m = url.match(/\/rooms\/(\d+)/);
+  return m ? m[1] : null;
+}
+
+function urlsMatchPinned(compUrl: string | null, pinnedUrls: string[]): boolean {
+  if (!compUrl) return false;
+  const compId = extractRoomId(compUrl);
+  for (const pUrl of pinnedUrls) {
+    if (compId && extractRoomId(pUrl) === compId) return true;
+    if (compUrl.split("?")[0].toLowerCase() === pUrl.split("?")[0].toLowerCase()) return true;
+  }
+  return false;
+}
+
+// ── Date helpers ────────────────────────────────────────────────
+
+function nextDay(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function listingUrlForDate(url: string, date: string): string {
+  const checkout = nextDay(date);
+  try {
+    // Canonicalize: strip any existing date params (old or new key names),
+    // then inject the correct Airbnb params check_in / check_out.
+    const u = new URL(url, "https://www.airbnb.com");
+    u.searchParams.delete("checkin");
+    u.searchParams.delete("checkout");
+    u.searchParams.delete("check_in");
+    u.searchParams.delete("check_out");
+    u.searchParams.set("check_in", date);
+    u.searchParams.set("check_out", checkout);
+    return u.toString();
+  } catch {
+    // Fallback for relative or malformed URLs — safe append.
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}check_in=${date}&check_out=${checkout}`;
+  }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
 function similarityBadgeClasses(similarity: number): string {
@@ -11,17 +55,30 @@ function similarityBadgeClasses(similarity: number): string {
   return "bg-gray-100 text-gray-600";
 }
 
-function confidenceLabel(stage: string): {
+function matchQualityLabel(stage: string): {
   label: string;
+  description: string;
   classes: string;
 } {
   switch (stage) {
     case "strict":
-      return { label: "High confidence", classes: "bg-green-50 text-green-700" };
+      return {
+        label: "Strong match set",
+        description: "Most of these listings are very close matches to your home.",
+        classes: "bg-green-50 text-green-700",
+      };
     case "medium":
-      return { label: "Medium confidence", classes: "bg-yellow-50 text-yellow-700" };
+      return {
+        label: "Balanced match set",
+        description: "We found a good mix of close matches and broader nearby comps.",
+        classes: "bg-yellow-50 text-yellow-700",
+      };
     default:
-      return { label: "Low confidence", classes: "bg-gray-100 text-gray-600" };
+      return {
+        label: "Broader match set",
+        description: "There were fewer near-identical listings, so we used a wider comparison set.",
+        classes: "bg-gray-100 text-gray-700",
+      };
   }
 }
 
@@ -29,6 +86,22 @@ function formatPropertyType(type: string): string {
   return type
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function formatComparableSpecs(listing: ComparableListing): string {
+  const parts = [formatPropertyType(listing.propertyType)];
+
+  if (typeof listing.accommodates === "number") {
+    parts.push(`${listing.accommodates} guest${listing.accommodates !== 1 ? "s" : ""}`);
+  }
+  if (typeof listing.bedrooms === "number") {
+    parts.push(`${listing.bedrooms} bd`);
+  }
+  if (typeof listing.baths === "number") {
+    parts.push(`${listing.baths} ba`);
+  }
+
+  return parts.join(" · ");
 }
 
 // ── Skeleton ────────────────────────────────────────────────────
@@ -56,35 +129,92 @@ function SkeletonCard() {
 
 // ── Listing Card ────────────────────────────────────────────────
 
-function ComparableCard({ listing }: { listing: ComparableListing }) {
+function ComparableCard({
+  listing,
+  isPinned = false,
+  selectedDate,
+  isSnappedDate = false,
+}: {
+  listing: ComparableListing;
+  isPinned?: boolean;
+  selectedDate?: string | null;
+  /** True when selectedDate is a snapped-to-nearest date, not the exactly clicked date. */
+  isSnappedDate?: boolean;
+}) {
   const matchPct = Math.round(listing.similarity * 100);
   const badgeClasses = similarityBadgeClasses(listing.similarity);
 
+  // When a date is selected, use only the exact scraped price for that date.
+  // Do NOT fall back to nightlyPrice or an average — that would mislead the user.
+  const datePrice: number | undefined = selectedDate
+    ? listing.priceByDate?.[selectedDate]
+    : undefined;
+
+  // No date selected → show the general comparable price.
+  // Date selected + price found → show sampled date price.
+  // Date selected + no price → show unavailable (not a fallback average).
+  const hasSampledDatePrice = selectedDate != null && datePrice != null;
+  const isPriceUnavailable = selectedDate != null && datePrice == null;
+  const displayPrice = selectedDate ? datePrice : listing.nightlyPrice;
+
+  // When a specific date is selected, append checkin/checkout so the Airbnb
+  // listing page opens in the same date context as our shown price.
+  const viewUrl = listing.url
+    ? selectedDate
+      ? listingUrlForDate(listing.url, selectedDate)
+      : listing.url
+    : null;
+
   return (
-    <div className="rounded-xl border border-gray-100 p-4 transition hover:shadow-sm">
+    <div
+      className={`rounded-xl border p-4 transition hover:shadow-sm ${
+        isPinned ? "border-amber-300 bg-amber-50/70 shadow-sm ring-1 ring-amber-100" : "border-gray-100 bg-white"
+      }`}
+    >
       {/* Top row: title+specs LEFT, price+badge RIGHT */}
       <div className="flex items-start justify-between gap-4">
         {/* Left zone */}
         <div className="min-w-0 flex-1">
-          <p className="truncate text-base font-medium text-gray-900">
-            {listing.title}
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="truncate text-base font-medium text-gray-900">
+              {listing.title}
+            </p>
+            {isPinned && (
+              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 ring-1 ring-amber-200">
+                Pinned by you
+              </span>
+            )}
+          </div>
           <p className="mt-0.5 text-sm text-gray-600">
-            {formatPropertyType(listing.propertyType)}
-            {" · "}
-            {listing.accommodates} guest{listing.accommodates !== 1 ? "s" : ""}
-            {" · "}
-            {listing.bedrooms} bd
-            {" · "}
-            {listing.baths} ba
+            {formatComparableSpecs(listing)}
           </p>
         </div>
 
         {/* Right zone */}
         <div className="shrink-0 text-right">
-          <p className="text-2xl font-semibold text-gray-900">
-            ${listing.nightlyPrice}
-            <span className="text-sm font-normal text-gray-500"> / night</span>
+          {isPriceUnavailable ? (
+            <p className="text-sm font-medium text-gray-400">
+              No data for this date
+            </p>
+          ) : (
+            <p className="text-2xl font-semibold text-gray-900">
+              ${displayPrice}
+              <span className="text-sm font-normal text-gray-500"> / night</span>
+            </p>
+          )}
+          {hasSampledDatePrice && (
+            <p className="text-[10px] text-emerald-600 font-medium">
+              {isSnappedDate ? "nearest sampled date" : "exact date price"}
+            </p>
+          )}
+          <p className={`text-[10px] font-medium ${
+            listing.queryNights != null && listing.queryNights > 1
+              ? "text-amber-600"
+              : "text-gray-400"
+          }`}>
+            {listing.queryNights != null && listing.queryNights > 1
+              ? `${listing.queryNights}-night min · price ÷ ${listing.queryNights}`
+              : "1-night price"}
           </p>
           <span
             className={`mt-1 inline-block rounded-full px-2 py-1 text-xs font-medium ${badgeClasses}`}
@@ -106,9 +236,9 @@ function ComparableCard({ listing }: { listing: ComparableListing }) {
           </span>
         )}
         {listing.location && <span>{listing.location}</span>}
-        {listing.url && (
+        {viewUrl && (
           <a
-            href={listing.url}
+            href={viewUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="ml-auto text-xs font-medium text-accent hover:underline"
@@ -130,6 +260,12 @@ interface ComparableListingsSectionProps {
   comps: CompsSummary | null | undefined;
   loading?: boolean;
   embedded?: boolean;
+  pinnedUrls?: string[];
+  /** Effective price date — nearest sampled date with real comp data. */
+  selectedDate?: string | null;
+  /** The date the user actually clicked. When this differs from selectedDate,
+   *  a disclosure banner is shown explaining the price date substitution. */
+  clickedDate?: string | null;
 }
 
 export function ComparableListingsSection({
@@ -137,24 +273,48 @@ export function ComparableListingsSection({
   comps,
   loading = false,
   embedded = false,
+  pinnedUrls = [],
+  selectedDate = null,
+  clickedDate = null,
 }: ComparableListingsSectionProps) {
+  const isSnappedDate = !!(selectedDate && clickedDate && selectedDate !== clickedDate);
   const [sortBy, setSortBy] = useState<SortMode>("similarity");
   const [expanded, setExpanded] = useState(false);
 
-  const confidence = comps
-    ? confidenceLabel(comps.filterStage)
+  const matchQuality = comps
+    ? matchQualityLabel(comps.filterStage)
     : null;
 
   const sorted = useMemo(() => {
     if (!listings || listings.length === 0) return [];
     const copy = [...listings];
+    // When a date is selected, use only the exact date price (may be undefined).
+    // When no date is selected, fall back to the general nightlyPrice.
+    const getPrice = (listing: ComparableListing): number | undefined =>
+      selectedDate ? listing.priceByDate?.[selectedDate] : listing.nightlyPrice;
+    const comparePinned = (a: ComparableListing, b: ComparableListing) => {
+      const aPinned = urlsMatchPinned(a.url ?? null, pinnedUrls);
+      const bPinned = urlsMatchPinned(b.url ?? null, pinnedUrls);
+      if (aPinned === bPinned) return 0;
+      return aPinned ? -1 : 1;
+    };
     if (sortBy === "similarity") {
-      copy.sort((a, b) => b.similarity - a.similarity);
+      copy.sort((a, b) => comparePinned(a, b) || b.similarity - a.similarity);
     } else {
-      copy.sort((a, b) => a.nightlyPrice - b.nightlyPrice);
+      // Listings with no price for the selected date sort to the end.
+      copy.sort((a, b) => {
+        const pinned = comparePinned(a, b);
+        if (pinned !== 0) return pinned;
+        const pa = getPrice(a);
+        const pb = getPrice(b);
+        if (pa == null && pb == null) return 0;
+        if (pa == null) return 1;
+        if (pb == null) return -1;
+        return pa - pb;
+      });
     }
     return copy;
-  }, [listings, sortBy]);
+  }, [listings, sortBy, pinnedUrls, selectedDate]);
 
   const visible = expanded ? sorted.slice(0, 20) : sorted.slice(0, 10);
   const hasMore = sorted.length > 10 && !expanded;
@@ -210,18 +370,27 @@ export function ComparableListingsSection({
       {/* Header */}
       <div className="mb-1 flex items-center justify-between">
         {!embedded && <h2 className="text-lg font-semibold">Comparable listings</h2>}
-        {confidence && (
+        {matchQuality && (
           <span
-            className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${confidence.classes}`}
+            className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${matchQuality.classes}`}
           >
-            {confidence.label}
+            {matchQuality.label}
           </span>
         )}
       </div>
-      <p className="mb-4 text-sm text-gray-500">
-        Based on {used} similar listings in {locationBasis}. Showing top{" "}
-        {showingCount} most similar.
+      <p className="mb-4 text-sm text-gray-600">
+        Based on {used} similar listings in {locationBasis}. Showing the {showingCount} clearest matches first so the recommendation is easier to trust at a glance.
       </p>
+      {matchQuality && (
+        <p className="mb-3 text-xs text-gray-500">
+          {matchQuality.description}
+        </p>
+      )}
+      {pinnedUrls.length > 0 && (
+        <p className="mb-3 text-xs font-medium text-amber-700">
+          Your pinned benchmark listing appears first in this list whenever it is present in the collected comps.
+        </p>
+      )}
 
       {/* Sort toggle */}
       <div className="mb-3 flex gap-1 self-start rounded-lg border border-gray-200 p-0.5 w-fit">
@@ -247,10 +416,35 @@ export function ComparableListingsSection({
         </button>
       </div>
 
+      {/* Date context / snap disclosure */}
+      {isSnappedDate ? (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+          <p className="text-xs font-medium text-amber-800">
+            <span className="font-semibold">{clickedDate}</span> was not directly sampled — no comp prices were scraped on that day.
+          </p>
+          <p className="mt-0.5 text-xs text-amber-700">
+            Showing prices from <span className="font-semibold">{selectedDate}</span>, the nearest day that was actually queried.
+            These are real scraped prices, but for a different day than you clicked.
+          </p>
+        </div>
+      ) : selectedDate ? (
+        <p className="mb-2 text-xs font-medium text-accent">
+          Showing scraped nightly prices for {selectedDate}.
+          {" "}Listings marked &ldquo;No data for this date&rdquo; were not queried on this day.
+          {" "}Click a calendar day to change, or click the selected day to deselect.
+        </p>
+      ) : null}
+
       {/* Cards */}
       <div className="space-y-3">
         {visible.map((listing) => (
-          <ComparableCard key={listing.id} listing={listing} />
+          <ComparableCard
+            key={listing.id}
+            listing={listing}
+            isPinned={urlsMatchPinned(listing.url ?? null, pinnedUrls)}
+            selectedDate={selectedDate}
+            isSnappedDate={isSnappedDate}
+          />
         ))}
       </div>
 

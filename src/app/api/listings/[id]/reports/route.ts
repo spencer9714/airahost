@@ -30,7 +30,7 @@ export async function GET(
     const { data: reports, error } = await supabase
       .from("listing_reports")
       .select(
-        "id, trigger, created_at, pricing_reports:pricing_report_id(id, share_id, status, created_at, input_date_start, input_date_end, result_summary, result_calendar, error_message)"
+        "id, trigger, created_at, pricing_reports:pricing_report_id(id, share_id, status, report_type, created_at, completed_at, market_captured_at, input_date_start, input_date_end, result_summary, result_calendar, error_message)"
       )
       .eq("saved_listing_id", id)
       .order("created_at", { ascending: false });

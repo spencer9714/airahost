@@ -3,24 +3,28 @@ import { Button } from "@/components/Button";
 import type { ReportSummary, RecommendedPrice } from "@/lib/schemas";
 
 interface Props {
-  listingName: string;
   summary: ReportSummary;
   recommendedPrice: RecommendedPrice | null;
   reportShareId: string;
   onRerun: () => void;
   isRerunning: boolean;
+  listingName: string;
   propertyMeta: {
     propertyType: string;
     guests: number;
     beds: number;
     baths: number;
   } | null;
+  benchmarkMeta?: {
+    count: number;
+    primaryUrl: string | null;
+  } | null;
   lastAnalysisDate: string | null;
 }
 
 function positionBadge(suggestedPrice: number, marketMedian: number) {
   if (marketMedian <= 0) return null;
-  const pct = Math.round(((suggestedPrice / marketMedian) - 1) * 100);
+  const pct = Math.round((suggestedPrice / marketMedian - 1) * 100);
   if (pct < -3) {
     return {
       label: `${Math.abs(pct)}% below market`,
@@ -40,86 +44,138 @@ function positionBadge(suggestedPrice: number, marketMedian: number) {
 }
 
 export function RecommendationBanner({
-  listingName,
   summary,
   recommendedPrice,
   reportShareId,
   onRerun,
   isRerunning,
+  listingName,
   propertyMeta,
+  benchmarkMeta,
   lastAnalysisDate,
 }: Props) {
   const suggested = recommendedPrice?.nightly ?? summary.nightlyMedian;
   const median = summary.nightlyMedian;
   const badge = positionBadge(suggested, median);
 
+  const stats = [
+    {
+      label: "Market median",
+      value: median ? `$${median}` : "—",
+    },
+    {
+      label: "Occupancy est.",
+      value: summary.occupancyPct ? `${summary.occupancyPct}%` : "—",
+    },
+    {
+      label: "Weekday avg",
+      value: summary.weekdayAvg ? `$${summary.weekdayAvg}` : "—",
+    },
+    {
+      label: "Weekend avg",
+      value: summary.weekendAvg ? `$${summary.weekendAvg}` : "—",
+    },
+    {
+      label: "Monthly est.",
+      value: summary.estimatedMonthlyRevenue
+        ? `$${summary.estimatedMonthlyRevenue.toLocaleString()}`
+        : "—",
+    },
+  ];
+
   return (
-    <div className="rounded-2xl border border-border bg-white p-6 sm:p-8">
-      <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-        <div className="space-y-4">
-          {/* Listing name + meta */}
+    <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm">
+      {/* ── Hero: price + CTAs ── */}
+      <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between sm:p-7">
+        {/* Left: price block */}
+        <div className="space-y-2">
           <div>
-            <h3 className="text-lg font-bold tracking-tight">{listingName}</h3>
+            <p className="text-xs font-semibold uppercase tracking-widest text-foreground/40">
+              Suggested nightly rate
+            </p>
+            <div className="mt-1.5 flex items-baseline gap-3">
+              <p className="text-5xl font-bold tracking-tight">${suggested}</p>
+              {badge && (
+                <span
+                  className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.color}`}
+                >
+                  {badge.label}
+                </span>
+              )}
+            </div>
+            {median > 0 && suggested !== median && (
+              <p className="mt-1 text-sm text-foreground/50">
+                Market median: <span className="font-semibold text-foreground/70">${median}</span>
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-0.5">
             {propertyMeta && (
-              <p className="mt-1 text-sm text-foreground/70">
+              <p className="text-sm text-foreground/55">
                 {propertyMeta.propertyType} · {propertyMeta.guests} guest
                 {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
                 {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
                 {propertyMeta.baths !== 1 ? "s" : ""}
               </p>
             )}
+            {benchmarkMeta?.count ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-800">
+                  {benchmarkMeta.count} benchmark
+                  {benchmarkMeta.count !== 1 ? "s" : ""}
+                </span>
+                {benchmarkMeta.primaryUrl && (
+                  <a
+                    href={benchmarkMeta.primaryUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="max-w-65 truncate text-amber-700 hover:underline"
+                  >
+                    Primary benchmark
+                  </a>
+                )}
+              </div>
+            ) : null}
+            {lastAnalysisDate && (
+              <p className="text-xs text-foreground/35">
+                Analysis from {new Date(lastAnalysisDate).toLocaleDateString()}
+              </p>
+            )}
           </div>
-
-          {/* Price display */}
-          <div className="flex items-end gap-6">
-            <div>
-              <p className="text-sm font-medium uppercase tracking-wide text-foreground/60">
-                Suggested nightly
-              </p>
-              <p className="text-4xl font-bold tracking-tight">${suggested}</p>
-            </div>
-            <div>
-              <p className="text-sm font-medium uppercase tracking-wide text-foreground/60">
-                Market median
-              </p>
-              <p className="text-2xl font-semibold tracking-tight text-foreground/70">
-                ${median}
-              </p>
-            </div>
-          </div>
-
-          {/* Badge */}
-          {badge && (
-            <span
-              className={`inline-block rounded-full border px-3 py-1 text-sm font-semibold ${badge.color}`}
-            >
-              {badge.label}
-            </span>
-          )}
-
-          {/* Analysis date */}
-          {lastAnalysisDate && (
-            <p className="text-sm text-foreground/60">
-              Based on analysis from{" "}
-              {new Date(lastAnalysisDate).toLocaleDateString()}
-            </p>
-          )}
         </div>
 
-        {/* Actions */}
-        <div className="flex shrink-0 flex-col gap-2">
+        {/* Right: CTAs */}
+        <div className="flex shrink-0 flex-col gap-2 sm:items-end">
           <Link href={`/r/${reportShareId}`}>
             <Button size="md">View full report</Button>
           </Link>
           <Button
             size="sm"
-            variant="ghost"
+            variant="secondary"
             onClick={onRerun}
             disabled={isRerunning}
           >
-            {isRerunning ? "Re-analyzing..." : "Re-run analysis"}
+            {isRerunning ? "Re-analyzing…" : "Re-run analysis"}
           </Button>
+          <p className="hidden text-right text-[11px] text-foreground/35 sm:block">
+            {listingName}
+          </p>
         </div>
+      </div>
+
+      {/* ── KPI stats row ── */}
+      <div className="grid grid-cols-3 divide-x divide-y divide-border border-t border-border sm:grid-cols-5 sm:divide-y-0">
+        {stats.map((stat) => (
+          <div key={stat.label} className="px-4 py-3.5">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-foreground/40">
+              {stat.label}
+            </p>
+            <p className="mt-0.5 text-base font-bold text-foreground">
+              {stat.value}
+            </p>
+          </div>
+        ))}
       </div>
     </div>
   );

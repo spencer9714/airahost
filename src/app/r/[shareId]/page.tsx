@@ -6,31 +6,296 @@ import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { HowWeEstimated } from "@/components/report/HowWeEstimated";
 import { getSupabaseBrowser } from "@/lib/supabase";
-import type { PricingReport, CalendarDay } from "@/lib/schemas";
+import type {
+  PricingReport,
+  CalendarDay,
+  TargetSpec,
+  QueryCriteria,
+  CompsSummary,
+  ComparableListing,
+  BenchmarkInfo,
+} from "@/lib/schemas";
 import { generatePricingReport } from "@/core/pricingCore";
 
-// Demo report (unchanged)
+// Find the nearest calendar date that has actual comp price data.
+// When a user clicks an interpolated day (no real scrape done), snapping to
+// the nearest sampled date prevents the "No data for this date" state for all listings.
+function snapToNearestSampledDate(
+  date: string,
+  comparableListings: import("@/lib/schemas").ComparableListing[] | null | undefined
+): string {
+  if (!comparableListings || comparableListings.length === 0) return date;
+  const datesWithData = new Set<string>();
+  for (const l of comparableListings) {
+    if (l.priceByDate) {
+      for (const d of Object.keys(l.priceByDate)) datesWithData.add(d);
+    }
+  }
+  if (datesWithData.size === 0 || datesWithData.has(date)) return date;
+  const targetMs = new Date(date + "T00:00:00Z").getTime();
+  let nearest = date;
+  let minDiff = Infinity;
+  for (const d of datesWithData) {
+    const diff = Math.abs(new Date(d + "T00:00:00Z").getTime() - targetMs);
+    if (diff < minDiff) { minDiff = diff; nearest = d; }
+  }
+  return nearest;
+}
+
+// Demo report — realistic property, dynamic date range (next 30 days).
 function getDemoReport(): PricingReport {
+  const today = new Date();
+  const startDate = today.toISOString().split("T")[0];
+  const end = new Date(today);
+  end.setDate(today.getDate() + 30);
+  const endDate = end.toISOString().split("T")[0];
+
+  // Four sampled scrape dates spread across the 30-day window.
+  const sampleDates = [0, 7, 14, 21].map((offset) => {
+    const d = new Date(today);
+    d.setDate(today.getDate() + offset);
+    return d.toISOString().split("T")[0];
+  });
+  const [d0, d7, d14, d21] = sampleDates;
+
+  const demoAddress = "2847 Hillcrest Drive, Santa Barbara, CA";
+  const demoPolicy = {
+    weeklyDiscountPct: 10,
+    monthlyDiscountPct: 20,
+    refundable: true,
+    nonRefundableDiscountPct: 10,
+    stackingMode: "compound" as const,
+    maxTotalDiscountPct: 40,
+  };
+
   const result = generatePricingReport({
     listing: {
-      address: "742 Evergreen Terrace, Springfield, OR",
+      address: demoAddress,
       propertyType: "entire_home",
-      bedrooms: 3,
-      bathrooms: 2,
-      maxGuests: 6,
-      amenities: ["wifi", "kitchen", "washer", "dryer", "free_parking", "bbq"],
+      bedrooms: 2,
+      bathrooms: 1,
+      maxGuests: 4,
+      amenities: ["wifi", "kitchen", "washer", "free_parking", "pool"],
     },
-    startDate: "2026-03-01",
-    endDate: "2026-03-31",
-    discountPolicy: {
-      weeklyDiscountPct: 10,
-      monthlyDiscountPct: 20,
-      refundable: true,
-      nonRefundableDiscountPct: 10,
-      stackingMode: "compound",
-      maxTotalDiscountPct: 40,
-    },
+    startDate,
+    endDate,
+    discountPolicy: demoPolicy,
   });
+
+  // ── Transparency data ──────────────────────────────────────────
+
+  const targetSpec: TargetSpec = {
+    title: "2847 Hillcrest Drive",
+    location: "Santa Barbara, CA",
+    propertyType: "Entire home",
+    accommodates: 4,
+    bedrooms: 2,
+    beds: 2,
+    baths: 1,
+    amenities: ["Wifi", "Kitchen", "Washer", "Free parking on premises", "Pool"],
+    rating: null,
+    reviews: null,
+  };
+
+  const queryCriteria: QueryCriteria = {
+    locationBasis: "Santa Barbara, CA",
+    searchAdults: 2,
+    checkin: startDate,
+    checkout: endDate,
+    propertyTypeFilter: "entire_home",
+    tolerances: { accommodates: 2, bedrooms: 1, beds: 2, baths: 1 },
+  };
+
+  const benchmarkInfo: BenchmarkInfo = {
+    benchmarkUsed: true,
+    benchmarkUrl: "https://www.airbnb.com/rooms/45892310",
+    benchmarkFetchStatus: "search_hit",
+    benchmarkFetchMethod: "search_result_card",
+    avgBenchmarkPrice: 188,
+    avgMarketPrice: 196,
+    marketAdjustmentPct: 4.3,
+    appliedMarketWeight: 0.35,
+    effectiveMarketWeight: 0.29,
+    maxAdjCap: 0.35,
+    benchmarkTargetSimilarity: 0.93,
+    benchmarkMismatchLevel: "high_match",
+    outlierDays: 1,
+    conflictDetected: false,
+    fallbackReason: null,
+    fetchStats: {
+      searchHits: 28,
+      directFetches: 2,
+      failed: 0,
+      totalDays: 30,
+      highConfidenceDays: 24,
+      mediumConfidenceDays: 4,
+      lowConfidenceDays: 2,
+    },
+    secondaryComps: null,
+    consensusSignal: "strong",
+  };
+
+  const comparableListings: ComparableListing[] = [
+    {
+      id: "comp-sb-1",
+      title: "Charming 2BR Cottage Near State Street",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 185,
+      currency: "USD",
+      similarity: 0.94,
+      rating: 4.87,
+      reviews: 142,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 28,
+      priceByDate: { [d0]: 178, [d7]: 192, [d14]: 201, [d21]: 183 },
+    },
+    {
+      id: "comp-sb-2",
+      title: "Sunny 2-Bedroom Home — Walk to Beach",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 209,
+      currency: "USD",
+      similarity: 0.91,
+      rating: 4.92,
+      reviews: 88,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 26,
+      priceByDate: { [d0]: 199, [d7]: 215, [d14]: 222, [d21]: 204 },
+    },
+    {
+      id: "comp-sb-3",
+      title: "Modern Bungalow with Patio — Eastside SB",
+      propertyType: "Entire home",
+      accommodates: 3,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 172,
+      currency: "USD",
+      similarity: 0.88,
+      rating: 4.78,
+      reviews: 215,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 30,
+      priceByDate: { [d0]: 165, [d7]: 175, [d14]: 182, [d21]: 170 },
+    },
+    {
+      id: "comp-sb-4",
+      title: "Bright 2BD with Private Garden",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 193,
+      currency: "USD",
+      similarity: 0.87,
+      rating: 4.83,
+      reviews: 61,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 24,
+      priceByDate: { [d0]: 186, [d7]: 198, [d14]: 207, [d21]: 190 },
+    },
+    {
+      id: "comp-sb-5",
+      title: "Cozy Craftsman Near Downtown & Funk Zone",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 168,
+      currency: "USD",
+      similarity: 0.85,
+      rating: 4.71,
+      reviews: 307,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 29,
+      priceByDate: { [d0]: 162, [d7]: 172, [d14]: 179, [d21]: 165 },
+    },
+    {
+      id: "comp-sb-6",
+      title: "Santa Barbara Retreat with Pool Access",
+      propertyType: "Entire home",
+      accommodates: 5,
+      bedrooms: 2,
+      baths: 2,
+      nightlyPrice: 228,
+      currency: "USD",
+      similarity: 0.82,
+      rating: 4.95,
+      reviews: 43,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 22,
+      priceByDate: { [d0]: 219, [d7]: 235, [d14]: 248, [d21]: 222 },
+    },
+    {
+      id: "comp-sb-7",
+      title: "Updated 2BR Rancho — Quiet Street",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 176,
+      currency: "USD",
+      similarity: 0.80,
+      rating: 4.68,
+      reviews: 129,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 27,
+      priceByDate: { [d0]: 169, [d7]: 180, [d14]: 188, [d21]: 174 },
+    },
+    {
+      id: "comp-sb-8",
+      title: "Stylish 2BR with Rooftop Deck & Views",
+      propertyType: "Entire home",
+      accommodates: 4,
+      bedrooms: 2,
+      baths: 1,
+      nightlyPrice: 214,
+      currency: "USD",
+      similarity: 0.77,
+      rating: 4.88,
+      reviews: 76,
+      location: "Santa Barbara, CA",
+      url: null,
+      queryNights: 1,
+      usedInPricingDays: 20,
+      priceByDate: { [d0]: 205, [d7]: 220, [d14]: 229, [d21]: 210 },
+    },
+  ];
+
+  const compsSummary: CompsSummary = {
+    collected: 24,
+    afterFiltering: 12,
+    usedForPricing: 8,
+    filterStage: "strict",
+    topSimilarity: 0.94,
+    avgSimilarity: 0.86,
+    sampledDays: 4,
+    interpolatedDays: 26,
+    missingDays: 0,
+    belowSimilarityFloor: 4,
+    filterFloor: 0.65,
+    lowCompConfidenceDays: 0,
+  };
 
   return {
     id: "demo",
@@ -38,14 +303,14 @@ function getDemoReport(): PricingReport {
     createdAt: new Date().toISOString(),
     status: "ready",
     coreVersion: result.coreVersion,
-    inputAddress: "742 Evergreen Terrace, Springfield, OR",
+    inputAddress: demoAddress,
     inputAttributes: {
-      address: "742 Evergreen Terrace, Springfield, OR",
+      address: demoAddress,
       propertyType: "entire_home",
-      bedrooms: 3,
-      bathrooms: 2,
-      maxGuests: 6,
-      amenities: ["wifi", "kitchen", "washer", "dryer", "free_parking", "bbq"],
+      bedrooms: 2,
+      bathrooms: 1,
+      maxGuests: 4,
+      amenities: ["wifi", "kitchen", "washer", "free_parking", "pool"],
       lastMinuteStrategy: {
         mode: "auto",
         aggressiveness: 50,
@@ -53,17 +318,17 @@ function getDemoReport(): PricingReport {
         cap: 1.05,
       },
     },
-    inputDateStart: "2026-03-01",
-    inputDateEnd: "2026-03-31",
-    discountPolicy: {
-      weeklyDiscountPct: 10,
-      monthlyDiscountPct: 20,
-      refundable: true,
-      nonRefundableDiscountPct: 10,
-      stackingMode: "compound",
-      maxTotalDiscountPct: 40,
+    inputDateStart: startDate,
+    inputDateEnd: endDate,
+    discountPolicy: demoPolicy,
+    resultSummary: {
+      ...result.summary,
+      targetSpec,
+      queryCriteria,
+      benchmarkInfo,
+      comparableListings,
+      compsSummary,
     },
-    resultSummary: result.summary,
     resultCalendar: result.calendar,
     errorMessage: null,
   };
@@ -71,7 +336,49 @@ function getDemoReport(): PricingReport {
 
 // Polling config
 const POLL_INTERVAL_MS = 2_000;
-const SLOW_THRESHOLD_MS = 120_000; // 2 minutes
+
+// Staleness tiers based on worker_heartbeat_at age
+const STALE_FRESH_MS = 45_000;    // < 45s  → fresh (normal spinner)
+const STALE_SLOW_MS = 90_000;     // 45–90s → slow (mild warning)
+const STALE_DELAYED_MS = 300_000; // 90–300s → delayed (strong warning)
+// > 300s → unavailable
+
+type StalenessTier = "fresh" | "slow" | "delayed" | "unavailable";
+
+function getStaleness(workerHeartbeatAt: string | null | undefined): StalenessTier {
+  if (!workerHeartbeatAt) return "fresh"; // no heartbeat yet = just started
+  const ageMs = Date.now() - new Date(workerHeartbeatAt).getTime();
+  if (ageMs < STALE_FRESH_MS) return "fresh";
+  if (ageMs < STALE_SLOW_MS) return "slow";
+  if (ageMs < STALE_DELAYED_MS) return "delayed";
+  return "unavailable";
+}
+
+const STAGE_LABELS: Record<string, string> = {
+  connecting: "Connecting to browser",
+  extracting_target: "Extracting listing details",
+  fetching_benchmark: "Fetching benchmark listing",
+  searching_comps: "Searching comparable listings",
+  pricing: "Computing pricing estimates",
+  saving_results: "Saving results",
+  completed: "Complete",
+};
+
+function getFriendlyReportError(message: string | null | undefined) {
+  if (!message) {
+    return "We couldn't generate your pricing report. Please try again.";
+  }
+
+  if (message.includes("Could not reach Airbnb data")) {
+    return "We found Airbnb listings, but couldn't verify enough nightly prices for this report. Please try again in a moment.";
+  }
+
+  if (message.includes("Could not collect enough pricing data")) {
+    return "We couldn't collect enough trustworthy nightly prices to build this report. Please try again in a moment.";
+  }
+
+  return message;
+}
 
 export default function ResultsPage({
   params,
@@ -85,10 +392,14 @@ export default function ResultsPage({
   const [calendarView, setCalendarView] = useState<"base" | "effective">(
     "base"
   );
+  // selectedDate  = the date the user clicked in the calendar (used for highlight only)
+  // effectiveDate = nearest sampled date with real comp data (used for price lookup)
+  // When clicking a sampled date they are equal. When clicking an interpolated date,
+  // effectiveDate differs and a disclosure banner is shown in the comp section.
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
 
   // Polling state
-  const [pollStartedAt] = useState(() => Date.now());
-  const [isSlow, setIsSlow] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Auth state
@@ -137,9 +448,6 @@ export default function ResultsPage({
     // Start polling
     pollRef.current = setInterval(() => {
       fetchReport();
-      if (Date.now() - pollStartedAt > SLOW_THRESHOLD_MS) {
-        setIsSlow(true);
-      }
     }, POLL_INTERVAL_MS);
 
     return () => {
@@ -148,7 +456,7 @@ export default function ResultsPage({
         pollRef.current = null;
       }
     };
-  }, [shareId, fetchReport, pollStartedAt]);
+  }, [shareId, fetchReport]);
 
   useEffect(() => {
     const supabase = getSupabaseBrowser();
@@ -221,28 +529,90 @@ export default function ResultsPage({
     (report.status === "queued" || report.status === "running") &&
     !error
   ) {
+    const staleness = getStaleness(report.workerHeartbeatAt);
+    const progress = report.progressMeta;
+    const pct = progress?.pct ?? 0;
+    const stageLabel = progress?.stage ? (STAGE_LABELS[progress.stage] ?? progress.stage) : null;
+    const estSec = progress?.est_seconds_remaining;
+
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="mx-auto max-w-md text-center">
-          <div className="mx-auto mb-6 h-10 w-10 animate-spin rounded-full border-3 border-accent border-t-transparent" />
-          <h2 className="mb-2 text-xl font-semibold">Analyzing your market</h2>
-          <p className="mb-1 text-sm text-muted">
-            {report.status === "queued"
-              ? "Your report is in the queue..."
-              : "Crunching the numbers..."}
-          </p>
-          <p className="text-sm text-muted">
-            This typically takes 30 to 90 seconds.
-          </p>
+        <div className="mx-auto w-full max-w-md text-center">
+          {staleness !== "unavailable" && (
+            <div className="mx-auto mb-6 h-10 w-10 animate-spin rounded-full border-3 border-accent border-t-transparent" />
+          )}
+          {staleness === "unavailable" && (
+            <div className="mx-auto mb-6 flex h-10 w-10 items-center justify-center rounded-full bg-rose-100 text-rose-500">
+              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M12 3a9 9 0 100 18A9 9 0 0012 3z" />
+              </svg>
+            </div>
+          )}
 
-          {isSlow && (
-            <div className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-4">
-              <p className="text-sm font-medium text-amber-800">
-                This is taking longer than usual
-              </p>
+          <h2 className="mb-2 text-xl font-semibold">
+            {staleness === "unavailable" ? "Worker unreachable" : "Analyzing your market"}
+          </h2>
+
+          {/* Progress bar — shown once worker has sent first progress update */}
+          {progress && staleness !== "unavailable" && (
+            <div className="mb-4 px-2">
+              <div className="mb-1 flex items-center justify-between text-xs text-muted">
+                <span>{stageLabel ?? "Working..."}</span>
+                <span>{pct}%</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-surface-alt">
+                <div
+                  className="h-full rounded-full bg-accent transition-all duration-500"
+                  style={{ width: `${pct}%` }}
+                />
+              </div>
+              {estSec != null && estSec > 0 && (
+                <p className="mt-1 text-xs text-muted">
+                  ~{estSec < 60 ? `${estSec}s` : `${Math.round(estSec / 60)}m`} remaining
+                </p>
+              )}
+            </div>
+          )}
+
+          {!progress && (
+            <p className="mb-1 text-sm text-muted">
+              {report.status === "queued"
+                ? "Your report is in the queue..."
+                : "Crunching the numbers..."}
+            </p>
+          )}
+
+          {progress?.message && staleness !== "unavailable" && (
+            <p className="mb-1 text-sm text-muted">{progress.message}</p>
+          )}
+
+          {staleness === "fresh" && !progress && (
+            <p className="text-sm text-muted">This typically takes 30 to 90 seconds.</p>
+          )}
+
+          {staleness === "slow" && (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm font-medium text-amber-800">Taking a bit longer than usual</p>
               <p className="mt-1 text-xs text-amber-700">
-                The worker may be busy or temporarily offline. Your report will
-                be processed as soon as possible.
+                The worker is still running — hold tight.
+              </p>
+            </div>
+          )}
+
+          {staleness === "delayed" && (
+            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm font-medium text-amber-800">This is taking longer than expected</p>
+              <p className="mt-1 text-xs text-amber-700">
+                The worker may be overloaded. Your report will be processed as soon as possible.
+              </p>
+            </div>
+          )}
+
+          {staleness === "unavailable" && (
+            <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4">
+              <p className="text-sm font-medium text-rose-800">Worker appears to be offline</p>
+              <p className="mt-1 text-xs text-rose-700">
+                No heartbeat received in over 5 minutes. Your report will resume automatically when the worker comes back online.
               </p>
             </div>
           )}
@@ -266,8 +636,7 @@ export default function ResultsPage({
         </div>
         <h1 className="mb-3 text-2xl font-bold">Something went wrong</h1>
         <p className="mb-6 text-muted">
-          {report.errorMessage ||
-            "We couldn't generate your pricing report. Please try again."}
+          {getFriendlyReportError(report.errorMessage)}
         </p>
         <Button
           onClick={() => {
@@ -365,8 +734,28 @@ export default function ResultsPage({
             arr.findIndex((x) => x.stayLength === point.stayLength) === idx
         );
 
+  const suggestedNightly = s.recommendedPrice?.nightly ?? s.nightlyMedian;
+
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
+      {/* Sample report banner */}
+      {shareId === "demo" && (
+        <div className="mb-6 flex items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+          <span className="shrink-0 rounded-full bg-blue-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
+            Sample
+          </span>
+          <p className="text-sm text-blue-800">
+            This is a generated example report using illustrative data.{" "}
+            <Link
+              href="/tool"
+              className="font-medium underline underline-offset-2 hover:text-blue-900"
+            >
+              Analyze your own listing →
+            </Link>
+          </p>
+        </div>
+      )}
+
       {/* Address header */}
       <p className="mb-1 text-sm text-muted">Revenue report for</p>
       <h1 className="mb-8 text-2xl font-bold">{report.inputAddress}</h1>
@@ -374,9 +763,14 @@ export default function ResultsPage({
       {/* Section 1 - Revenue Opportunity */}
       <Card className="mb-6 border-accent/20 bg-accent/[0.02]">
         <p className="text-sm font-medium text-accent">Revenue Opportunity</p>
-        <p className="mt-2 text-xl font-semibold">{s.insightHeadline}</p>
-        <p className="mt-2 text-sm text-muted">
-          Estimated monthly revenue at current pricing:{" "}
+        {/* Suggested nightly rate — hero metric */}
+        <div className="mt-3 flex items-baseline gap-2">
+          <span className="text-4xl font-bold tracking-tight">${suggestedNightly}</span>
+          <span className="text-sm text-muted">/night suggested</span>
+        </div>
+        <p className="mt-2 text-sm text-muted">{s.insightHeadline}</p>
+        <p className="mt-3 text-sm text-muted">
+          Estimated monthly revenue:{" "}
           <span className="font-semibold text-foreground">
             ${s.estimatedMonthlyRevenue.toLocaleString()}
           </span>
@@ -402,7 +796,7 @@ export default function ResultsPage({
         <Card>
           <p className="text-sm text-muted">Occupancy</p>
           <p className="mt-1 text-2xl font-bold">{s.occupancyPct}%</p>
-          <p className="mt-1 text-sm text-muted">Estimated for this area</p>
+          <p className="mt-1 text-sm text-muted">Market est. — not booking data</p>
         </Card>
         <Card>
           <p className="text-sm text-muted">Weekday vs weekend</p>
@@ -444,9 +838,19 @@ export default function ResultsPage({
         report.compsSummary ||
         report.resultSummary?.compsSummary ||
         report.comparableListings ||
-        report.resultSummary?.comparableListings
+        report.resultSummary?.comparableListings ||
+        report.benchmarkInfo ||
+        report.resultSummary?.benchmarkInfo ||
+        (Array.isArray(report.inputAttributes?.preferredComps) &&
+          report.inputAttributes.preferredComps.some(
+            (comp) => comp.enabled !== false && comp.listingUrl
+          ))
       ) && (
-        <HowWeEstimated report={report} />
+        <HowWeEstimated
+          report={report}
+          selectedDate={effectiveDate}
+          clickedDate={selectedDate !== effectiveDate ? selectedDate : undefined}
+        />
       )}
 
       {/* Section 3 - Price Calendar */}
@@ -454,6 +858,13 @@ export default function ResultsPage({
         calendar={report.resultCalendar ?? []}
         calendarView={calendarView}
         onViewChange={setCalendarView}
+        selectedDate={selectedDate}
+        onDateSelect={(d) => {
+          if (!d) { setSelectedDate(null); setEffectiveDate(null); return; }
+          setSelectedDate(d); // calendar always highlights what was clicked
+          const cl = report.comparableListings ?? report.resultSummary?.comparableListings;
+          setEffectiveDate(snapToNearestSampledDate(d, cl));
+        }}
       />
 
       {/* Section 4 - Discount Explanation */}
@@ -599,8 +1010,9 @@ export default function ResultsPage({
 
       {/* Meta */}
       <p className="mt-8 text-center text-xs text-muted">
-        Report generated by {report.coreVersion} on{" "}
-        {new Date(report.createdAt).toLocaleDateString()}
+        {shareId === "demo"
+          ? "Sample report — values are illustrative, not from live market data"
+          : `Report generated by ${report.coreVersion} on ${new Date(report.createdAt).toLocaleDateString()}`}
       </p>
     </div>
   );
@@ -657,10 +1069,14 @@ function PriceCalendar({
   calendar,
   calendarView,
   onViewChange,
+  selectedDate,
+  onDateSelect,
 }: {
   calendar: CalendarDay[];
   calendarView: "base" | "effective";
   onViewChange: (v: "base" | "effective") => void;
+  selectedDate?: string | null;
+  onDateSelect?: (date: string | null) => void;
 }) {
   // Build a lookup map: "YYYY-MM-DD" -> CalendarDay
   const dayMap = useMemo(() => {
@@ -820,12 +1236,18 @@ function PriceCalendar({
             const flags = entry.flags ?? [];
             const isInterpolated = flags.includes("interpolated");
             const isMissing = flags.includes("missing_data");
+            const isSelected = selectedDate === ds;
 
             return (
               <div
                 key={ds}
-                className={`group relative flex aspect-square flex-col items-center justify-center rounded-xl border border-border/60 transition-shadow hover:shadow-md ${
-                  entry.isWeekend ? "border-accent/20" : ""
+                onClick={() => onDateSelect?.(isSelected ? null : ds)}
+                className={`group relative flex aspect-square flex-col items-center justify-center rounded-xl border transition-shadow hover:shadow-md cursor-pointer ${
+                  isSelected
+                    ? "border-accent bg-accent/10 ring-2 ring-accent/40"
+                    : entry.isWeekend
+                    ? "border-accent/20 border-border/60"
+                    : "border-border/60"
                 } ${isInterpolated && !isMissing ? "border-dashed" : ""}`}
               >
                 <span className="text-[10px] leading-none text-muted sm:text-xs">

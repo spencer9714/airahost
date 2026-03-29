@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import { RecommendationBanner } from "@/components/dashboard/RecommendationBanner";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
+import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
+import { resolveMarketCapturedAt } from "@/lib/freshness";
 import type {
   PropertyType,
   CalendarDay,
@@ -20,11 +21,17 @@ import type {
   DateMode,
 } from "@/lib/schemas";
 
+// latestReport is always status="ready" when non-null — the API now guarantees this.
 type LatestReport = {
   id: string;
   share_id: string;
-  status: "queued" | "running" | "ready" | "error";
+  status: "ready";
+  report_type?: "live_analysis" | "forecast_snapshot";
   created_at: string;
+  /** Set when status transitions to ready (migration 010). Null for older reports. */
+  completed_at?: string | null;
+  /** When Airbnb market data was captured (migration 010). Use for freshness. */
+  market_captured_at?: string | null;
   input_date_start: string;
   input_date_end: string;
   result_summary: {
@@ -42,6 +49,14 @@ type LatestReport = {
   result_calendar?: CalendarDay[];
 } | null;
 
+// activeJob tracks the newest linked report when it is NOT ready.
+// It exists alongside latestReport so the UI can show a banner without hiding pricing.
+type ActiveJob = {
+  status: "queued" | "running" | "error";
+  linkedAt: string;
+  shareId: string | null;
+};
+
 type ListingRow = {
   id: string;
   name: string;
@@ -54,6 +69,8 @@ type ListingRow = {
     beds?: number;
     amenities?: string[];
     address?: string;
+    listingUrl?: string | null;
+    preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
   };
   created_at: string;
   last_used_at: string | null;
@@ -62,30 +79,28 @@ type ListingRow = {
   default_end_date?: string | null;
   latestReport: LatestReport;
   latestLinkedAt: string | null;
+  activeJob: ActiveJob | null;
 };
 
+// RecentReportRow covers all statuses — recentReports from the API is not filtered by status.
 type RecentReportRow = {
   listingId: string;
   listingName: string;
   linkedAt: string;
   trigger: "manual" | "rerun" | "scheduled";
-  report: NonNullable<LatestReport>;
-};
-
-type ListingDetailResponse = {
-  listing: ListingRow;
-  reports: Array<{
+  report: {
     id: string;
-    trigger: string;
+    share_id: string;
+    status: string;
     created_at: string;
-    pricing_reports: {
-      share_id: string;
-      status: string;
-      result_summary: { nightlyMedian?: number } | null;
+    input_date_start: string;
+    input_date_end: string;
+    result_summary: {
+      nightlyMedian?: number;
+      recommendedPrice?: { nightly: number | null };
     } | null;
-  }>;
+  };
 };
-
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -97,18 +112,15 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [rerunningId, setRerunningId] = useState<string | null>(null);
-  const [expandedListingId, setExpandedListingId] = useState<string | null>(
-    null
-  );
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyRows, setHistoryRows] = useState<
-    ListingDetailResponse["reports"]
-  >([]);
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
-  const [pricingMode, setPricingMode] = useState<
-    "refundable" | "nonRefundable"
-  >("refundable");
-
+  const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
+  const [showCustomPanel, setShowCustomPanel] = useState(false);
+  const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
+  const [customEnd, setCustomEnd] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 30);
+    return d.toISOString().split("T")[0];
+  });
 
   const loadDashboardData = useCallback(async () => {
     setLoading(true);
@@ -119,27 +131,22 @@ export default function DashboardPage() {
         router.push("/login");
         return;
       }
-      if (!res.ok) {
-        throw new Error("Failed to load dashboard data");
-      }
+      if (!res.ok) throw new Error("Failed to load dashboard data");
+
       const data = await res.json();
       const loadedListings = (data.listings ?? []) as ListingRow[];
       setListings(loadedListings);
       setRecentReports((data.recentReports ?? []) as RecentReportRow[]);
-      // Auto-select only once (or after delete reset): prefer most recently analyzed listing.
+
+      // Auto-select once: prefer the listing with the most recently linked ready report.
       setActiveListingId((prev) => {
         if (prev || loadedListings.length === 0) return prev;
-        const withReports = loadedListings
-          .filter(
-            (l) =>
-              l.latestReport?.status === "ready" && l.latestReport.result_summary
-          )
-          .sort((a, b) => {
-            const aDate = a.latestLinkedAt ?? "";
-            const bDate = b.latestLinkedAt ?? "";
-            return bDate.localeCompare(aDate);
-          });
-        return withReports[0]?.id ?? loadedListings[0].id;
+        const withReady = loadedListings
+          .filter((l) => l.latestReport !== null)
+          .sort((a, b) =>
+            (b.latestLinkedAt ?? "").localeCompare(a.latestLinkedAt ?? "")
+          );
+        return withReady[0]?.id ?? loadedListings[0].id;
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load dashboard");
@@ -166,26 +173,6 @@ export default function DashboardPage() {
     });
   }, [router, loadDashboardData]);
 
-  async function loadListingHistory(listingId: string) {
-    if (expandedListingId === listingId) {
-      setExpandedListingId(null);
-      setHistoryRows([]);
-      return;
-    }
-    setExpandedListingId(listingId);
-    setHistoryLoading(true);
-    try {
-      const res = await fetch(`/api/listings/${listingId}`);
-      if (!res.ok) throw new Error("Failed to load listing details");
-      const data = (await res.json()) as ListingDetailResponse;
-      setHistoryRows(data.reports ?? []);
-    } catch {
-      setHistoryRows([]);
-    } finally {
-      setHistoryLoading(false);
-    }
-  }
-
   async function handleRunAnalysis(
     listingId: string,
     dates: { startDate: string; endDate: string }
@@ -195,10 +182,7 @@ export default function DashboardPage() {
       const res = await fetch("/api/reports", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          listingId,
-          dateRange: dates,
-        }),
+        body: JSON.stringify({ listingId, dateRange: dates }),
       });
       if (!res.ok) throw new Error("Failed to run analysis");
       const data = await res.json();
@@ -217,7 +201,6 @@ export default function DashboardPage() {
     startDate: string | null,
     endDate: string | null
   ) {
-    // Fire-and-forget PATCH — debounced by the ListingCard
     void fetch(`/api/listings/${listingId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -230,15 +213,9 @@ export default function DashboardPage() {
   }
 
   async function handleDelete(listingId: string) {
-    const res = await fetch(`/api/listings/${listingId}`, {
-      method: "DELETE",
-    });
+    const res = await fetch(`/api/listings/${listingId}`, { method: "DELETE" });
     if (res.ok) {
       if (activeListingId === listingId) setActiveListingId(null);
-      if (expandedListingId === listingId) {
-        setExpandedListingId(null);
-        setHistoryRows([]);
-      }
       await loadDashboardData();
     }
   }
@@ -272,16 +249,31 @@ export default function DashboardPage() {
     }
   }
 
-  // ── Derived state ──────────────────────────────────────────────
+  async function handleSavePreferredComps(
+    listingId: string,
+    preferredComps: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null
+  ) {
+    const res = await fetch(`/api/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preferredComps }),
+    });
+    if (!res.ok) throw new Error("Failed to save benchmark listings");
+    await loadDashboardData();
+  }
+
+  // ── Derived state ─────────────────────────────────────────────────
   const activeListing = useMemo(
     () => listings.find((l) => l.id === activeListingId) ?? null,
     [listings, activeListingId]
   );
 
-  const activeReport = activeListing?.latestReport;
+  // activeReport is always a "ready" report or null — no status check needed.
+  const activeReport = activeListing?.latestReport ?? null;
+
   const activeSummary: ReportSummary | null = useMemo(() => {
     const s = activeReport?.result_summary;
-    if (!s || activeReport?.status !== "ready") return null;
+    if (!s) return null;
     return {
       insightHeadline: "",
       nightlyMin: s.nightlyMin ?? 0,
@@ -302,207 +294,399 @@ export default function DashboardPage() {
   const activeCalendar = activeReport?.result_calendar ?? [];
 
   const listingCountText = useMemo(
-    () => `${listings.length} listing${listings.length === 1 ? "" : "s"}`,
+    () => `${listings.length} listing${listings.length === 1 ? "" : "s"} saved`,
     [listings.length]
   );
 
-  const readyListings = useMemo(
-    () =>
-      listings
-        .filter(
-          (l) =>
-            l.latestReport?.status === "ready" && l.latestReport.result_summary
-        )
-        .map((l) => ({ id: l.id, name: l.name })),
-    [listings]
-  );
-
-  function handleListingSelect(id: string) {
-    setActiveListingId(id);
-  }
-
   if (!authReady || loading) {
     return (
-      <div className="mx-auto max-w-5xl px-6 py-10">
-        <p className="text-base text-foreground/60">Loading dashboard...</p>
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <p className="text-sm text-foreground/40">Loading dashboard…</p>
       </div>
     );
   }
 
+  const firstName = userName ? userName.split(" ")[0] : null;
+
   return (
-    <div className="mx-auto max-w-5xl space-y-10 px-6 py-10">
-      {/* Header */}
-      <section className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <p className="text-sm font-medium uppercase tracking-wide text-foreground/50">
-            Dashboard
-          </p>
-          <h1 className="text-3xl font-bold tracking-tight">
-            Welcome back, {userName || userEmail}
-          </h1>
-          <p className="mt-1 text-base text-foreground/60">
-            Track your listings and optimize pricing. You currently manage{" "}
-            {listingCountText}.
-          </p>
-        </div>
-        <Link href="/tool?from=dashboard">
-          <Button size="md">New analysis</Button>
-        </Link>
-      </section>
+    <div className="min-h-screen bg-gray-50/50">
+      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
 
-      {error && (
-        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-6 py-4">
-          <p className="text-base text-rose-800">{error}</p>
-        </div>
-      )}
-
-      {/* ═══ Section A: Today's Recommendation ═══ */}
-      {activeListing && activeSummary && activeReport && (
-        <section className="space-y-6">
-          {/* Title row + listing selector */}
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-2xl font-bold tracking-tight">
-              Today&apos;s recommendation
-            </h2>
-            {readyListings.length > 1 && (
-              <select
-                value={activeListing.id}
-                onChange={(e) => handleListingSelect(e.target.value)}
-                className="min-w-0 max-w-xs rounded-xl border border-border bg-white px-4 py-2.5 text-base font-semibold text-foreground outline-none focus:border-accent"
-              >
-                {readyListings.map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          {/* Recommendation card */}
-          <RecommendationBanner
-            listingName={activeListing.name}
-            summary={activeSummary}
-            recommendedPrice={activeSummary.recommendedPrice ?? null}
-            reportShareId={activeReport.share_id}
-            onRerun={() => {
-              const today = new Date().toISOString().split("T")[0];
-              const end = new Date();
-              end.setDate(end.getDate() + 30);
-              void handleRunAnalysis(activeListing.id, {
-                startDate: today,
-                endDate: end.toISOString().split("T")[0],
-              });
-            }}
-            isRerunning={rerunningId === activeListing.id}
-            propertyMeta={{
-              propertyType: activeListing.input_attributes.propertyType,
-              guests: activeListing.input_attributes.maxGuests,
-              beds:
-                activeListing.input_attributes.beds ??
-                activeListing.input_attributes.bedrooms,
-              baths: activeListing.input_attributes.bathrooms,
-            }}
-            lastAnalysisDate={activeListing.latestLinkedAt}
-          />
-
-          {/* Pricing Heatmap */}
-          {activeCalendar.length > 0 && (
-            <PricingHeatmap
-              calendar={activeCalendar}
-              pricingMode={pricingMode}
-              onModeChange={setPricingMode}
-            />
-          )}
-
-          {/* Smart Alerts */}
-          {activeSummary && (
-            <div>
-              <h3 className="mb-4 text-xl font-bold tracking-tight">Alerts</h3>
-              <SmartAlerts
-                summary={activeSummary}
-                compsSummary={activeSummary.compsSummary ?? null}
-                priceDistribution={activeSummary.priceDistribution ?? null}
-              />
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* ═══ Section B: Saved Listings ═══ */}
-      <section className="space-y-4">
-        <div className="flex items-center gap-3">
-          <h2 className="text-2xl font-bold tracking-tight">Saved Listings</h2>
-          {listings.length > 0 && (
-            <span className="rounded-full bg-gray-100 px-3 py-1 text-sm font-semibold text-foreground/60">
-              {listings.length}
-            </span>
-          )}
-        </div>
-        {listings.length === 0 ? (
-          <Card className="text-center">
-            <p className="text-base text-foreground/60">
-              No saved listings yet. Add your first listing to start tracking
-              pricing performance.
+        {/* ── Header ── */}
+        <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-foreground/30">
+              Host Dashboard
             </p>
-          </Card>
-        ) : (
-          <div className="overflow-hidden rounded-2xl border border-border bg-white">
-            <div className="divide-y divide-border">
-              {listings.map((listing) => (
-                <ListingCard
-                  key={listing.id}
-                  listing={listing}
-                  isActive={listing.id === activeListingId}
-                  onSelect={() => setActiveListingId(listing.id)}
-                  onRunAnalysis={handleRunAnalysis}
-                  onDelete={() => handleDelete(listing.id)}
-                  onViewDetails={() => loadListingHistory(listing.id)}
-                  onViewHistory={() =>
-                    router.push(`/dashboard/listings/${listing.id}`)
-                  }
-                  isRunning={rerunningId === listing.id}
-                  isExpanded={expandedListingId === listing.id}
-                  historyLoading={historyLoading}
-                  historyRows={historyRows}
-                  onRename={handleRenameListing}
-                  onSaveDateDefaults={handleSaveDateDefaults}
+            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+              {firstName ? `Welcome back, ${firstName}` : (userEmail || "Dashboard")}
+            </h1>
+            <p className="mt-1 text-sm font-medium text-foreground/55">
+              {listingCountText} · pricing analytics
+            </p>
+          </div>
+          <Link href="/tool?from=dashboard">
+            <Button size="md" variant="secondary">Analyze listing</Button>
+          </Link>
+        </div>
+
+        {error && (
+          <div className="mb-6 rounded-xl border border-rose-200 bg-rose-50 px-5 py-4">
+            <p className="text-sm text-rose-700">{error}</p>
+          </div>
+        )}
+
+        {/* ════════════════════════════════════════
+            Two-column layout: 280px sidebar + main
+        ════════════════════════════════════════ */}
+        <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-[280px_1fr]">
+
+          {/* ── Left: Saved Listings rail ── */}
+          <section>
+            <div className="mb-2.5 flex items-center justify-between px-0.5">
+              <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+                Saved Listings
+              </p>
+              {listings.length > 0 && (
+                <span className="rounded-full bg-gray-200/80 px-2 py-px text-[10px] font-semibold text-foreground/45">
+                  {listings.length}
+                </span>
+              )}
+            </div>
+
+            {listings.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-border bg-white px-6 py-10 text-center">
+                <p className="text-sm font-medium text-foreground/50">No listings yet.</p>
+                <p className="mt-1 text-xs text-foreground/35">
+                  Run an analysis to start tracking pricing.
+                </p>
+                <Link href="/tool?from=dashboard" className="mt-5 inline-block">
+                  <Button size="sm">Run analysis</Button>
+                </Link>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {listings.map((listing) => (
+                  <ListingCard
+                    key={listing.id}
+                    listing={listing}
+                    isActive={listing.id === activeListingId}
+                    onSelect={() => setActiveListingId(listing.id)}
+                    onRunAnalysis={handleRunAnalysis}
+                    onDelete={() => handleDelete(listing.id)}
+                    onViewHistory={() =>
+                      router.push(`/dashboard/listings/${listing.id}`)
+                    }
+                    isRunning={rerunningId === listing.id}
+                    onRename={handleRenameListing}
+                    onSaveDateDefaults={handleSaveDateDefaults}
+                    onSavePreferredComps={handleSavePreferredComps}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* ── Right: Forecast main panel ── */}
+          <section>
+            {activeListing && activeSummary && activeReport ? (
+              <div className="space-y-4">
+
+                {/* ── Panel header ── */}
+                <div className="flex items-center justify-between px-0.5">
+                  <div className="flex items-center gap-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+                      30-Day Forecast
+                    </p>
+                    {/* Report type badge */}
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                      activeReport.report_type === "forecast_snapshot"
+                        ? "bg-violet-100 text-violet-700"
+                        : "bg-blue-50 text-blue-600"
+                    }`}>
+                      {activeReport.report_type === "forecast_snapshot" ? "Forecast" : "Live"}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomPanel((v) => !v)}
+                    className={`text-xs font-semibold transition-colors ${
+                      showCustomPanel
+                        ? "text-foreground/55"
+                        : "text-blue-600 hover:text-blue-700"
+                    }`}
+                  >
+                    {showCustomPanel ? "Cancel" : "Run custom analysis ↗"}
+                  </button>
+                </div>
+
+                {/* ── Custom analysis panel ── */}
+                {showCustomPanel && (
+                  <div className="rounded-2xl border border-blue-100 bg-blue-50/40 p-5">
+                    <p className="mb-0.5 text-sm font-semibold text-foreground/80">
+                      Custom Live Analysis
+                    </p>
+                    <p className="mb-4 text-xs text-foreground/50">
+                      Scrapes fresh Airbnb market data for any date range. You&apos;ll be taken to the full report.
+                    </p>
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">Start date</span>
+                        <input
+                          type="date"
+                          value={customStart}
+                          onChange={(e) => setCustomStart(e.target.value)}
+                          className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                        />
+                      </label>
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">End date</span>
+                        <input
+                          type="date"
+                          value={customEnd}
+                          min={customStart}
+                          onChange={(e) => setCustomEnd(e.target.value)}
+                          className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={!customStart || !customEnd || rerunningId === activeListing.id}
+                        onClick={() => {
+                          void handleRunAnalysis(activeListing.id, {
+                            startDate: customStart,
+                            endDate: customEnd,
+                          });
+                        }}
+                        className="shrink-0 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
+                      >
+                        {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Active job banner ── */}
+                {activeListing.activeJob && (
+                  <div
+                    className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-xs font-medium ${
+                      activeListing.activeJob.status === "error"
+                        ? "border-rose-200 bg-rose-50 text-rose-700"
+                        : "border-amber-200 bg-amber-50 text-amber-700"
+                    }`}
+                  >
+                    {activeListing.activeJob.status === "error" ? (
+                      <>
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
+                        Last analysis failed — showing pricing from your previous completed run.
+                      </>
+                    ) : (
+                      <>
+                        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
+                        New analysis running — pricing below is from your last completed run.
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* ── Price summary ── */}
+                <RecommendationBanner
+                  listingName={activeListing.name}
+                  summary={activeSummary}
+                  recommendedPrice={activeSummary.recommendedPrice ?? null}
+                  reportShareId={activeReport.share_id}
+                  onRerun={() => {
+                    const today = new Date().toISOString().split("T")[0];
+                    const end = new Date();
+                    end.setDate(end.getDate() + 30);
+                    void handleRunAnalysis(activeListing.id, {
+                      startDate: today,
+                      endDate: end.toISOString().split("T")[0],
+                    });
+                  }}
+                  isRerunning={rerunningId === activeListing.id}
+                  propertyMeta={{
+                    propertyType: activeListing.input_attributes.propertyType,
+                    guests: activeListing.input_attributes.maxGuests,
+                    beds:
+                      activeListing.input_attributes.beds ??
+                      activeListing.input_attributes.bedrooms,
+                    baths: activeListing.input_attributes.bathrooms,
+                  }}
+                  benchmarkMeta={{
+                    count:
+                      activeListing.input_attributes.preferredComps?.filter(
+                        (c) => c.enabled !== false && c.listingUrl
+                      ).length ?? 0,
+                    primaryUrl:
+                      activeListing.input_attributes.preferredComps?.find(
+                        (c) => c.enabled !== false && c.listingUrl
+                      )?.listingUrl ?? null,
+                  }}
+                  lastAnalysisDate={activeListing.latestLinkedAt}
                 />
+
+                {/* ── 14-day pricing calendar ── */}
+                {activeCalendar.length > 0 && (
+                  <PricingHeatmap
+                    calendar={activeCalendar}
+                    pricingMode={pricingMode}
+                    onModeChange={setPricingMode}
+                  />
+                )}
+
+                {/* ── Market basis / freshness ── */}
+                <ForecastBasis
+                  marketCapturedAt={resolveMarketCapturedAt(activeReport, activeListing.latestLinkedAt)}
+                  dateStart={activeReport.input_date_start}
+                  dateEnd={activeReport.input_date_end}
+                  reportType={activeReport.report_type}
+                  shareId={activeReport.share_id}
+                  compsUsed={activeSummary.compsSummary?.usedForPricing ?? null}
+                />
+
+                {/* ── Smart alerts ── */}
+                <SmartAlerts
+                  summary={activeSummary}
+                  compsSummary={activeSummary.compsSummary ?? null}
+                  priceDistribution={activeSummary.priceDistribution ?? null}
+                />
+              </div>
+            ) : activeListing ? (
+              /* Listing selected but no ready report */
+              <div className="space-y-4">
+                {/* Panel header */}
+                <div className="px-0.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+                    30-Day Forecast
+                  </p>
+                </div>
+
+                {activeListing.activeJob?.status === "running" ||
+                activeListing.activeJob?.status === "queued" ? (
+                  <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-14 text-center">
+                    <span className="mb-3 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+                    <p className="text-sm font-semibold text-foreground/60">Analysis in progress</p>
+                    <p className="mt-1 text-sm text-foreground/40">
+                      Your first forecast will appear here when complete.
+                    </p>
+                    {activeListing.activeJob.shareId && (
+                      <Link
+                        href={`/r/${activeListing.activeJob.shareId}`}
+                        className="mt-3 text-xs font-medium text-accent hover:underline"
+                      >
+                        View live progress →
+                      </Link>
+                    )}
+                  </div>
+                ) : (
+                  /* No report at all — show CTA with date picker */
+                  <div className="rounded-2xl border border-dashed border-border bg-white p-8">
+                    <p className="text-sm font-semibold text-foreground/60">
+                      No forecast yet for {activeListing.name}
+                    </p>
+                    <p className="mt-1 text-sm text-foreground/40">
+                      Run your first live analysis to generate a pricing forecast.
+                    </p>
+                    <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end">
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">Start date</span>
+                        <input
+                          type="date"
+                          value={customStart}
+                          onChange={(e) => setCustomStart(e.target.value)}
+                          className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
+                        />
+                      </label>
+                      <label className="flex-1 space-y-1.5">
+                        <span className="block text-xs font-medium text-foreground/50">End date</span>
+                        <input
+                          type="date"
+                          value={customEnd}
+                          min={customStart}
+                          onChange={(e) => setCustomEnd(e.target.value)}
+                          className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        disabled={rerunningId === activeListing.id}
+                        onClick={() => {
+                          void handleRunAnalysis(activeListing.id, {
+                            startDate: customStart,
+                            endDate: customEnd,
+                          });
+                        }}
+                        className="shrink-0 rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
+                      >
+                        {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
+                      </button>
+                    </div>
+                    {activeListing.activeJob?.status === "error" && (
+                      <p className="mt-3 text-xs text-rose-600">
+                        Last analysis failed. Adjust dates or try again.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* Nothing selected */
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-16 text-center">
+                <p className="text-sm text-foreground/35">
+                  Select a listing to view its forecast
+                </p>
+              </div>
+            )}
+          </section>
+        </div>
+
+        {/* ════════════════════════════════════════
+            Recent Reports — full width below
+        ════════════════════════════════════════ */}
+        {recentReports.length > 0 && (
+          <section className="mt-6">
+            <p className="mb-2.5 px-0.5 text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+              Recent Live Analysis Reports
+            </p>
+            <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm divide-y divide-border">
+              {recentReports.slice(0, 5).map((item) => (
+                <Link
+                  key={`${item.listingId}-${item.report.id}`}
+                  href={`/r/${item.report.share_id}`}
+                  className="flex items-center justify-between px-5 py-3.5 transition-colors hover:bg-gray-50 first:rounded-t-2xl last:rounded-b-2xl"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {item.listingName}
+                    </p>
+                    <p className="text-xs text-foreground/35">
+                      {new Date(item.linkedAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <div className="ml-4 flex shrink-0 items-center gap-3">
+                    {(() => {
+                      const s = item.report.result_summary;
+                      const price = s?.recommendedPrice?.nightly ?? s?.nightlyMedian;
+                      return price != null ? (
+                        <span className="text-sm font-semibold text-foreground">
+                          ${price}
+                          <span className="ml-0.5 text-xs font-normal text-foreground/35">/night</span>
+                        </span>
+                      ) : (
+                        <span className="text-xs text-foreground/40 capitalize">
+                          {item.report.status}
+                        </span>
+                      );
+                    })()}
+                    <span className="text-xs font-medium text-foreground/40">View →</span>
+                  </div>
+                </Link>
               ))}
             </div>
-          </div>
+          </section>
         )}
-      </section>
-
-      {/* Recent Reports */}
-      <section className="space-y-4">
-        <h2 className="text-2xl font-bold tracking-tight">Recent Reports</h2>
-        {recentReports.length === 0 ? (
-          <div className="rounded-2xl border border-border bg-white px-6 py-5">
-            <p className="text-base text-foreground/60">No reports yet.</p>
-          </div>
-        ) : (
-          <div className="rounded-2xl border border-border bg-white divide-y divide-border">
-            {recentReports.slice(0, 5).map((item) => (
-              <Link
-                key={`${item.listingId}-${item.report.id}`}
-                href={`/r/${item.report.share_id}`}
-                className="flex items-center justify-between px-6 py-4 text-base hover:bg-gray-50 transition-colors first:rounded-t-2xl last:rounded-b-2xl"
-              >
-                <span className="text-foreground/70">
-                  {new Date(item.linkedAt).toLocaleDateString()} –{" "}
-                  {item.listingName}
-                </span>
-                <span className="font-semibold">
-                  {item.report.result_summary?.nightlyMedian
-                    ? `$${item.report.result_summary.nightlyMedian}/night`
-                    : item.report.status}
-                </span>
-              </Link>
-            ))}
-          </div>
-        )}
-      </section>
+      </div>
     </div>
   );
 }
