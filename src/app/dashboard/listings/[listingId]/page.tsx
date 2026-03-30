@@ -15,7 +15,8 @@ type ReportSnapshot = {
   id: string;
   share_id: string;
   status: "queued" | "running" | "ready" | "error";
-  report_type?: "live_analysis" | "forecast_snapshot";
+  // Only live_analysis is selected as source-of-truth; forecast_snapshot rows are ignored.
+  report_type?: "live_analysis";
   created_at: string;
   completed_at?: string | null;
   market_captured_at?: string | null;
@@ -75,8 +76,9 @@ export default function ListingHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [rerunningId, setRerunningId] = useState<string | null>(null);
   const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
+  // Today's date — used as the minimum selectable date for custom analysis (today-or-future rule).
+  const todayStr = new Date().toISOString().split("T")[0];
   const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
   const [customEnd, setCustomEnd] = useState(() => {
     const d = new Date();
@@ -160,38 +162,11 @@ export default function ListingHistoryPage() {
     });
   }, [rows, statusFilter]);
 
-  async function handleRerun(row: HistoryRow) {
-    const report = getReport(row);
-    if (!report) return;
-
-    setRerunningId(row.id);
-    try {
-      const res = await fetch(`/api/listings/${listingId}/rerun`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          dates: {
-            startDate: report.input_date_start,
-            endDate: report.input_date_end,
-          },
-        }),
-      });
-      if (!res.ok) throw new Error("Failed");
-      const data = await res.json();
-      if (data.shareId) {
-        router.push(`/r/${data.shareId}`);
-      } else {
-        await loadData();
-      }
-    } catch {
-      // Silently fail — user can retry
-    } finally {
-      setRerunningId(null);
-    }
-  }
-
   async function handleRunCustomAnalysis() {
+    // Today-or-future guard: reject past start dates.
     if (!customStart || !customEnd) return;
+    if (customStart < todayStr) return;
+    if (customEnd < customStart) return;
     setIsRunningCustom(true);
     try {
       const res = await fetch(`/api/listings/${listingId}/rerun`, {
@@ -213,13 +188,21 @@ export default function ListingHistoryPage() {
     }
   }
 
-  // Derive latest ready report for the forecast section.
+  // Derive the source-of-truth report: nightly live_analysis > manual/rerun live_analysis.
+  // forecast_snapshot rows are ignored and never selected.
   const latestReadyRow = useMemo(() => {
+    let nightly: { row: HistoryRow; report: ReportSnapshot } | null = null;
+    let live: { row: HistoryRow; report: ReportSnapshot } | null = null;
     for (const row of rows) {
       const report = getReport(row);
-      if (report?.status === "ready") return { row, report };
+      if (!report || report.status !== "ready") continue;
+      if (row.trigger === "scheduled" && !nightly) {
+        nightly = { row, report };
+      } else if (!live) {
+        live = { row, report };
+      }
     }
-    return null;
+    return nightly ?? live ?? null;
   }, [rows]);
 
   async function handleSavePinnedComps() {
@@ -239,7 +222,7 @@ export default function ListingHistoryPage() {
         }),
       });
       if (!res.ok) throw new Error("Failed to save");
-      setPinnedCompMsg(`Saved ${valid.length} comparable${valid.length !== 1 ? "s" : ""}. Future re-runs will use these.`);
+      setPinnedCompMsg(`Saved ${valid.length} comparable${valid.length !== 1 ? "s" : ""}. Future nightly updates and custom analyses will use these.`);
       setShowPinnedComps(false);
       await loadData();
     } catch {
@@ -301,53 +284,97 @@ export default function ListingHistoryPage() {
       )}
 
       {/* ════════════════════════════════════════
-          Section 1: Current Forecast
+          Section 1: Current Market Board
       ════════════════════════════════════════ */}
       <div className="space-y-4">
-        <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-          Current Forecast
-        </p>
+        <div className="flex items-center gap-2.5">
+          <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+            {latestReadyRow?.row.trigger === "scheduled" ? "Nightly Market Update" : "Current Market Board"}
+          </p>
+          {latestReadyRow?.row.trigger === "scheduled" && (
+            <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[9px] font-semibold text-teal-700">
+              Nightly
+            </span>
+          )}
+        </div>
 
         {latestReadyRow ? (
           <>
-            {/* Pricing summary strip */}
+            {/* Pricing intelligence strip */}
             {(() => {
               const r = latestReadyRow.report;
-              const suggested = r.result_summary?.recommendedPrice?.nightly;
-              const median = r.result_summary?.nightlyMedian;
-              return (suggested != null || median != null) ? (
-                <div className="flex items-baseline gap-3 rounded-2xl border border-border bg-white px-6 py-4">
-                  {suggested != null && (
-                    <div>
-                      <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">
-                        Suggested nightly
-                      </p>
-                      <p className="mt-0.5 text-3xl font-bold tracking-tight text-foreground">
-                        ${suggested}
-                      </p>
+              const s = r.result_summary;
+              const observed = (s as { observedListingPrice?: number | null } | null)?.observedListingPrice ?? null;
+              const suggested = s?.recommendedPrice?.nightly ?? null;
+              const median = s?.nightlyMedian ?? null;
+              const livePriceStatus = (s as { livePriceStatus?: string | null } | null)?.livePriceStatus ?? null;
+              const obsVsMktDiffPct = (s as { observedVsMarketDiffPct?: number | null } | null)?.observedVsMarketDiffPct ?? null;
+              const pricingAction = (s as { pricingAction?: string | null } | null)?.pricingAction ?? null;
+              const pricingActionTarget = (s as { pricingActionTarget?: number | null } | null)?.pricingActionTarget ?? null;
+
+              return (
+                <div className="rounded-2xl border border-border bg-white px-6 py-5 space-y-3">
+                  <div className="flex flex-wrap items-start gap-6">
+                    {observed != null ? (
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">Your live price</p>
+                        <p className="mt-0.5 text-3xl font-bold tracking-tight text-foreground">${observed}</p>
+                        {obsVsMktDiffPct != null && (
+                          <p className={`mt-0.5 text-xs font-semibold ${Math.abs(obsVsMktDiffPct) <= 3 ? "text-gray-500" : obsVsMktDiffPct > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                            {Math.abs(obsVsMktDiffPct) <= 3 ? "At market" : `${Math.abs(obsVsMktDiffPct)}% ${obsVsMktDiffPct > 0 ? "above" : "below"} market`}
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">Suggested nightly</p>
+                        <p className="mt-0.5 text-3xl font-bold tracking-tight text-foreground">{suggested != null ? `$${suggested}` : "—"}</p>
+                      </div>
+                    )}
+                    {median != null && (
+                      <div className="border-l border-gray-100 pl-5">
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">Market median</p>
+                        <p className="mt-0.5 text-lg font-semibold text-foreground/60">${median}</p>
+                      </div>
+                    )}
+                    {observed != null && suggested != null && observed !== suggested && (
+                      <div className="border-l border-gray-100 pl-5">
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">Recommended</p>
+                        <p className="mt-0.5 text-lg font-semibold text-foreground/60">${suggested}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Pricing action */}
+                  {pricingAction && pricingAction !== "keep" && pricingActionTarget && (
+                    <div className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${pricingAction === "raise" ? "border-blue-200 bg-blue-50 text-blue-700" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
+                      {pricingAction === "raise" ? `↑ Raise to $${pricingActionTarget}` : `↓ Lower to $${pricingActionTarget}`}
                     </div>
                   )}
-                  {median != null && (
-                    <div className="ml-4 border-l border-gray-100 pl-4">
-                      <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">
-                        Market median
-                      </p>
-                      <p className="mt-0.5 text-lg font-semibold text-foreground/60">
-                        ${median}
-                      </p>
-                    </div>
+
+                  {/* Live price unavailable note */}
+                  {observed == null && livePriceStatus === "no_listing_url" && (
+                    <p className="text-xs text-foreground/40">
+                      Add your Airbnb listing URL in settings to compare your live price to the market.
+                    </p>
                   )}
+                  {observed == null && livePriceStatus && livePriceStatus !== "no_listing_url" && livePriceStatus !== "captured" && (
+                    <p className="text-xs text-foreground/40">
+                      Live price not available for this report ({livePriceStatus}).
+                    </p>
+                  )}
+
                   <Link
                     href={`/r/${latestReadyRow.report.share_id}`}
-                    className="ml-auto shrink-0 text-xs font-semibold text-accent hover:underline"
+                    className="inline-block text-xs font-semibold text-accent hover:underline"
                   >
                     View full report →
                   </Link>
                 </div>
-              ) : null;
+              );
             })()}
 
-            {/* 14-day pricing calendar */}
+            {/* 30-day pricing calendar */}
             {latestReadyRow.report.result_calendar &&
               latestReadyRow.report.result_calendar.length > 0 && (
                 <PricingHeatmap
@@ -357,7 +384,7 @@ export default function ListingHistoryPage() {
                 />
               )}
 
-            {/* Market basis */}
+            {/* Market data basis */}
             <ForecastBasis
               marketCapturedAt={resolveMarketCapturedAt(
                 latestReadyRow.report,
@@ -375,9 +402,9 @@ export default function ListingHistoryPage() {
           </>
         ) : (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-12 text-center">
-            <p className="text-sm font-medium text-foreground/50">No forecast yet</p>
+            <p className="text-sm font-medium text-foreground/50">No market data yet</p>
             <p className="mt-1 text-xs text-foreground/35">
-              Run a live analysis below to generate your first pricing forecast.
+              Run a live analysis below to see your first nightly market board.
             </p>
           </div>
         )}
@@ -392,11 +419,10 @@ export default function ListingHistoryPage() {
         </p>
         <div className="rounded-2xl border border-border bg-white p-5 sm:p-6">
           <p className="mb-0.5 text-sm font-semibold text-foreground/80">
-            Fresh live analysis
+            Custom live analysis
           </p>
           <p className="mb-4 text-xs text-foreground/50">
-            Scrapes fresh Airbnb market data for any date range. You can also re-analyse
-            dates already covered by the current forecast. Results open as a full report.
+            Scrapes fresh Airbnb market data for a future date range you choose. Results open as a full report.
           </p>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
             <label className="flex-1 space-y-1.5">
@@ -404,6 +430,7 @@ export default function ListingHistoryPage() {
               <input
                 type="date"
                 value={customStart}
+                min={todayStr}
                 onChange={(e) => setCustomStart(e.target.value)}
                 className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
               />
@@ -413,14 +440,14 @@ export default function ListingHistoryPage() {
               <input
                 type="date"
                 value={customEnd}
-                min={customStart}
+                min={customStart || todayStr}
                 onChange={(e) => setCustomEnd(e.target.value)}
                 className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
               />
             </label>
             <button
               type="button"
-              disabled={isRunningCustom || !customStart || !customEnd}
+              disabled={isRunningCustom || !customStart || !customEnd || customStart < todayStr}
               onClick={handleRunCustomAnalysis}
               className="shrink-0 rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
             >
@@ -598,12 +625,12 @@ export default function ListingHistoryPage() {
       </div>{/* end Section 3 */}
 
       {/* ════════════════════════════════════════
-          Section 4: Live Analysis Report History
+          Section 4: Report History
       ════════════════════════════════════════ */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-            Live Analysis History
+            Market Report History
           </p>
           <span className="text-xs text-muted">
             {filteredRows.length} report{filteredRows.length !== 1 ? "s" : ""}
@@ -749,20 +776,30 @@ export default function ListingHistoryPage() {
                           )}
                         </p>
                       )}
-                      {report.status === "ready" && (
-                        <p className="text-sm">
-                          {recommended != null && (
-                            <span className="font-semibold">
-                              ${recommended}/night
-                            </span>
-                          )}
-                          {median != null && (
-                            <span className="ml-2 text-xs text-muted">
-                              (median ${median})
-                            </span>
-                          )}
-                        </p>
-                      )}
+                      {report.status === "ready" && (() => {
+                        const s = report.result_summary as Record<string, unknown> | null;
+                        const observed = s?.observedListingPrice as number | null | undefined;
+                        return (
+                          <p className="text-sm">
+                            {observed != null ? (
+                              <>
+                                <span className="font-semibold">${observed}</span>
+                                <span className="ml-1 text-xs text-muted">live price</span>
+                              </>
+                            ) : recommended != null ? (
+                              <>
+                                <span className="font-semibold">${recommended}</span>
+                                <span className="ml-1 text-xs text-muted">suggested</span>
+                              </>
+                            ) : null}
+                            {median != null && (
+                              <span className="ml-2 text-xs text-muted">
+                                mkt ${median}
+                              </span>
+                            )}
+                          </p>
+                        );
+                      })()}
                       {report.status === "error" && report.error_message && (
                         <p className="text-xs text-rose-600">
                           {report.error_message}
@@ -779,14 +816,6 @@ export default function ListingHistoryPage() {
                           </Button>
                         </Link>
                       )}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => handleRerun(row)}
-                        disabled={rerunningId === row.id}
-                      >
-                        {rerunningId === row.id ? "Queued..." : "Re-run"}
-                      </Button>
                     </div>
                   </div>
                 </div>

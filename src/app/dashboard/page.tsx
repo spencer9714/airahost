@@ -22,11 +22,12 @@ import type {
 } from "@/lib/schemas";
 
 // latestReport is always status="ready" when non-null — the API now guarantees this.
+// Only live_analysis reports are selected as source-of-truth; forecast_snapshot is ignored.
 type LatestReport = {
   id: string;
   share_id: string;
   status: "ready";
-  report_type?: "live_analysis" | "forecast_snapshot";
+  report_type?: "live_analysis";
   source_report_id?: string | null;
   created_at: string;
   /** Set when status transitions to ready (migration 010). Null for older reports. */
@@ -46,6 +47,21 @@ type LatestReport = {
     recommendedPrice?: RecommendedPrice;
     compsSummary?: CompsSummary;
     priceDistribution?: PriceDistribution;
+    // Live price intelligence (added by worker)
+    observedListingPrice?: number | null;
+    observedListingPriceDate?: string | null;
+    observedListingPriceCapturedAt?: string | null;
+    observedListingPriceSource?: string | null;
+    observedListingPriceConfidence?: string | null;
+    observedVsMarketDiff?: number | null;
+    observedVsMarketDiffPct?: number | null;
+    observedVsRecommendedDiff?: number | null;
+    observedVsRecommendedDiffPct?: number | null;
+    pricingPosition?: "above_market" | "at_market" | "below_market" | null;
+    pricingAction?: "raise" | "lower" | "keep" | null;
+    pricingActionTarget?: number | null;
+    livePriceStatus?: string | null;
+    livePriceStatusReason?: string | null;
   } | null;
   result_calendar?: CalendarDay[];
 } | null;
@@ -82,7 +98,19 @@ type ListingRow = {
   latestReport: LatestReport;
   latestLinkedAt: string | null;
   latestTrigger: "scheduled" | "manual" | "rerun" | null;
+  /** Semantic source type currently displayed: nightly > live */
+  runType: "nightly" | "live" | null;
+  /** Why nightly isn't shown — set to "no_nightly" when showing a manual live analysis */
+  fallbackReason: "no_nightly" | null;
+  /** When the nightly last completed successfully */
+  lastNightlyCompletedAt: string | null;
   activeJob: ActiveJob | null;
+  /** Nightly-specific job state (running/queued/errored) — separate from activeJob */
+  activeNightlyJob: {
+    status: "queued" | "running" | "error";
+    linkedAt: string;
+    shareId: string | null;
+  } | null;
 };
 
 // RecentReportRow covers all statuses — recentReports from the API is not filtered by status.
@@ -118,12 +146,19 @@ export default function DashboardPage() {
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
   const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
   const [showCustomPanel, setShowCustomPanel] = useState(false);
-  const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
+  // Default to tomorrow — custom analyses are future-only.
+  const [customStart, setCustomStart] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().split("T")[0];
+  });
   const [customEnd, setCustomEnd] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() + 30);
     return d.toISOString().split("T")[0];
   });
+  // Today's date string used as the minimum selectable date across all date inputs.
+  const todayStr = new Date().toISOString().split("T")[0];
 
   const loadDashboardData = useCallback(async () => {
     setLoading(true);
@@ -180,6 +215,11 @@ export default function DashboardPage() {
     listingId: string,
     dates: { startDate: string; endDate: string }
   ) {
+    // Future-only guard: reject any start date before today.
+    const todayStr = new Date().toISOString().split("T")[0];
+    if (dates.startDate < todayStr) return;
+    if (dates.endDate < dates.startDate) return;
+
     setRerunningId(listingId);
     try {
       const res = await fetch("/api/reports", {
@@ -274,6 +314,21 @@ export default function DashboardPage() {
       recommendedPrice: s.recommendedPrice,
       compsSummary: s.compsSummary,
       priceDistribution: s.priceDistribution,
+      // Live price intelligence
+      observedListingPrice: s.observedListingPrice ?? null,
+      observedListingPriceDate: s.observedListingPriceDate ?? null,
+      observedListingPriceCapturedAt: s.observedListingPriceCapturedAt ?? null,
+      observedListingPriceSource: s.observedListingPriceSource ?? null,
+      observedListingPriceConfidence: s.observedListingPriceConfidence ?? null,
+      observedVsMarketDiff: s.observedVsMarketDiff ?? null,
+      observedVsMarketDiffPct: s.observedVsMarketDiffPct ?? null,
+      observedVsRecommendedDiff: s.observedVsRecommendedDiff ?? null,
+      observedVsRecommendedDiffPct: s.observedVsRecommendedDiffPct ?? null,
+      pricingPosition: s.pricingPosition ?? null,
+      pricingAction: s.pricingAction ?? null,
+      pricingActionTarget: s.pricingActionTarget ?? null,
+      livePriceStatus: s.livePriceStatus ?? null,
+      livePriceStatusReason: s.livePriceStatusReason ?? null,
     };
   }, [activeReport]);
 
@@ -301,18 +356,18 @@ export default function DashboardPage() {
         {/* ── Header ── */}
         <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p className="mb-1 text-[11px] font-semibold uppercase tracking-widest text-foreground/30">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-foreground/30">
               Host Dashboard
             </p>
-            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+            <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
               {firstName ? `Welcome back, ${firstName}` : (userEmail || "Dashboard")}
             </h1>
-            <p className="mt-1 text-sm font-medium text-foreground/55">
+            <p className="mt-1 text-base font-medium text-foreground/55">
               {listingCountText} · pricing analytics
             </p>
           </div>
           <Link href="/tool?from=dashboard">
-            <Button size="md" variant="secondary">Analyze listing</Button>
+            <Button size="md" variant="secondary">Add new listing</Button>
           </Link>
         </div>
 
@@ -330,11 +385,11 @@ export default function DashboardPage() {
           {/* ── Left: Saved Listings rail ── */}
           <section>
             <div className="mb-2.5 flex items-center justify-between px-0.5">
-              <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+              <p className="text-xs font-semibold uppercase tracking-widest text-foreground/35">
                 Saved Listings
               </p>
               {listings.length > 0 && (
-                <span className="rounded-full bg-gray-200/80 px-2 py-px text-[10px] font-semibold text-foreground/45">
+                <span className="rounded-full bg-gray-200/80 px-2 py-px text-xs font-semibold text-foreground/45">
                   {listings.length}
                 </span>
               )}
@@ -342,12 +397,12 @@ export default function DashboardPage() {
 
             {listings.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-border bg-white px-6 py-10 text-center">
-                <p className="text-sm font-medium text-foreground/50">No listings yet.</p>
-                <p className="mt-1 text-xs text-foreground/35">
-                  Run an analysis to start tracking pricing.
+                <p className="text-base font-medium text-foreground/50">No listings yet.</p>
+                <p className="mt-1 text-sm text-foreground/35">
+                  Add a listing to start tracking pricing.
                 </p>
                 <Link href="/tool?from=dashboard" className="mt-5 inline-block">
-                  <Button size="sm">Run analysis</Button>
+                  <Button size="sm">Add listing</Button>
                 </Link>
               </div>
             ) : (
@@ -370,7 +425,7 @@ export default function DashboardPage() {
             )}
           </section>
 
-          {/* ── Right: Forecast main panel ── */}
+          {/* ── Right: Market analysis panel ── */}
           <section>
             {activeListing && activeSummary && activeReport ? (
               <div className="space-y-4">
@@ -379,24 +434,16 @@ export default function DashboardPage() {
                 <div className="flex items-center justify-between px-0.5">
                   <div className="flex items-center gap-2.5">
                     <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-                      30-Day Forecast
+                      {activeListing.runType === "nightly" ? "Nightly Market Report" : "30-Day Market Board"}
                     </p>
                     {/* Report type badge */}
-                    {(() => {
-                      const isNightly = activeListing.latestTrigger === "scheduled";
-                      const isForecast = activeReport.report_type === "forecast_snapshot";
-                      return (
-                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                          isForecast
-                            ? "bg-violet-100 text-violet-700"
-                            : isNightly
-                            ? "bg-teal-50 text-teal-700"
-                            : "bg-blue-50 text-blue-600"
-                        }`}>
-                          {isForecast ? "Forecast" : isNightly ? "Nightly" : "Live"}
-                        </span>
-                      );
-                    })()}
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                      activeListing.runType === "nightly"
+                        ? "bg-teal-50 text-teal-700"
+                        : "bg-blue-50 text-blue-600"
+                    }`}>
+                      {activeListing.runType === "nightly" ? "Nightly" : "Live"}
+                    </span>
                   </div>
                   <button
                     type="button"
@@ -426,6 +473,7 @@ export default function DashboardPage() {
                         <input
                           type="date"
                           value={customStart}
+                          min={todayStr}
                           onChange={(e) => setCustomStart(e.target.value)}
                           className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
                         />
@@ -435,14 +483,14 @@ export default function DashboardPage() {
                         <input
                           type="date"
                           value={customEnd}
-                          min={customStart}
+                          min={customStart || todayStr}
                           onChange={(e) => setCustomEnd(e.target.value)}
                           className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
                         />
                       </label>
                       <button
                         type="button"
-                        disabled={!customStart || !customEnd || rerunningId === activeListing.id}
+                        disabled={!customStart || !customEnd || customStart < todayStr || rerunningId === activeListing.id}
                         onClick={() => {
                           void handleRunAnalysis(activeListing.id, {
                             startDate: customStart,
@@ -457,8 +505,22 @@ export default function DashboardPage() {
                   </div>
                 )}
 
-                {/* ── Active job banner ── */}
-                {activeListing.activeJob && (
+                {/* ── State banners ── */}
+                {/* Nightly in-progress (separate from activeJob so it shows even when old data is displayed) */}
+                {activeListing.activeNightlyJob && activeListing.activeNightlyJob.status !== "error" && (
+                  <div className="flex items-center gap-3 rounded-xl border border-teal-200 bg-teal-50/70 px-4 py-3 text-xs font-medium text-teal-700">
+                    <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-teal-500" />
+                    Nightly 30-day market report generating — pricing below is from your last run.
+                  </div>
+                )}
+                {activeListing.activeNightlyJob?.status === "error" && (
+                  <div className="flex items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
+                    Last nightly report failed — showing previous data.
+                  </div>
+                )}
+                {/* Non-nightly active job (manual rerun running/errored) */}
+                {activeListing.activeJob && !activeListing.activeNightlyJob && (
                   <div
                     className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-xs font-medium ${
                       activeListing.activeJob.status === "error"
@@ -469,18 +531,21 @@ export default function DashboardPage() {
                     {activeListing.activeJob.status === "error" ? (
                       <>
                         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
-                        {activeListing.activeJob.trigger === "scheduled"
-                          ? "Nightly report failed — showing your last completed report."
-                          : "Last analysis failed — showing pricing from your previous completed run."}
+                        Last analysis failed — showing pricing from your previous completed run.
                       </>
                     ) : (
                       <>
                         <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
-                        {activeListing.activeJob.trigger === "scheduled"
-                          ? "Nightly 30-day report generating — pricing below is from your last run."
-                          : "New analysis running — pricing below is from your last completed run."}
+                        New analysis running — pricing below is from your last completed run.
                       </>
                     )}
+                  </div>
+                )}
+                {/* Fallback banner: no nightly yet, showing manual live analysis data */}
+                {activeListing.runType === "live" && activeListing.fallbackReason === "no_nightly" && !activeListing.activeNightlyJob && (
+                  <div className="flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-xs font-medium text-blue-600">
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
+                    Showing your last live analysis. Nightly auto-reports will appear here once the scheduler runs.
                   </div>
                 )}
 
@@ -490,16 +555,6 @@ export default function DashboardPage() {
                   summary={activeSummary}
                   recommendedPrice={activeSummary.recommendedPrice ?? null}
                   reportShareId={activeReport.share_id}
-                  onRerun={() => {
-                    const today = new Date().toISOString().split("T")[0];
-                    const end = new Date();
-                    end.setDate(end.getDate() + 30);
-                    void handleRunAnalysis(activeListing.id, {
-                      startDate: today,
-                      endDate: end.toISOString().split("T")[0],
-                    });
-                  }}
-                  isRerunning={rerunningId === activeListing.id}
                   propertyMeta={{
                     propertyType: activeListing.input_attributes.propertyType,
                     guests: activeListing.input_attributes.maxGuests,
@@ -546,6 +601,7 @@ export default function DashboardPage() {
                   summary={activeSummary}
                   compsSummary={activeSummary.compsSummary ?? null}
                   priceDistribution={activeSummary.priceDistribution ?? null}
+                  observedListingPrice={activeSummary.observedListingPrice ?? null}
                 />
               </div>
             ) : activeListing ? (
@@ -554,7 +610,7 @@ export default function DashboardPage() {
                 {/* Panel header */}
                 <div className="px-0.5">
                   <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-                    30-Day Forecast
+                    30-Day Market Board
                   </p>
                 </div>
 
@@ -564,7 +620,7 @@ export default function DashboardPage() {
                     <span className="mb-3 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
                     <p className="text-sm font-semibold text-foreground/60">Analysis in progress</p>
                     <p className="mt-1 text-sm text-foreground/40">
-                      Your first forecast will appear here when complete.
+                      Your market analysis will appear here when complete.
                     </p>
                     {activeListing.activeJob.shareId && (
                       <Link
@@ -579,10 +635,10 @@ export default function DashboardPage() {
                   /* No report at all — show CTA with date picker */
                   <div className="rounded-2xl border border-dashed border-border bg-white p-8">
                     <p className="text-sm font-semibold text-foreground/60">
-                      No forecast yet for {activeListing.name}
+                      No market data yet for {activeListing.name}
                     </p>
                     <p className="mt-1 text-sm text-foreground/40">
-                      Run your first live analysis to generate a pricing forecast.
+                      Run a custom analysis to see market pricing for this listing.
                     </p>
                     <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end">
                       <label className="flex-1 space-y-1.5">
@@ -590,6 +646,7 @@ export default function DashboardPage() {
                         <input
                           type="date"
                           value={customStart}
+                          min={todayStr}
                           onChange={(e) => setCustomStart(e.target.value)}
                           className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
                         />
@@ -599,14 +656,14 @@ export default function DashboardPage() {
                         <input
                           type="date"
                           value={customEnd}
-                          min={customStart}
+                          min={customStart || todayStr}
                           onChange={(e) => setCustomEnd(e.target.value)}
                           className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
                         />
                       </label>
                       <button
                         type="button"
-                        disabled={rerunningId === activeListing.id}
+                        disabled={!customStart || !customEnd || customStart < todayStr || rerunningId === activeListing.id}
                         onClick={() => {
                           void handleRunAnalysis(activeListing.id, {
                             startDate: customStart,
@@ -630,7 +687,7 @@ export default function DashboardPage() {
               /* Nothing selected */
               <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-16 text-center">
                 <p className="text-sm text-foreground/35">
-                  Select a listing to view its forecast
+                  Select a listing to view its market analysis
                 </p>
               </div>
             )}

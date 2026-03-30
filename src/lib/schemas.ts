@@ -338,9 +338,46 @@ export interface ProgressMeta {
   est_seconds_remaining?: number | null;
 }
 
+// ── Live Price Intelligence ──────────────────────────────────────
+
+export interface LivePriceIntelligence {
+  /** Host's actual listed nightly price observed on Airbnb. Null if unavailable. */
+  observedListingPrice?: number | null;
+  /** ISO date (YYYY-MM-DD) the price was observed for (the report's start_date). */
+  observedListingPriceDate?: string | null;
+  /** ISO-8601 UTC timestamp when the price was captured. */
+  observedListingPriceCapturedAt?: string | null;
+  /** How the price was extracted: "ld_json" | "booking_widget" | "body_text" */
+  observedListingPriceSource?: string | null;
+  /** Extraction confidence: "high" | "medium" | "low" | "failed" */
+  observedListingPriceConfidence?: string | null;
+
+  // ── Comparison intelligence (set when observedListingPrice is available) ──
+
+  /** observed - market_median (positive = above market) */
+  observedVsMarketDiff?: number | null;
+  /** Percentage above/below market: round((obs/median - 1) * 100) */
+  observedVsMarketDiffPct?: number | null;
+  /** observed - recommended_price (positive = above recommendation) */
+  observedVsRecommendedDiff?: number | null;
+  /** Percentage above/below recommendation */
+  observedVsRecommendedDiffPct?: number | null;
+  /** "above_market" | "at_market" | "below_market" */
+  pricingPosition?: "above_market" | "at_market" | "below_market" | null;
+  /** Suggested action based on comparison to recommendation */
+  pricingAction?: "raise" | "lower" | "keep" | null;
+  /** Target price for the suggested action */
+  pricingActionTarget?: number | null;
+
+  // ── Status ──────────────────────────────────────────────────────────────
+  /** "captured" | "no_listing_url" | "scrape_failed" | "no_price_found" */
+  livePriceStatus?: string | null;
+  livePriceStatusReason?: string | null;
+}
+
 // ── Summary & Report ────────────────────────────────────────────
 
-export interface ReportSummary {
+export interface ReportSummary extends LivePriceIntelligence {
   insightHeadline: string;
   nightlyMin: number;
   nightlyMedian: number;

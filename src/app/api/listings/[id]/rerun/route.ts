@@ -107,8 +107,24 @@ export async function POST(
       // Cache miss — proceed as queued
     }
 
+    // Future-only enforcement: custom analyses must not use past start dates.
+    const todayStr = new Date().toISOString().split("T")[0];
+    if (dates.startDate < todayStr) {
+      return NextResponse.json(
+        { error: "Start date must be today or later. Past-date analysis is not supported." },
+        { status: 400 }
+      );
+    }
+    if (dates.endDate < dates.startDate) {
+      return NextResponse.json(
+        { error: "End date must be on or after start date." },
+        { status: 400 }
+      );
+    }
+
     const isCacheHit = cachedSummary !== null;
     const shareId = generateShareId();
+    const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
 
     const report = {
       id: crypto.randomUUID(),
@@ -116,6 +132,8 @@ export async function POST(
       share_id: shareId,
       listing_id: id,
       input_address: address,
+      target_env: targetEnv,
+      job_lane: "interactive",
       input_attributes: {
         ...attributes,
         inputMode,

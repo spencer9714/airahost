@@ -77,7 +77,7 @@ export async function POST(
 
   const { data: reportRow, error: reportErr } = await admin
     .from("pricing_reports")
-    .select("id, input_address, input_attributes, discount_policy")
+    .select("id, input_address, input_attributes, input_listing_url, discount_policy")
     .eq("id", id)
     .maybeSingle();
 
@@ -90,6 +90,94 @@ export async function POST(
       ? reportRow.input_address.trim()
       : "Saved listing";
 
+  // ── Dedup: check for an existing saved listing before inserting ──
+  // Priority: Airbnb room ID → normalized URL path → exact address
+  const attrs = (reportRow.input_attributes ?? {}) as Record<string, unknown>;
+  const reportListingUrl =
+    (reportRow.input_listing_url as string | null) ||
+    (attrs.listingUrl as string | null) ||
+    (attrs.listing_url as string | null) ||
+    null;
+
+  const normalizeUrl = (url: string | null | undefined): string | null => {
+    if (!url) return null;
+    try { return new URL(url).pathname.replace(/\/$/, ""); } catch { return null; }
+  };
+
+  const newRoomId = reportListingUrl?.match(/\/rooms\/(\d+)/)?.[1] ?? null;
+  const newNormalizedUrl = normalizeUrl(reportListingUrl);
+
+  const { data: userListings } = await admin
+    .from("saved_listings")
+    .select("id, name, input_attributes, input_address")
+    .eq("user_id", user.id);
+
+  let existingListingId: string | null = null;
+  let existingListingName: string | null = null;
+
+  for (const saved of userListings ?? []) {
+    const savedAttrs = (saved.input_attributes ?? {}) as Record<string, unknown>;
+    const savedUrl =
+      (savedAttrs.listingUrl as string | null) ||
+      (savedAttrs.listing_url as string | null) ||
+      null;
+
+    if (newRoomId) {
+      const savedRoomId = savedUrl?.match(/\/rooms\/(\d+)/)?.[1] ?? null;
+      if (savedRoomId && savedRoomId === newRoomId) {
+        existingListingId = saved.id;
+        existingListingName = saved.name;
+        break;
+      }
+    }
+
+    if (!existingListingId && newNormalizedUrl) {
+      const savedNorm = normalizeUrl(savedUrl);
+      if (savedNorm && savedNorm === newNormalizedUrl) {
+        existingListingId = saved.id;
+        existingListingName = saved.name;
+        break;
+      }
+    }
+
+    if (!existingListingId && reportRow.input_address && saved.input_address === reportRow.input_address) {
+      existingListingId = saved.id;
+      existingListingName = saved.name;
+      break;
+    }
+  }
+
+  if (existingListingId) {
+    // Link report to the existing listing if not already linked
+    const { data: existingLink } = await admin
+      .from("listing_reports")
+      .select("id")
+      .eq("saved_listing_id", existingListingId)
+      .eq("pricing_report_id", id)
+      .limit(1);
+
+    if (!existingLink || existingLink.length === 0) {
+      await admin.from("listing_reports").insert({
+        saved_listing_id: existingListingId,
+        pricing_report_id: id,
+        trigger: "manual",
+      });
+    }
+
+    await admin
+      .from("saved_listings")
+      .update({ last_used_at: new Date().toISOString() })
+      .eq("id", existingListingId);
+
+    return NextResponse.json({
+      saved: true,
+      listingAlreadySaved: true,
+      existingListingId,
+      existingListingName,
+    });
+  }
+
+  // No duplicate found — insert new saved listing
   const { data: listingRow, error: listingErr } = await admin
     .from("saved_listings")
     .insert({

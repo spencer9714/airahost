@@ -21,14 +21,19 @@ def get_client() -> Client:
     return create_client(url, key)
 
 
-def claim_job(client: Client, worker_token: uuid.UUID, stale_minutes: int, target_env: str) -> Optional[Dict[str, Any]]:
+def claim_job(client: Client, worker_token: uuid.UUID, stale_minutes: int, target_env: str, job_lane: str = "interactive") -> Optional[Dict[str, Any]]:
     """
-    Atomically claim one queued (or stale-running) job matching target_env.
+    Atomically claim one queued (or stale-running) job matching target_env and job_lane.
     Returns the full row dict, or None if no work available.
     """
     result = client.rpc(
         "claim_pricing_report",
-        {"p_worker_token": str(worker_token), "p_stale_minutes": stale_minutes, "p_target_env": target_env},
+        {
+            "p_worker_token": str(worker_token),
+            "p_stale_minutes": stale_minutes,
+            "p_job_lane": job_lane,
+            "p_target_env": target_env,
+        },
     ).execute()
 
     rows = result.data
@@ -56,6 +61,11 @@ def complete_job(
     core_version: str,
     debug: Optional[Dict[str, Any]] = None,
     input_attributes: Optional[Dict[str, Any]] = None,
+    input_address: Optional[str] = None,
+    input_listing_url: Optional[str] = None,
+    write_input_listing_url: bool = False,
+    discount_policy: Optional[Dict[str, Any]] = None,
+    cache_key: Optional[str] = None,
     source_market_captured_at: Optional[str] = None,
 ) -> None:
     """Mark a job as ready with results. Idempotent — overwrites existing results.
@@ -64,6 +74,15 @@ def complete_job(
     scrapes (live_analysis).  For forecast_snapshot reports, pass the source
     live_analysis report's market_captured_at as source_market_captured_at so
     freshness reflects when the underlying market data was actually captured.
+
+    For nightly jobs that reload saved listing data at execution time, pass
+    input_address, input_listing_url (with write_input_listing_url=True),
+    discount_policy, and cache_key so the completed report row fully reflects
+    actual execution inputs rather than the stale queued snapshot.
+
+    write_input_listing_url=True: write input_listing_url unconditionally,
+    including clearing to NULL when listing_url is None.  This separates
+    "parameter not provided" (False, skip update) from "explicitly no URL" (True+None).
     """
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
@@ -84,6 +103,18 @@ def complete_job(
         update["result_core_debug"] = debug
     if input_attributes is not None:
         update["input_attributes"] = input_attributes
+    if input_address is not None:
+        update["input_address"] = input_address
+    # write_input_listing_url=True writes the value unconditionally (including None → clears to NULL).
+    # Default False preserves existing behaviour: skip update when value is None.
+    if write_input_listing_url:
+        update["input_listing_url"] = input_listing_url
+    elif input_listing_url is not None:
+        update["input_listing_url"] = input_listing_url
+    if discount_policy is not None:
+        update["discount_policy"] = discount_policy
+    if cache_key is not None:
+        update["cache_key"] = cache_key
 
     client.table("pricing_reports").update(update).eq("id", report_id).eq(
         "worker_claim_token", str(worker_token)

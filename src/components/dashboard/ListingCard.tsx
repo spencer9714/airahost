@@ -233,24 +233,57 @@ export function ListingCard({
             className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`}
             title={activeJob ? activeJob.status : latest ? "ready" : "no report"}
           />
-          <p className="truncate text-sm font-semibold tracking-tight text-foreground">
+          <p className="truncate text-base font-semibold tracking-tight text-foreground">
             {cleanTitle(displayTitle)}
           </p>
         </div>
         {factsLine && (
-          <p className="mt-1.5 truncate pl-3.5 text-xs font-medium text-foreground/35">
+          <p className="mt-1.5 truncate pl-3.5 text-sm font-medium text-foreground/35">
             {factsLine}
           </p>
         )}
+        {/* Price summary line */}
+        {latest?.result_summary && (() => {
+          const s = latest.result_summary;
+          const suggested = s.recommendedPrice?.nightly ?? s.nightlyMedian ?? null;
+          const median = s.nightlyMedian ?? null;
+          const observed = (s as { observedListingPrice?: number | null }).observedListingPrice ?? null;
+          if (!suggested && !observed) return null;
+          return (
+            <div className="mt-2 pl-3.5">
+              {observed != null ? (
+                <p className="text-base font-bold text-foreground">
+                  ${observed}
+                  <span className="ml-1 text-xs font-normal text-foreground/35">your price</span>
+                  {median != null && median > 0 && (
+                    <span className="ml-2 text-sm font-normal text-foreground/40">
+                      mkt ${median}
+                    </span>
+                  )}
+                </p>
+              ) : suggested != null ? (
+                <p className="text-base font-bold text-foreground">
+                  ${suggested}
+                  <span className="ml-1 text-xs font-normal text-foreground/35">suggested</span>
+                  {median != null && median > 0 && suggested !== median && (
+                    <span className="ml-2 text-sm font-normal text-foreground/40">
+                      mkt ${median}
+                    </span>
+                  )}
+                </p>
+              ) : null}
+            </div>
+          );
+        })()}
         {freshnessLabel && (
           <div className="mt-0.5 flex items-center gap-1.5 pl-3.5">
-            <p className="text-[10px] text-foreground/30">{freshnessLabel}</p>
+            <p className="text-xs text-foreground/30">{freshnessLabel}</p>
             {listing.latestTrigger === "scheduled" ? (
-              <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-[9px] font-semibold text-teal-700">
+              <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-[11px] font-semibold text-teal-700">
                 Nightly
               </span>
             ) : latest?.report_type === "forecast_snapshot" ? (
-              <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold text-violet-600">
+              <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[11px] font-semibold text-violet-600">
                 Forecast
               </span>
             ) : null}
@@ -273,7 +306,7 @@ export function ListingCard({
               return next;
             });
           }}
-          className={`text-xs font-medium transition-colors ${
+          className={`text-sm font-medium transition-colors ${
             editOpen
               ? "text-foreground/65"
               : "text-foreground/45 hover:text-foreground/70"
@@ -284,7 +317,7 @@ export function ListingCard({
         {latest?.share_id && (
           <Link
             href={`/r/${latest.share_id}`}
-            className="text-xs font-medium text-foreground/35 transition-colors hover:text-foreground/60"
+            className="text-sm font-medium text-foreground/35 transition-colors hover:text-foreground/60"
           >
             View →
           </Link>

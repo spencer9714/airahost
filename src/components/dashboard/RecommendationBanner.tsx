@@ -1,13 +1,12 @@
 import Link from "next/link";
 import { Button } from "@/components/Button";
 import type { ReportSummary, RecommendedPrice } from "@/lib/schemas";
+// Button is used for "View full report" only — rerun button removed by product decision.
 
 interface Props {
   summary: ReportSummary;
   recommendedPrice: RecommendedPrice | null;
   reportShareId: string;
-  onRerun: () => void;
-  isRerunning: boolean;
   listingName: string;
   propertyMeta: {
     propertyType: string;
@@ -21,53 +20,85 @@ interface Props {
   } | null;
   lastAnalysisDate: string | null;
   /**
-   * Real listing price captured by the background worker from the user's live
-   * Airbnb listing.  When present it becomes the primary basis for
-   * above-market / below-market positioning.  null/undefined means the worker
-   * hasn't observed the price yet — fall back to recommendation-vs-market copy.
+   * @deprecated — live price now comes directly from summary.observedListingPrice.
+   * Kept for backward compatibility but summary fields take precedence.
    */
   observedListingPrice?: number | null;
 }
 
-/**
- * Compute a market-position badge.
- *
- * @param price        The price to compare (observed listing price OR recommended price).
- * @param marketMedian The market median nightly rate.
- * @param source       Semantic source of `price` — controls badge wording.
- *   "observed"    → "Your price X% above/below market"  (worker-observed listing price)
- *   "recommended" → "Recommendation X% above/below market"  (our forecast suggestion)
- */
-function marketPositionBadge(
-  price: number,
-  marketMedian: number,
-  source: "observed" | "recommended"
-): { label: string; color: string } | null {
-  if (marketMedian <= 0) return null;
-  const pct = Math.round((price / marketMedian - 1) * 100);
+// Compute a pricing position badge
+function positionBadge(
+  diffPct: number,
+  source: "vs_market" | "vs_recommended"
+): { label: string; color: string } {
+  const abs = Math.abs(diffPct);
+  const dir = diffPct > 0 ? "above" : "below";
+  const dirLabel = dir === "above" ? "above" : "below";
+  const subject = source === "vs_market" ? "market" : "recommendation";
 
-  if (pct < -3) {
+  if (abs <= 3) {
     return {
-      label:
-        source === "observed"
-          ? `Your price ${Math.abs(pct)}% below market`
-          : `Recommendation ${Math.abs(pct)}% below market`,
-      color: "bg-emerald-50 text-emerald-800 border-emerald-300",
+      label: source === "vs_market" ? "At market" : "At recommendation",
+      color: "bg-gray-100 text-gray-700 border-gray-300",
     };
   }
-  if (pct > 3) {
+  if (dir === "above") {
     return {
-      label:
-        source === "observed"
-          ? `Your price ${pct}% above market`
-          : `Recommendation ${pct}% above market`,
+      label: `${abs}% ${dirLabel} ${subject}`,
       color: "bg-amber-50 text-amber-800 border-amber-300",
     };
   }
   return {
-    label:
-      source === "observed" ? "Your price at market" : "Recommendation at market",
-    color: "bg-gray-100 text-gray-700 border-gray-300",
+    label: `${abs}% ${dirLabel} ${subject}`,
+    color: "bg-emerald-50 text-emerald-800 border-emerald-300",
+  };
+}
+
+// One-sentence intelligence summary
+function intelligenceLine(summary: ReportSummary): string | null {
+  const obs = summary.observedListingPrice;
+  const mkt = summary.nightlyMedian;
+  const rec = summary.recommendedPrice?.nightly ?? null;
+
+  if (obs == null) return null;
+
+  const parts: string[] = [];
+
+  if (mkt && mkt > 0) {
+    const diff = obs - mkt;
+    if (Math.abs(diff) <= 3) {
+      parts.push(`Your live price is at the market median ($${mkt}).`);
+    } else {
+      parts.push(
+        `Your live price is $${Math.abs(Math.round(diff))} ${diff > 0 ? "above" : "below"} the market median ($${mkt}).`
+      );
+    }
+  }
+
+  if (rec && rec > 0) {
+    const diff = obs - rec;
+    if (Math.abs(diff) > 10) {
+      parts.push(
+        `${diff > 0 ? "Lower" : "Raise"} to $${Math.round(rec)} to align with our recommendation.`
+      );
+    }
+  }
+
+  return parts.join(" ") || null;
+}
+
+// Pricing action chip
+function actionChip(summary: ReportSummary): { label: string; color: string } | null {
+  const action = summary.pricingAction;
+  const target = summary.pricingActionTarget;
+  if (!action || !target) return null;
+  if (action === "keep") return null;
+  return {
+    label: action === "raise" ? `Raise to $${target}` : `Lower to $${target}`,
+    color:
+      action === "raise"
+        ? "bg-blue-50 text-blue-700 border-blue-200"
+        : "bg-amber-50 text-amber-800 border-amber-200",
   };
 }
 
@@ -75,24 +106,23 @@ export function RecommendationBanner({
   summary,
   recommendedPrice,
   reportShareId,
-  onRerun,
-  isRerunning,
   listingName,
   propertyMeta,
   benchmarkMeta,
   lastAnalysisDate,
-  observedListingPrice,
+  observedListingPrice: _legacyObs,
 }: Props) {
+  // Live price from summary takes precedence; prop is kept for backward compat.
+  const observedPrice = summary.observedListingPrice ?? _legacyObs ?? null;
   const recommended = recommendedPrice?.nightly ?? summary.nightlyMedian;
   const median = summary.nightlyMedian;
+  const livePriceStatus = summary.livePriceStatus ?? null;
+  const hasListingUrl = livePriceStatus !== "no_listing_url";
 
-  // Market-position badge: prefer observed listing price when available.
-  const badge =
-    observedListingPrice != null
-      ? marketPositionBadge(observedListingPrice, median, "observed")
-      : marketPositionBadge(recommended, median, "recommended");
+  const intel = intelligenceLine(summary);
+  const chip = actionChip(summary);
 
-  const stats = [
+  const kpiStats = [
     {
       label: "Market median",
       value: median ? `$${median}` : "—",
@@ -119,71 +149,129 @@ export function RecommendationBanner({
 
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm">
-      {/* ── Hero: price + CTAs ── */}
+      {/* ── Hero ── */}
       <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between sm:p-7">
-        {/* Left: price block */}
-        <div className="space-y-2">
-          <div>
-            {/* When a worker-observed listing price is available, show it first
-                as the primary pricing signal. The recommendation stays visible
-                below as context. */}
-            {observedListingPrice != null ? (
-              <>
-                <p className="text-xs font-semibold uppercase tracking-widest text-foreground/40">
-                  Your listing price
-                </p>
-                <div className="mt-1.5 flex items-baseline gap-3">
-                  <p className="text-5xl font-bold tracking-tight">
-                    ${observedListingPrice}
-                  </p>
-                  {badge && (
-                    <span
-                      className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.color}`}
-                    >
-                      {badge.label}
-                    </span>
-                  )}
-                </div>
-                <div className="mt-2 space-y-0.5 text-sm text-foreground/50">
-                  {median > 0 && (
-                    <p>
-                      Market median:{" "}
-                      <span className="font-semibold text-foreground/70">${median}</span>
-                    </p>
-                  )}
-                  <p>
-                    Suggested:{" "}
-                    <span className="font-semibold text-foreground/70">${recommended}</span>
-                  </p>
-                </div>
-              </>
-            ) : (
-              <>
-                {/* No observed listing price — show recommendation with explicit qualifier */}
-                <p className="text-xs font-semibold uppercase tracking-widest text-foreground/40">
-                  Suggested nightly rate
-                </p>
-                <div className="mt-1.5 flex items-baseline gap-3">
-                  <p className="text-5xl font-bold tracking-tight">${recommended}</p>
-                  {badge && (
-                    <span
-                      className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.color}`}
-                    >
-                      {badge.label}
-                    </span>
-                  )}
-                </div>
-                {median > 0 && recommended !== median && (
-                  <p className="mt-1 text-sm text-foreground/50">
+
+        {/* Left: pricing intelligence */}
+        <div className="space-y-3 min-w-0">
+
+          {observedPrice != null ? (
+            /* ── LIVE PRICE available ── */
+            <div className="space-y-1">
+              <p className="text-sm font-semibold uppercase tracking-widest text-foreground/40">
+                Your live price
+              </p>
+              <div className="flex flex-wrap items-baseline gap-3">
+                <p className="text-5xl font-bold tracking-tight">${observedPrice}</p>
+                {summary.observedVsMarketDiffPct != null && (
+                  <span
+                    className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+                      positionBadge(summary.observedVsMarketDiffPct, "vs_market").color
+                    }`}
+                  >
+                    {positionBadge(summary.observedVsMarketDiffPct, "vs_market").label}
+                  </span>
+                )}
+              </div>
+
+              {/* Three-way comparison table */}
+              <div className="mt-2 space-y-1 text-sm">
+                {median > 0 && (
+                  <p className="text-foreground/50">
                     Market median:{" "}
-                    <span className="font-semibold text-foreground/70">${median}</span>
+                    <span className="font-semibold text-foreground/75">${median}</span>
+                    {summary.observedVsMarketDiff != null && (
+                      <span className={`ml-1.5 text-xs ${summary.observedVsMarketDiff > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                        ({summary.observedVsMarketDiff > 0 ? "+" : ""}{summary.observedVsMarketDiff})
+                      </span>
+                    )}
                   </p>
                 )}
-              </>
-            )}
-          </div>
+                {recommended > 0 && recommended !== observedPrice && (
+                  <p className="text-foreground/50">
+                    Recommended:{" "}
+                    <span className="font-semibold text-foreground/75">${recommended}</span>
+                    {summary.observedVsRecommendedDiff != null && (
+                      <span className={`ml-1.5 text-xs ${summary.observedVsRecommendedDiff > 0 ? "text-amber-600" : "text-blue-600"}`}>
+                        ({summary.observedVsRecommendedDiff > 0 ? "+" : ""}{summary.observedVsRecommendedDiff})
+                      </span>
+                    )}
+                  </p>
+                )}
+              </div>
 
-          <div className="space-y-0.5">
+              {/* Intelligence summary + action */}
+              {intel && (
+                <p className="mt-1 text-sm font-medium text-foreground/70">{intel}</p>
+              )}
+              {chip && (
+                <span className={`inline-block rounded-lg border px-3 py-1 text-xs font-semibold ${chip.color}`}>
+                  {chip.label}
+                </span>
+              )}
+
+              {summary.observedListingPriceDate && (
+                <p className="text-xs text-foreground/30">
+                  Observed for {new Date(summary.observedListingPriceDate + "T00:00:00").toLocaleDateString()}
+                  {summary.observedListingPriceConfidence && summary.observedListingPriceConfidence !== "failed" && (
+                    <> · {summary.observedListingPriceConfidence} confidence</>
+                  )}
+                </p>
+              )}
+            </div>
+          ) : (
+            /* ── No live price ── */
+            <div className="space-y-1.5">
+              <p className="text-sm font-semibold uppercase tracking-widest text-foreground/40">
+                Suggested nightly rate
+              </p>
+              <div className="flex flex-wrap items-baseline gap-3">
+                <p className="text-5xl font-bold tracking-tight">${recommended}</p>
+                {median > 0 && recommended !== median && (() => {
+                  const pct = Math.round((recommended / median - 1) * 100);
+                  const badge = positionBadge(pct, "vs_market");
+                  return (
+                    <span className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.color}`}>
+                      {badge.label}
+                    </span>
+                  );
+                })()}
+              </div>
+              {median > 0 && recommended !== median && (
+                <p className="text-sm text-foreground/50">
+                  Market median:{" "}
+                  <span className="font-semibold text-foreground/70">${median}</span>
+                </p>
+              )}
+
+              {/* Live price unavailable — explain why */}
+              <div className="mt-2 rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-2.5">
+                {livePriceStatus === "no_listing_url" || !hasListingUrl ? (
+                  <p className="text-xs text-foreground/50">
+                    <span className="font-semibold text-foreground/65">Live price unavailable.</span>{" "}
+                    Add your Airbnb listing URL in settings to compare your current price to the market.
+                  </p>
+                ) : livePriceStatus === "no_price_found" ? (
+                  <p className="text-xs text-foreground/50">
+                    <span className="font-semibold text-foreground/65">Live price unavailable.</span>{" "}
+                    Could not read your current listing price from Airbnb for this date.
+                  </p>
+                ) : livePriceStatus === "scrape_failed" ? (
+                  <p className="text-xs text-foreground/50">
+                    <span className="font-semibold text-foreground/65">Live price check failed.</span>{" "}
+                    The Airbnb page could not be accessed. Will retry on next nightly run.
+                  </p>
+                ) : (
+                  <p className="text-xs text-foreground/50">
+                    Live price not yet captured for this report.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Property + benchmark meta */}
+          <div className="space-y-1">
             {propertyMeta && (
               <p className="text-sm text-foreground/55">
                 {propertyMeta.propertyType} · {propertyMeta.guests} guest
@@ -198,21 +286,11 @@ export function RecommendationBanner({
                   {benchmarkMeta.count} benchmark
                   {benchmarkMeta.count !== 1 ? "s" : ""}
                 </span>
-                {benchmarkMeta.primaryUrl && (
-                  <a
-                    href={benchmarkMeta.primaryUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="max-w-65 truncate text-amber-700 hover:underline"
-                  >
-                    Primary benchmark
-                  </a>
-                )}
               </div>
             ) : null}
             {lastAnalysisDate && (
-              <p className="text-xs text-foreground/35">
-                Analysis from {new Date(lastAnalysisDate).toLocaleDateString()}
+              <p className="text-sm text-foreground/35">
+                Market data from {new Date(lastAnalysisDate).toLocaleDateString()}
               </p>
             )}
           </div>
@@ -223,14 +301,6 @@ export function RecommendationBanner({
           <Link href={`/r/${reportShareId}`}>
             <Button size="md">View full report</Button>
           </Link>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={onRerun}
-            disabled={isRerunning}
-          >
-            {isRerunning ? "Re-analyzing…" : "Re-run analysis"}
-          </Button>
           <p className="hidden text-right text-[11px] text-foreground/35 sm:block">
             {listingName}
           </p>
@@ -239,12 +309,12 @@ export function RecommendationBanner({
 
       {/* ── KPI stats row ── */}
       <div className="grid grid-cols-3 divide-x divide-y divide-border border-t border-border sm:grid-cols-5 sm:divide-y-0">
-        {stats.map((stat) => (
+        {kpiStats.map((stat) => (
           <div key={stat.label} className="px-4 py-3.5">
-            <p className="text-[11px] font-medium uppercase tracking-wide text-foreground/40">
+            <p className="text-xs font-medium uppercase tracking-wide text-foreground/40">
               {stat.label}
             </p>
-            <p className="mt-0.5 text-base font-bold text-foreground">
+            <p className="mt-0.5 text-lg font-bold text-foreground">
               {stat.value}
             </p>
           </div>

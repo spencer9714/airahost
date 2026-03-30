@@ -25,9 +25,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-# Load .env from worker directory or repo root
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
-load_dotenv(override=True)
+# Load .env from worker directory or repo root.
+# override=False so shell-set env vars (e.g. WORKER_LANE, WORKER_ENV) always win.
+# This lets multiple local workers run from separate terminals with different config.
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=False)
+load_dotenv(override=False)
 
 from worker.core import db as db_helpers
 from worker.core.cache import compute_cache_key, get_cached, set_cached
@@ -52,6 +54,7 @@ CDP_CONNECT_TIMEOUT_MS = int(os.getenv("CDP_CONNECT_TIMEOUT_MS", "15000"))
 WORKER_VERSION = os.getenv("WORKER_VERSION", "worker-0.1.0")
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222")
 WORKER_ENV = os.getenv("WORKER_ENV", "production")
+WORKER_LANE = os.getenv("WORKER_LANE", "interactive")
 
 MAX_SCROLL_ROUNDS = int(os.getenv("MAX_SCROLL_ROUNDS", "12"))
 MAX_CARDS = int(os.getenv("MAX_CARDS", "80"))
@@ -418,165 +421,34 @@ def _build_scrape_calendar(
     return summary, calendar
 
 
-def process_forecast_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
-    """
-    Process a forecast_snapshot job.
-
-    Reads result_summary + result_calendar from the source live_analysis report
-    (identified by source_report_id) and writes them to this job without scraping.
-    Inherits source_market_captured_at so freshness reflects when Airbnb data
-    was actually collected, not when the forecast was generated.
-    """
-    report_id = job["id"]
-    client = db_helpers.get_client()
-    start_time = time.time()
-
-    hb_stop = threading.Event()
-    hb_thread = threading.Thread(
-        target=_run_heartbeat,
-        args=(report_id, worker_token, hb_stop),
-        daemon=True,
-    )
-    hb_thread.start()
-
-    try:
-        source_report_id = job.get("source_report_id")
-        if not source_report_id:
-            logger.error(f"[{report_id}] forecast_snapshot has no source_report_id — failing")
-            db_helpers.fail_job(
-                client, report_id, worker_token,
-                error_message="Forecast configuration error: missing source report link.",
-                debug={
-                    "error": "source_report_id is null",
-                    "worker_host": socket.gethostname(),
-                    "worker_version": WORKER_VERSION,
-                    "total_ms": round((time.time() - start_time) * 1000),
-                },
-            )
-            return
-
-        logger.info(f"[{report_id}] forecast_snapshot: reading source {source_report_id[:8]}...")
-
-        # Fetch source live_analysis
-        source_result = (
-            client.table("pricing_reports")
-            .select("id, report_type, status, result_summary, result_calendar, market_captured_at, completed_at, created_at, core_version")
-            .eq("id", source_report_id)
-            .limit(1)
-            .execute()
-        )
-        source_rows = source_result.data or []
-        if not source_rows:
-            db_helpers.fail_job(
-                client, report_id, worker_token,
-                error_message="Forecast source report not found.",
-                debug={
-                    "error": f"source_report_id {source_report_id} not found in pricing_reports",
-                    "worker_host": socket.gethostname(),
-                    "worker_version": WORKER_VERSION,
-                    "total_ms": round((time.time() - start_time) * 1000),
-                },
-            )
-            return
-
-        source = source_rows[0]
-
-        if source.get("status") != "ready":
-            db_helpers.fail_job(
-                client, report_id, worker_token,
-                error_message="Forecast source report is not ready.",
-                debug={
-                    "error": f"source report status={source.get('status')} (expected ready)",
-                    "source_report_id": source_report_id,
-                    "worker_host": socket.gethostname(),
-                    "worker_version": WORKER_VERSION,
-                    "total_ms": round((time.time() - start_time) * 1000),
-                },
-            )
-            return
-
-        # Resolve source market_captured_at with fallback chain
-        source_mct = (
-            source.get("market_captured_at")
-            or source.get("completed_at")
-            or source.get("created_at")
-        )
-
-        # Deep-copy summary so we can annotate it without mutating the source
-        import copy
-        summary = copy.deepcopy(source.get("result_summary") or {})
-        calendar = source.get("result_calendar") or []
-
-        # Annotate summary with forecast provenance metadata
-        summary["forecastMeta"] = {
-            "source_report_id": source_report_id,
-            "source_market_captured_at": source_mct,
-            "forecast_generation_mode": "derived_snapshot",
-        }
-
-        total_ms = round((time.time() - start_time) * 1000)
-
-        debug = {
-            "forecast_generation_mode": "derived_snapshot",
-            "source_report_id": source_report_id,
-            "source_report_type": source.get("report_type"),
-            "source_market_captured_at": source_mct,
-            "source_core_version": source.get("core_version"),
-            "cache_hit": False,
-            "scrape": False,
-            "worker_host": socket.gethostname(),
-            "worker_version": WORKER_VERSION,
-            "total_ms": total_ms,
-        }
-
-        db_helpers.complete_job(
-            client, report_id, worker_token,
-            summary=summary,
-            calendar=calendar,
-            core_version=WORKER_VERSION + "+forecast",
-            debug=debug,
-            source_market_captured_at=source_mct,
-        )
-
-        logger.info(
-            f"[{report_id}] forecast_snapshot completed in {total_ms}ms "
-            f"(source={source_report_id[:8]}..., mct={source_mct})"
-        )
-
-    except Exception as exc:
-        elapsed_ms = round((time.time() - start_time) * 1000)
-        logger.error(f"[{report_id}] forecast_snapshot failed: {exc}")
-        try:
-            db_helpers.fail_job(
-                client, report_id, worker_token,
-                error_message="Forecast generation failed. Please try again.",
-                debug={
-                    "error": str(exc),
-                    "worker_host": socket.gethostname(),
-                    "worker_version": WORKER_VERSION,
-                    "total_ms": elapsed_ms,
-                },
-            )
-        except Exception as db_exc:
-            logger.error(f"[{report_id}] Failed to mark forecast job as error: {db_exc}")
-
-    finally:
-        hb_stop.set()
-        hb_thread.join(timeout=5)
-
-
 def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     """
-    Process a single pricing report job.
+    Process a single pricing report job (live_analysis only).
 
-    Dispatches to process_forecast_job for forecast_snapshot jobs.
-    For live_analysis jobs: scrapes with Playwright via CDP.
+    forecast_snapshot jobs are no longer executed; any stale queued
+    forecast_snapshot rows will be failed immediately if encountered.
     """
     report_id = job["id"]
 
-    # Dispatch forecast_snapshot jobs to a separate, scrape-free path.
+    # Safeguard: forecast_snapshot jobs must never be executed.
+    # The creation API routes now return 410 Gone, so no new ones should arrive.
+    # Any residual queued forecast_snapshot rows from before the deprecation
+    # are failed here so they don't block the queue.
     if job.get("report_type") == "forecast_snapshot":
-        process_forecast_job(job, worker_token)
+        logger.warning(
+            f"[{report_id}] Received deprecated forecast_snapshot job — failing immediately. "
+            "No new forecast_snapshot jobs should be created."
+        )
+        client = db_helpers.get_client()
+        db_helpers.fail_job(
+            client, report_id, worker_token,
+            error_message="forecast_snapshot has been removed. Please run a live analysis instead.",
+            debug={
+                "error": "forecast_snapshot_deprecated",
+                "worker_host": socket.gethostname(),
+                "worker_version": WORKER_VERSION,
+            },
+        )
         return
 
     client = db_helpers.get_client()
@@ -617,6 +489,49 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     _progress(5, "connecting", "Connecting to browser...")
 
     try:
+        # ── Nightly live-reload ───────────────────────────────────────────────
+        # Scheduled nightly jobs use the saved listing as source-of-truth at
+        # execution time, not the snapshot baked in at queue time.  This means
+        # any benchmark / comp / setting changes the host makes after queuing
+        # are still reflected in tonight's report.
+        #
+        # Manual and rerun jobs keep snapshot semantics — their input_attributes
+        # represent the user's deliberate choices at the moment they clicked Run.
+        if job.get("job_lane") == "nightly" and job.get("listing_id"):
+            try:
+                _reload_row = (
+                    client.table("saved_listings")
+                    .select("input_address, input_attributes, default_discount_policy")
+                    .eq("id", job["listing_id"])
+                    .single()
+                    .execute()
+                )
+                _fresh = _reload_row.data or {}
+                if _fresh:
+                    job = dict(job)  # shallow copy — do not mutate the original
+                    if _fresh.get("input_address"):
+                        job["input_address"] = _fresh["input_address"]
+                    if _fresh.get("input_attributes") is not None:
+                        _fresh_attrs = _fresh["input_attributes"] or {}
+                        job["input_attributes"] = _fresh_attrs
+                        # Keep input_listing_url in sync with refreshed attributes
+                        job["input_listing_url"] = (
+                            _fresh_attrs.get("listingUrl")
+                            or _fresh_attrs.get("listing_url")
+                            or job.get("input_listing_url")
+                        )
+                    if _fresh.get("default_discount_policy") is not None:
+                        job["discount_policy"] = _fresh["default_discount_policy"]
+                    logger.info(
+                        f"[{report_id}] Nightly live-reload: refreshed inputs "
+                        f"from saved_listing {job['listing_id']}"
+                    )
+            except Exception as _reload_exc:
+                logger.warning(
+                    f"[{report_id}] Nightly live-reload failed (non-fatal, using snapshot): "
+                    f"{_reload_exc}"
+                )
+
         address = job.get("input_address", "")
         attributes = job.get("input_attributes") or {}
         start_date = str(job.get("input_date_start", ""))
@@ -663,9 +578,18 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
 
         # Check cache first (except URL mode where we must scrape to extract specs,
         # or explicit force_rerun jobs submitted from the dashboard).
-        cache_key = job.get("cache_key") or compute_cache_key(
-            address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
-        )
+        # For nightly jobs the queued cache_key was computed from the snapshot
+        # at queue time — after live-reload, execution inputs may differ so we
+        # must recompute from the actual values used.  Manual/rerun jobs keep
+        # the original key (snapshot semantics, no reload).
+        if job.get("job_lane") == "nightly":
+            cache_key = compute_cache_key(
+                address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
+            )
+        else:
+            cache_key = job.get("cache_key") or compute_cache_key(
+                address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
+            )
         force_rerun = bool((job.get("result_core_debug") or {}).get("force_rerun"))
         cached = None if (bypass_precache or force_rerun) else get_cached(client, cache_key)
         if force_rerun:
@@ -673,6 +597,72 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         if cached:
             summary, calendar = cached
             logger.info(f"[{report_id}] Cache hit for key={cache_key[:12]}...")
+            # Live price is time-sensitive — always re-capture fresh even on a cache hit.
+            # Shallow-copy summary so we don't mutate the cached object.
+            summary = dict(summary)
+            if listing_url:
+                from datetime import datetime as _dt, timedelta as _td
+                _live_checkin = start_date
+                try:
+                    _live_checkout = (
+                        _dt.strptime(start_date, "%Y-%m-%d") + _td(days=1)
+                    ).strftime("%Y-%m-%d")
+                except Exception:
+                    _live_checkout = end_date
+                try:
+                    from worker.scraper.target_extractor import capture_target_live_price
+                    _cache_live_info = capture_target_live_price(
+                        listing_url=listing_url,
+                        checkin=_live_checkin,
+                        checkout=_live_checkout,
+                        cdp_url=CDP_URL,
+                        cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    )
+                    logger.info(
+                        f"[{report_id}] Cache-hit live price: "
+                        f"status={_cache_live_info.get('livePriceStatus')} "
+                        f"price={_cache_live_info.get('observedListingPrice')}"
+                    )
+                except Exception as _lpe:
+                    logger.warning(f"[{report_id}] Cache-hit live price error (non-fatal): {_lpe}")
+                    _cache_live_info = {
+                        "livePriceStatus": "scrape_failed",
+                        "livePriceStatusReason": str(_lpe)[:300],
+                    }
+                summary.update(_cache_live_info)
+                _observed = _cache_live_info.get("observedListingPrice")
+                if isinstance(_observed, (int, float)) and _observed > 0:
+                    _market_median = summary.get("nightlyMedian")
+                    _recommended = (summary.get("recommendedPrice") or {}).get("nightly")
+                    if isinstance(_market_median, (int, float)) and _market_median > 0:
+                        _obs_vs_mkt_diff = round(_observed - _market_median)
+                        _obs_vs_mkt_pct = round((_observed / _market_median - 1) * 100)
+                        summary["observedVsMarketDiff"] = _obs_vs_mkt_diff
+                        summary["observedVsMarketDiffPct"] = _obs_vs_mkt_pct
+                        if _obs_vs_mkt_pct < -3:
+                            summary["pricingPosition"] = "below_market"
+                        elif _obs_vs_mkt_pct > 3:
+                            summary["pricingPosition"] = "above_market"
+                        else:
+                            summary["pricingPosition"] = "at_market"
+                    if isinstance(_recommended, (int, float)) and _recommended > 0:
+                        _obs_vs_rec_diff = round(_observed - _recommended)
+                        _obs_vs_rec_pct = round((_observed / _recommended - 1) * 100)
+                        summary["observedVsRecommendedDiff"] = _obs_vs_rec_diff
+                        summary["observedVsRecommendedDiffPct"] = _obs_vs_rec_pct
+                        if _obs_vs_rec_diff > 10:
+                            summary["pricingAction"] = "lower"
+                            summary["pricingActionTarget"] = int(round(_recommended))
+                        elif _obs_vs_rec_diff < -10:
+                            summary["pricingAction"] = "raise"
+                            summary["pricingActionTarget"] = int(round(_recommended))
+                        else:
+                            summary["pricingAction"] = "keep"
+                            summary["pricingActionTarget"] = int(round(_observed))
+            else:
+                summary["livePriceStatus"] = "no_listing_url"
+                summary["livePriceStatusReason"] = "No Airbnb listing URL configured for this property"
+            _is_nightly = job.get("job_lane") == "nightly"
             db_helpers.complete_job(
                 client, report_id, worker_token,
                 summary=summary,
@@ -686,6 +676,15 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     "total_ms": round((time.time() - start_time) * 1000),
                 },
                 input_attributes=finalized_input_attributes,
+                # For nightly jobs: write all refreshed execution inputs back to the
+                # report row so it fully reflects actual inputs, not queued snapshot.
+                input_address=address if _is_nightly else None,
+                # write_input_listing_url=True allows explicit NULL-clear when no URL.
+                input_listing_url=listing_url if _is_nightly else None,
+                write_input_listing_url=_is_nightly,
+                discount_policy=discount_policy if _is_nightly else None,
+                # Sync the recomputed execution cache key to the report row.
+                cache_key=cache_key if _is_nightly else None,
             )
             return
 
@@ -712,13 +711,14 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         _job_target_lat: Optional[float] = None
         _job_target_lng: Optional[float] = None
         _geocoded_now = False  # True if we just geocoded (need to write back)
+        _db_timezone: Optional[str] = None
 
         _listing_id_for_geocode = job.get("listing_id")
         if _listing_id_for_geocode:
             try:
                 _geo_row = (
                     client.table("saved_listings")
-                    .select("target_lat, target_lng")
+                    .select("target_lat, target_lng, listing_timezone")
                     .eq("id", _listing_id_for_geocode)
                     .single()
                     .execute()
@@ -726,6 +726,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 _geo_data = (_geo_row.data or {})
                 _db_lat = _geo_data.get("target_lat")
                 _db_lng = _geo_data.get("target_lng")
+                _db_timezone = _geo_data.get("listing_timezone")
                 if _db_lat is not None and _db_lng is not None:
                     _job_target_lat = float(_db_lat)
                     _job_target_lng = float(_db_lng)
@@ -997,9 +998,92 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             if bm_info:
                 summary["benchmarkInfo"] = bm_info
 
+        # ── Live price capture (target listing) ──────────────────────────────
+        # Attempt to read the host's current listed nightly price from Airbnb
+        # for the first night of the report window.
+        # Date basis: checkin = start_date, checkout = start_date + 1 day.
+        # This is the price a guest would see booking that specific night.
+        # Non-fatal: failure is logged and recorded in summary but does not
+        # block the job from completing.
+        if listing_url:
+            from datetime import datetime as _dt, timedelta as _td
+            _live_checkin = start_date
+            try:
+                _live_checkout = (
+                    _dt.strptime(start_date, "%Y-%m-%d") + _td(days=1)
+                ).strftime("%Y-%m-%d")
+            except Exception:
+                _live_checkout = end_date
+
+            _progress(85, "capturing_live_price", "Capturing your current listing price from Airbnb...")
+            try:
+                from worker.scraper.target_extractor import capture_target_live_price
+                live_price_info = capture_target_live_price(
+                    listing_url=listing_url,
+                    checkin=_live_checkin,
+                    checkout=_live_checkout,
+                    cdp_url=CDP_URL,
+                    cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                )
+                logger.info(
+                    f"[{report_id}] Live price capture: "
+                    f"status={live_price_info.get('livePriceStatus')} "
+                    f"price={live_price_info.get('observedListingPrice')} "
+                    f"confidence={live_price_info.get('observedListingPriceConfidence')}"
+                )
+            except Exception as _lpe:
+                logger.warning(f"[{report_id}] Live price capture error (non-fatal): {_lpe}")
+                live_price_info = {
+                    "livePriceStatus": "scrape_failed",
+                    "livePriceStatusReason": str(_lpe)[:300],
+                }
+
+            # Merge live price fields into summary
+            summary.update(live_price_info)
+
+            # Compute comparison intelligence when observed price is available
+            _observed = live_price_info.get("observedListingPrice")
+            if isinstance(_observed, (int, float)) and _observed > 0:
+                _market_median = summary.get("nightlyMedian")
+                _recommended = (summary.get("recommendedPrice") or {}).get("nightly")
+
+                if isinstance(_market_median, (int, float)) and _market_median > 0:
+                    _obs_vs_mkt_diff = round(_observed - _market_median)
+                    _obs_vs_mkt_pct = round((_observed / _market_median - 1) * 100)
+                    summary["observedVsMarketDiff"] = _obs_vs_mkt_diff
+                    summary["observedVsMarketDiffPct"] = _obs_vs_mkt_pct
+                    if _obs_vs_mkt_pct < -3:
+                        summary["pricingPosition"] = "below_market"
+                    elif _obs_vs_mkt_pct > 3:
+                        summary["pricingPosition"] = "above_market"
+                    else:
+                        summary["pricingPosition"] = "at_market"
+
+                if isinstance(_recommended, (int, float)) and _recommended > 0:
+                    _obs_vs_rec_diff = round(_observed - _recommended)
+                    _obs_vs_rec_pct = round((_observed / _recommended - 1) * 100)
+                    summary["observedVsRecommendedDiff"] = _obs_vs_rec_diff
+                    summary["observedVsRecommendedDiffPct"] = _obs_vs_rec_pct
+
+                    # Pricing action: >$10 from recommendation triggers suggest
+                    if _obs_vs_rec_diff > 10:
+                        summary["pricingAction"] = "lower"
+                        summary["pricingActionTarget"] = int(round(_recommended))
+                    elif _obs_vs_rec_diff < -10:
+                        summary["pricingAction"] = "raise"
+                        summary["pricingActionTarget"] = int(round(_recommended))
+                    else:
+                        summary["pricingAction"] = "keep"
+                        summary["pricingActionTarget"] = int(round(_observed))
+        else:
+            # No listing URL configured
+            summary["livePriceStatus"] = "no_listing_url"
+            summary["livePriceStatusReason"] = "No Airbnb listing URL configured for this property"
+
         _progress(90, "saving_results", "Saving results...")
 
         # Write results
+        _is_nightly = job.get("job_lane") == "nightly"
         db_helpers.complete_job(
             client, report_id, worker_token,
             summary=summary,
@@ -1007,6 +1091,15 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             core_version=core_version,
             debug=debug,
             input_attributes=finalized_input_attributes,
+            # For nightly jobs: write all refreshed execution inputs back to the
+            # report row so it fully reflects actual inputs, not queued snapshot.
+            input_address=address if _is_nightly else None,
+            # write_input_listing_url=True allows explicit NULL-clear when no URL.
+            input_listing_url=listing_url if _is_nightly else None,
+            write_input_listing_url=_is_nightly,
+            discount_policy=discount_policy if _is_nightly else None,
+            # Sync the recomputed execution cache key to the report row.
+            cache_key=cache_key if _is_nightly else None,
         )
 
         if listing_url:
@@ -1032,6 +1125,12 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
 
         # Phase 3B: write back page-extracted coords when the listing page gave us
         # better coordinates than geocoding (URL mode and benchmark mode).
+        # _final_lat/_final_lng track the best coords known after all sources;
+        # they start from geocoded/DB coords and are superseded by page coords
+        # when available — this drives the timezone enrichment below.
+        _final_lat: Optional[float] = _job_target_lat
+        _final_lng: Optional[float] = _job_target_lng
+
         if _listing_id_for_geocode and transparent_result:
             _page_coords = (transparent_result or {}).get("pageExtractedCoords")
             if _page_coords and _page_coords.get("source") == "page":
@@ -1047,10 +1146,39 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                             f"[{report_id}] Saved page-extracted coords "
                             f"({_pc_lat:.5f}, {_pc_lng:.5f}) to listing {_listing_id_for_geocode}"
                         )
+                        # Page coords are more trustworthy — use them as final coords
+                        _final_lat = _pc_lat
+                        _final_lng = _pc_lng
                     except Exception as exc:
                         logger.warning(
                             f"[{report_id}] Failed to write page-extracted coords (non-fatal): {exc}"
                         )
+
+        # Write back listing timezone using the best coords known this run.
+        # Runs after all coord sources (geocoded AND page-extracted) so that
+        # page-extracted coordinates also trigger same-run timezone persistence.
+        # Does not overwrite an already-stored timezone.
+        if (
+            _listing_id_for_geocode
+            and _final_lat is not None
+            and _final_lng is not None
+            and not _db_timezone
+        ):
+            try:
+                from timezonefinder import TimezoneFinder
+                _tf = TimezoneFinder()
+                _resolved_tz = _tf.timezone_at(lat=_final_lat, lng=_final_lng)
+                if _resolved_tz:
+                    client.table("saved_listings").update({
+                        "listing_timezone": _resolved_tz,
+                    }).eq("id", _listing_id_for_geocode).execute()
+                    logger.info(
+                        f"[{report_id}] Saved listing_timezone={_resolved_tz} "
+                        f"to listing {_listing_id_for_geocode} "
+                        f"(coords source: {'page' if _final_lat != _job_target_lat else 'geocode/db'})"
+                    )
+            except Exception as exc:
+                logger.warning(f"[{report_id}] Failed to resolve/write listing timezone (non-fatal): {exc}")
 
         # Phase 3B: write back the adaptive radius used this run
         if _listing_id_for_geocode:
@@ -1091,7 +1219,19 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 "listing_url": listing_url or "",
                 "comps_count": comps_count,
             }
-            set_cached(client, cache_key, summary, calendar, meta=meta)
+            # Strip live-price fields before caching — they are time-sensitive
+            # and must be re-captured fresh on every job run (including cache hits).
+            _LIVE_PRICE_KEYS = {
+                "observedListingPrice", "observedListingPriceDate",
+                "observedListingPriceCapturedAt", "observedListingPriceSource",
+                "observedListingPriceConfidence", "observedVsMarketDiff",
+                "observedVsMarketDiffPct", "observedVsRecommendedDiff",
+                "observedVsRecommendedDiffPct", "pricingPosition",
+                "pricingAction", "pricingActionTarget",
+                "livePriceStatus", "livePriceStatusReason",
+            }
+            _cache_safe_summary = {k: v for k, v in summary.items() if k not in _LIVE_PRICE_KEYS}
+            set_cached(client, cache_key, _cache_safe_summary, calendar, meta=meta)
         except Exception as exc:
             logger.warning(f"[{report_id}] Failed to write cache: {exc}")
 
@@ -1128,7 +1268,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
 
 def main():
     logger.info(f"AriaHost Worker starting (version={WORKER_VERSION})")
-    logger.info(f"  env={WORKER_ENV}, poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
+    logger.info(f"  env={WORKER_ENV}, lane={WORKER_LANE}, poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
     logger.info(f"  heartbeat={HEARTBEAT_SECONDS}s, max_runtime={MAX_RUNTIME_SECONDS}s")
     logger.info(f"  CDP={CDP_URL}, connect_timeout={CDP_CONNECT_TIMEOUT_MS}ms")
 
@@ -1139,7 +1279,7 @@ def main():
     while not _shutdown_event.is_set():
         try:
             worker_token = uuid.uuid4()
-            job = db_helpers.claim_job(client, worker_token, STALE_MINUTES, WORKER_ENV)
+            job = db_helpers.claim_job(client, worker_token, STALE_MINUTES, WORKER_ENV, WORKER_LANE)
 
             if job is None:
                 # No work — wait with current backoff

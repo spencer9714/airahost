@@ -15,7 +15,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger("worker.scraper.target_extractor")
@@ -173,8 +173,34 @@ def check_cdp_endpoint(cdp_url: str, timeout_seconds: float = 2.0) -> Tuple[bool
         return False, str(exc)
 
 
+_AIRBNB_HOST_RE = re.compile(
+    r"^(?:[a-z]{2,5}(?:-[a-z]{1,5})?\.)?airbnb\.com$", re.IGNORECASE
+)
+_CANONICAL_AIRBNB_HOST = "www.airbnb.com"
+
+
+def normalize_airbnb_url(url: str) -> str:
+    """Normalize localized Airbnb domains to www.airbnb.com.
+
+    Any host matching *.airbnb.com (e.g. zh-t.airbnb.com, zh.airbnb.com,
+    fr.airbnb.com) is rewritten to www.airbnb.com.  Path, query string, and
+    fragment are preserved verbatim.  Non-Airbnb URLs are returned unchanged.
+    """
+    if not url:
+        return url
+    try:
+        p = urlparse(url)
+        if p.netloc and _AIRBNB_HOST_RE.match(p.netloc) and p.netloc != _CANONICAL_AIRBNB_HOST:
+            logger.debug("Normalizing Airbnb URL host %s → %s", p.netloc, _CANONICAL_AIRBNB_HOST)
+            p = p._replace(netloc=_CANONICAL_AIRBNB_HOST)
+            return urlunparse(p)
+    except Exception:
+        pass
+    return url
+
+
 def safe_domain_base(url: str) -> str:
-    p = urlparse(url)
+    p = urlparse(normalize_airbnb_url(url))
     if p.scheme and p.netloc:
         return f"{p.scheme}://{p.netloc}".rstrip("/")
     return "https://www.airbnb.com"
@@ -929,3 +955,102 @@ def extract_nightly_price_from_listing_page(
         f"[benchmark] Could not extract nightly price from listing page: {listing_url}"
     )
     return None, "failed"
+
+
+# ---------------------------------------------------------------------------
+# Target listing live price capture — standalone browser session
+# ---------------------------------------------------------------------------
+
+
+def capture_target_live_price(
+    listing_url: str,
+    checkin: str,
+    checkout: str,
+    cdp_url: str,
+    cdp_connect_timeout_ms: int = 15000,
+) -> Dict[str, Any]:
+    """
+    Open a short Playwright session to extract the target listing's current
+    nightly price for the given checkin/checkout dates.
+
+    Date basis: checkin = first day of the report window, checkout = checkin+1.
+    This gives the "price as shown to a guest booking that specific night."
+
+    Returns a dict with:
+      observedListingPrice           — int | None
+      observedListingPriceDate       — str (checkin, YYYY-MM-DD)
+      observedListingPriceCapturedAt — str (ISO-8601 UTC)
+      observedListingPriceSource     — "ld_json" | "booking_widget" | "body_text" | None
+      observedListingPriceConfidence — "high" | "medium" | "low" | "failed"
+      livePriceStatus                — "captured" | "scrape_failed" | "no_price_found"
+      livePriceStatusReason          — str
+    """
+    from datetime import datetime, timezone
+
+    captured_at = datetime.now(timezone.utc).isoformat()
+
+    _CONFIDENCE_TO_SOURCE = {
+        "high": "ld_json",
+        "medium": "booking_widget",
+        "low": "body_text",
+    }
+
+    listing_url = normalize_airbnb_url(listing_url)
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(cdp_url, timeout=cdp_connect_timeout_ms)
+            context = browser.new_context(
+                locale="en-US",
+                timezone_id="America/Los_Angeles",
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+            )
+            page = context.new_page()
+            try:
+                price, confidence = extract_nightly_price_from_listing_page(
+                    page, listing_url, checkin, checkout
+                )
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                try:
+                    context.close()
+                except Exception:
+                    pass
+
+    except Exception as exc:
+        logger.warning(f"[target_live_price] Browser/navigation failed: {exc}")
+        return {
+            "observedListingPrice": None,
+            "observedListingPriceDate": checkin,
+            "observedListingPriceCapturedAt": captured_at,
+            "observedListingPriceSource": None,
+            "observedListingPriceConfidence": "failed",
+            "livePriceStatus": "scrape_failed",
+            "livePriceStatusReason": str(exc)[:300],
+        }
+
+    if price is None:
+        return {
+            "observedListingPrice": None,
+            "observedListingPriceDate": checkin,
+            "observedListingPriceCapturedAt": captured_at,
+            "observedListingPriceSource": None,
+            "observedListingPriceConfidence": "failed",
+            "livePriceStatus": "no_price_found",
+            "livePriceStatusReason": f"No nightly price found on listing page for {checkin}/{checkout}",
+        }
+
+    return {
+        "observedListingPrice": round(price),
+        "observedListingPriceDate": checkin,
+        "observedListingPriceCapturedAt": captured_at,
+        "observedListingPriceSource": _CONFIDENCE_TO_SOURCE.get(confidence, "unknown"),
+        "observedListingPriceConfidence": confidence,
+        "livePriceStatus": "captured",
+        "livePriceStatusReason": f"Nightly price captured for {checkin} (confidence={confidence})",
+    }

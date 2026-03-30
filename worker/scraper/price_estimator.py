@@ -56,6 +56,7 @@ from worker.scraper.target_extractor import (
     check_cdp_endpoint,
     extract_listing_page_title,
     extract_target_spec,
+    normalize_airbnb_url,
     safe_domain_base,
 )
 
@@ -101,7 +102,7 @@ def _repair_suspicious_comparable_titles(
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
-        url = str(item.get("url") or "").strip()
+        url = normalize_airbnb_url(str(item.get("url") or "").strip())
         if not url or not _title_looks_suspicious(title):
             continue
         try:
@@ -134,7 +135,7 @@ def _repair_incomplete_comparable_specs(
         if not isinstance(item, dict):
             continue
 
-        url = str(item.get("url") or "").strip()
+        url = normalize_airbnb_url(str(item.get("url") or "").strip())
         if not url:
             continue
 
@@ -590,6 +591,8 @@ def run_scrape(
     """
     from playwright.sync_api import sync_playwright
 
+    listing_url = normalize_airbnb_url(listing_url)
+
     start_time = time.time()
     timings: Dict[str, int] = {}
     extraction_warnings: List[str] = []
@@ -630,7 +633,11 @@ def run_scrape(
             cdp_url,
             timeout=cdp_connect_timeout_ms,
         )
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        context = browser.new_context(
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
         page = context.new_page()
 
         try:
@@ -856,6 +863,10 @@ def run_scrape(
                 page.close()
             except Exception:
                 pass
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -902,6 +913,10 @@ def run_benchmark_scrape(
         estimate_benchmark_price_for_date,
     )
 
+    benchmark_url = normalize_airbnb_url(benchmark_url)
+    if secondary_benchmark_urls:
+        secondary_benchmark_urls = [normalize_airbnb_url(u) for u in secondary_benchmark_urls]
+
     start_time = time.time()
     timings: Dict[str, int] = {}
     extraction_warnings: List[str] = []
@@ -936,7 +951,11 @@ def run_benchmark_scrape(
 
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(cdp_url, timeout=cdp_connect_timeout_ms)
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        context = browser.new_context(
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
         page = context.new_page()
 
         # ── Step 0: Probe Discounts (Strategy B) ────────────────────────
@@ -1250,6 +1269,10 @@ def run_benchmark_scrape(
                 page.close()
             except Exception:
                 pass
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -1423,7 +1446,11 @@ def run_criteria_search(
             cdp_url,
             timeout=cdp_connect_timeout_ms,
         )
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        context = browser.new_context(
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        )
         page = context.new_page()
 
         try:
@@ -1503,6 +1530,10 @@ def run_criteria_search(
         finally:
             try:
                 page.close()
+            except Exception:
+                pass
+            try:
+                context.close()
             except Exception:
                 pass
 

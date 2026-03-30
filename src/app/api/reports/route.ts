@@ -42,6 +42,21 @@ export async function POST(req: NextRequest) {
     if (listingParsed.success) {
       const { listingId, listingUrl, dateRange } = listingParsed.data;
 
+      // Future-only enforcement: custom analyses must not use past start dates.
+      const todayStr = new Date().toISOString().split("T")[0];
+      if (dateRange.startDate < todayStr) {
+        return NextResponse.json(
+          { error: "Start date must be today or later. Past-date analysis is not supported." },
+          { status: 400 }
+        );
+      }
+      if (dateRange.endDate < dateRange.startDate) {
+        return NextResponse.json(
+          { error: "End date must be on or after start date." },
+          { status: 400 }
+        );
+      }
+
       const authClient = await getSupabaseServer();
       const {
         data: { user },
@@ -100,6 +115,7 @@ export async function POST(req: NextRequest) {
         listing_id: listingId,
         input_address: address,
         target_env: targetEnv,
+        job_lane: "interactive",
         input_attributes: {
           ...listing.input_attributes,
           inputMode,
@@ -279,6 +295,7 @@ export async function POST(req: NextRequest) {
       share_id: shareId,
       input_address: listing.address,
       target_env: targetEnv,
+      job_lane: "interactive",
       input_attributes: enrichedInputAttributes,
       input_date_start: dates.startDate,
       input_date_end: dates.endDate,
@@ -342,6 +359,82 @@ export async function POST(req: NextRequest) {
       const listingInputAttrs: Record<string, unknown> = { ...enrichedInputAttributes };
       if (preferredComps?.length) {
         listingInputAttrs.preferredComps = preferredComps;
+      }
+
+      // Dedup: check for an existing saved listing by Airbnb room ID > normalized URL > address
+      let existingListingId: string | null = null;
+      let existingListingName: string | null = null;
+
+      const { data: userListings } = await supabase
+        .from("saved_listings")
+        .select("id, name, input_attributes, input_address")
+        .eq("user_id", saveUserId);
+
+      if (userListings && userListings.length > 0) {
+        // Extract Airbnb room ID from URL for canonical identity
+        const roomIdMatch = listingUrl?.match(/\/rooms\/(\d+)/);
+        const newRoomId = roomIdMatch ? roomIdMatch[1] : null;
+
+        // Normalize a URL to just the path without query params for comparison
+        const normalizeUrl = (url: string | null | undefined) => {
+          if (!url) return null;
+          try { return new URL(url).pathname.replace(/\/$/, ""); } catch { return null; }
+        };
+        const newNormalizedUrl = normalizeUrl(listingUrl);
+
+        for (const saved of userListings) {
+          const savedAttrs = (saved.input_attributes ?? {}) as Record<string, unknown>;
+          const savedUrl = (savedAttrs.listingUrl ?? savedAttrs.listing_url) as string | null | undefined;
+
+          // 1. Match by Airbnb room ID
+          if (newRoomId) {
+            const savedRoomIdMatch = savedUrl?.match(/\/rooms\/(\d+)/);
+            if (savedRoomIdMatch && savedRoomIdMatch[1] === newRoomId) {
+              existingListingId = saved.id;
+              existingListingName = saved.name;
+              break;
+            }
+          }
+
+          // 2. Match by normalized URL
+          if (!existingListingId && newNormalizedUrl) {
+            const savedNormalizedUrl = normalizeUrl(savedUrl as string | null);
+            if (savedNormalizedUrl && savedNormalizedUrl === newNormalizedUrl) {
+              existingListingId = saved.id;
+              existingListingName = saved.name;
+              break;
+            }
+          }
+
+          // 3. Match by address
+          if (!existingListingId && listing.address && saved.input_address === listing.address) {
+            existingListingId = saved.id;
+            existingListingName = saved.name;
+            break;
+          }
+        }
+      }
+
+      if (existingListingId) {
+        // Link report to existing listing
+        await supabase.from("listing_reports").insert({
+          saved_listing_id: existingListingId,
+          pricing_report_id: reportId,
+          trigger: "manual",
+        });
+        await supabase
+          .from("saved_listings")
+          .update({ last_used_at: new Date().toISOString() })
+          .eq("id", existingListingId);
+
+        return NextResponse.json({
+          id: reportId,
+          shareId: report.share_id,
+          status: report.status,
+          listingAlreadySaved: true,
+          existingListingId,
+          existingListingName,
+        });
       }
 
       const { data: listingRow, error: listingErr } = await supabase
