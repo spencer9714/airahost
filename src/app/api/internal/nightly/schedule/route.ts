@@ -114,6 +114,7 @@ export async function POST(req: NextRequest) {
   ).toISOString();
   const now = new Date().toISOString();
   const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
+  console.log(`[nightly/schedule] target_env=${targetEnv} job_lane=nightly`);
 
   // ── Fetch all saved listings ─────────────────────────────────────────────
   const { data: listings, error: listingsErr } = await admin

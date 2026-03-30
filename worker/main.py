@@ -501,7 +501,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             try:
                 _reload_row = (
                     client.table("saved_listings")
-                    .select("input_address, input_attributes, default_discount_policy")
+                    .select("input_address, input_attributes, default_discount_policy, minimum_booking_nights")
                     .eq("id", job["listing_id"])
                     .single()
                     .execute()
@@ -522,6 +522,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                         )
                     if _fresh.get("default_discount_policy") is not None:
                         job["discount_policy"] = _fresh["default_discount_policy"]
+                    if _fresh.get("minimum_booking_nights") is not None:
+                        job["minimum_booking_nights"] = _fresh["minimum_booking_nights"]
                     logger.info(
                         f"[{report_id}] Nightly live-reload: refreshed inputs "
                         f"from saved_listing {job['listing_id']}"
@@ -538,6 +540,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         end_date = str(job.get("input_date_end", ""))
         discount_policy = job.get("discount_policy") or {}
         listing_url = _get_listing_url(job)
+        minimum_booking_nights = int(job.get("minimum_booking_nights") or 1)
         input_mode = attributes.get("inputMode", "criteria")
         # Extract preferred comps list — only keep items that are enabled
         preferred_comps_raw = attributes.get("preferredComps")
@@ -605,7 +608,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 _live_checkin = start_date
                 try:
                     _live_checkout = (
-                        _dt.strptime(start_date, "%Y-%m-%d") + _td(days=1)
+                        _dt.strptime(start_date, "%Y-%m-%d") + _td(days=minimum_booking_nights)
                     ).strftime("%Y-%m-%d")
                 except Exception:
                     _live_checkout = end_date
@@ -686,6 +689,23 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 # Sync the recomputed execution cache key to the report row.
                 cache_key=cache_key if _is_nightly else None,
             )
+
+            # ── Alert evaluation — nightly only (cache-hit path) ─────────────
+            # Must run AFTER complete_job() so the report is already marked ready.
+            # Non-fatal: alert failures never affect the job outcome.
+            if _is_nightly and job.get("listing_id"):
+                try:
+                    from worker.alerts import run_alert_evaluation
+                    run_alert_evaluation(
+                        job, summary, client,
+                        listing_url=listing_url,
+                        cdp_url=CDP_URL,
+                        cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    )
+                except Exception as _alert_exc:
+                    logger.warning(
+                        f"[{report_id}] Alert evaluation failed (non-fatal, cache-hit): {_alert_exc}"
+                    )
             return
 
         # transparent_result holds the new structured output from scrape/criteria
@@ -1001,8 +1021,8 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         # ── Live price capture (target listing) ──────────────────────────────
         # Attempt to read the host's current listed nightly price from Airbnb
         # for the first night of the report window.
-        # Date basis: checkin = start_date, checkout = start_date + 1 day.
-        # This is the price a guest would see booking that specific night.
+        # Date basis: checkin = start_date, checkout = start_date + minimum_booking_nights.
+        # Uses the listing's minimum stay setting so Airbnb shows a price.
         # Non-fatal: failure is logged and recorded in summary but does not
         # block the job from completing.
         if listing_url:
@@ -1010,7 +1030,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             _live_checkin = start_date
             try:
                 _live_checkout = (
-                    _dt.strptime(start_date, "%Y-%m-%d") + _td(days=1)
+                    _dt.strptime(start_date, "%Y-%m-%d") + _td(days=minimum_booking_nights)
                 ).strftime("%Y-%m-%d")
             except Exception:
                 _live_checkout = end_date
@@ -1101,6 +1121,23 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             # Sync the recomputed execution cache key to the report row.
             cache_key=cache_key if _is_nightly else None,
         )
+
+        # ── Alert evaluation — nightly only (fresh-scrape path) ──────────────
+        # Must run AFTER complete_job() so the report is already marked ready.
+        # Non-fatal: alert failures never affect the job outcome.
+        if _is_nightly and job.get("listing_id"):
+            try:
+                from worker.alerts import run_alert_evaluation
+                run_alert_evaluation(
+                    job, summary, client,
+                    listing_url=listing_url,
+                    cdp_url=CDP_URL,
+                    cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                )
+            except Exception as _alert_exc:
+                logger.warning(
+                    f"[{report_id}] Alert evaluation failed (non-fatal): {_alert_exc}"
+                )
 
         if listing_url:
             try:
@@ -1283,6 +1320,7 @@ def main():
 
             if job is None:
                 # No work — wait with current backoff
+                logger.debug(f"[poll] idle (env={WORKER_ENV}, lane={WORKER_LANE}, backoff={backoff:.0f}s)")
                 _shutdown_event.wait(backoff)
                 backoff = min(backoff * 1.5, max_backoff)
                 continue
@@ -1291,6 +1329,11 @@ def main():
             backoff = POLL_SECONDS
             report_id = job["id"]
             attempts = job.get("worker_attempts", 0)
+            logger.info(
+                f"[{report_id}] claimed "
+                f"(job_lane={job.get('job_lane', '?')}, target_env={job.get('target_env', '?')}, "
+                f"worker_env={WORKER_ENV}, worker_lane={WORKER_LANE}, attempt={attempts})"
+            )
 
             if attempts > MAX_ATTEMPTS:
                 logger.warning(f"[{report_id}] Exceeded max attempts ({attempts}), marking error")

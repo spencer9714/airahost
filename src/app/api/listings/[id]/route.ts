@@ -134,7 +134,7 @@ export async function PATCH(
 
     const { data: currentListing } = await supabase
       .from("saved_listings")
-      .select("id, name, input_address, input_attributes")
+      .select("id, name, input_address, input_attributes, pricing_alerts_enabled")
       .eq("id", id)
       .eq("user_id", user.id)
       .single();
@@ -163,10 +163,50 @@ export async function PATCH(
       updates.default_start_date = parsed.data.defaultStartDate;
     if (parsed.data.defaultEndDate !== undefined)
       updates.default_end_date = parsed.data.defaultEndDate;
-    // preferredComps is stored inside input_attributes as a sub-field
+    if (parsed.data.minimumBookingNights !== undefined)
+      updates.minimum_booking_nights = parsed.data.minimumBookingNights;
+
+    // preferredComps and listingUrl are stored inside input_attributes as sub-fields
+    const currentAttrs = ((currentListing?.input_attributes ?? {}) as Record<string, unknown>);
+
+    // Track whether the URL change forces alerts off (so the caller's pricingAlertsEnabled
+    // field cannot override a URL-driven force-disable below).
+    let urlForceDisableAlerts = false;
+
+    if (parsed.data.listingUrl !== undefined) {
+      const baseAttrs = (updates.input_attributes as Record<string, unknown> | undefined) ?? currentAttrs;
+      const incomingUrl = parsed.data.listingUrl;
+
+      if (incomingUrl === null || incomingUrl === "") {
+        // ── URL cleared ────────────────────────────────────────────────────
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { listingUrl: _removed, ...rest } = baseAttrs;
+        updates.input_attributes = rest;
+        // Reset validation state — no URL to validate against.
+        updates.listing_url_validation_status = null;
+        updates.listing_url_validated_at = null;
+        // Alerts cannot run without a URL; force-disable regardless of payload.
+        urlForceDisableAlerts = true;
+      } else if (!incomingUrl.includes("airbnb.com/rooms/")) {
+        // ── URL present but not a valid Airbnb room URL ───────────────────
+        updates.input_attributes = { ...baseAttrs, listingUrl: incomingUrl };
+        updates.listing_url_validation_status = "invalid";
+        updates.listing_url_validated_at = null;
+        // Alerts require a usable URL; force-disable.
+        urlForceDisableAlerts = true;
+      } else {
+        // ── Valid Airbnb room URL format ───────────────────────────────────
+        // Reset to null (unknown) — the worker will write "valid" on first
+        // successful capture from this URL.  Do not carry over a "valid"
+        // status from a different previous URL.
+        updates.input_attributes = { ...baseAttrs, listingUrl: incomingUrl };
+        updates.listing_url_validation_status = null;
+        updates.listing_url_validated_at = null;
+      }
+    }
+
     if (parsed.data.preferredComps !== undefined) {
-      const currentAttrs = ((currentListing?.input_attributes ?? {}) as Record<string, unknown>);
-      // Apply on top of any inputAttributes update already staged
+      // Apply on top of any input_attributes update already staged (e.g. from listingUrl above)
       const baseAttrs = (updates.input_attributes as Record<string, unknown> | undefined) ?? currentAttrs;
       if (parsed.data.preferredComps === null || parsed.data.preferredComps.length === 0) {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -175,6 +215,26 @@ export async function PATCH(
       } else {
         updates.input_attributes = { ...baseAttrs, preferredComps: parsed.data.preferredComps };
       }
+    }
+
+    if (urlForceDisableAlerts) {
+      // URL was cleared or set to an invalid format — alerts must be disabled.
+      // This takes precedence over any pricingAlertsEnabled value in the payload.
+      updates.pricing_alerts_enabled = false;
+    } else {
+      // Server-side guard: enabling pricing alerts requires a valid Airbnb listing URL.
+      if (parsed.data.pricingAlertsEnabled === true) {
+        const effectiveAttrs = (updates.input_attributes as Record<string, unknown> | undefined) ?? currentAttrs;
+        const effectiveUrl = effectiveAttrs.listingUrl as string | undefined | null;
+        if (!effectiveUrl || !effectiveUrl.includes("airbnb.com/rooms/")) {
+          return NextResponse.json(
+            { error: "A valid Airbnb listing URL (airbnb.com/rooms/…) is required to enable pricing alerts." },
+            { status: 400 }
+          );
+        }
+      }
+      if (parsed.data.pricingAlertsEnabled !== undefined)
+        updates.pricing_alerts_enabled = parsed.data.pricingAlertsEnabled;
     }
 
     const { data: listing, error } = await supabase
