@@ -18,7 +18,9 @@ interface Props {
   benchmarkMeta?: {
     count: number;
     primaryUrl: string | null;
+    primaryName?: string | null;
   } | null;
+  onManageBenchmarks?: () => void;
   lastAnalysisDate: string | null;
   /**
    * @deprecated — live price now comes directly from summary.observedListingPrice.
@@ -111,6 +113,7 @@ export function RecommendationBanner({
   airbnbListingLabel,
   propertyMeta,
   benchmarkMeta,
+  onManageBenchmarks,
   lastAnalysisDate,
   observedListingPrice: _legacyObs,
 }: Props) {
@@ -283,10 +286,20 @@ export function RecommendationBanner({
                   {propertyMeta.baths !== 1 ? "s" : ""}
                 </p>
                 {benchmarkMeta?.count ? (
-                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                  <button
+                    type="button"
+                    onClick={onManageBenchmarks}
+                    className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 cursor-pointer hover:bg-amber-200 transition-colors"
+                    title="Manage benchmark listings"
+                  >
                     {benchmarkMeta.count} benchmark{benchmarkMeta.count !== 1 ? "s" : ""}
-                  </span>
+                  </button>
                 ) : null}
+                {benchmarkMeta?.primaryName && (
+                  <span className="text-xs text-foreground/50">
+                    vs {benchmarkMeta.primaryName}
+                  </span>
+                )}
               </div>
             )}
             {lastAnalysisDate && (

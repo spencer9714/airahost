@@ -11,6 +11,7 @@ import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
 import { extractAirbnbListingId } from "@/lib/airbnb-utils";
+import { BenchmarkModal } from "@/components/dashboard/BenchmarkModal";
 import { resolveMarketCapturedAt } from "@/lib/freshness";
 import type {
   PropertyType,
@@ -90,7 +91,7 @@ type ListingRow = {
     address?: string;
     listingUrl?: string | null;
     listing_url?: string | null;
-    preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
+    preferredComps?: Array<{ listingUrl: string; name?: string; note?: string; enabled?: boolean }> | null;
   };
   created_at: string;
   last_used_at: string | null;
@@ -154,6 +155,7 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [rerunningId, setRerunningId] = useState<string | null>(null);
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
+  const [benchmarkModalListingId, setBenchmarkModalListingId] = useState<string | null>(null);
   const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
   const [showCustomPanel, setShowCustomPanel] = useState(false);
   // Default to tomorrow — custom analyses are future-only.
@@ -287,7 +289,7 @@ export default function DashboardPage() {
 
   async function handleSavePreferredComps(
     listingId: string,
-    preferredComps: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null
+    preferredComps: Array<{ listingUrl: string; name?: string; note?: string; enabled?: boolean }> | null
   ) {
     const res = await fetch(`/api/listings/${listingId}`, {
       method: "PATCH",
@@ -626,7 +628,12 @@ export default function DashboardPage() {
                       activeListing.input_attributes.preferredComps?.find(
                         (c) => c.enabled !== false && c.listingUrl
                       )?.listingUrl ?? null,
+                    primaryName:
+                      activeListing.input_attributes.preferredComps?.find(
+                        (c) => c.enabled !== false && c.listingUrl
+                      )?.name ?? null,
                   }}
+                  onManageBenchmarks={() => setBenchmarkModalListingId(activeListing.id)}
                   lastAnalysisDate={activeListing.latestLinkedAt}
                 />
 
@@ -747,6 +754,33 @@ export default function DashboardPage() {
             )}
           </section>
         </div>
+
+        {/* ── Benchmark management modal ── */}
+        {benchmarkModalListingId !== null && (() => {
+          const bListing = listings.find((l) => l.id === benchmarkModalListingId);
+          if (!bListing) return null;
+          return (
+            <BenchmarkModal
+              listing={{ id: bListing.id, name: bListing.name }}
+              initialComps={
+                (bListing.input_attributes.preferredComps ?? []).filter(
+                  (c) => c.enabled !== false && c.listingUrl
+                )
+              }
+              onClose={() => setBenchmarkModalListingId(null)}
+              onSave={async (comps) => {
+                await handleSavePreferredComps(
+                  bListing.id,
+                  comps.length > 0
+                    ? comps.map((c) => ({ ...c, enabled: true }))
+                    : null
+                );
+                // Modal calls onClose() after onSave resolves, which sets
+                // benchmarkModalListingId to null via the onClose prop above.
+              }}
+            />
+          );
+        })()}
 
         {/* ════════════════════════════════════════
             Recent Reports — full width below
