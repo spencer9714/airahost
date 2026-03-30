@@ -460,6 +460,10 @@ export const updateListingSchema = z.object({
   defaultStartDate: z.string().nullable().optional(),
   defaultEndDate: z.string().nullable().optional(),
   preferredComps: preferredCompsSchema.nullable().optional(),
+  pricingAlertsEnabled: z.boolean().optional(),
+  minimumBookingNights: z.number().int().min(1).max(30).optional(),
+  /** Update the Airbnb listing URL stored in input_attributes.listingUrl */
+  listingUrl: z.string().url().nullable().optional(),
 });
 
 export interface SavedListing {
@@ -475,6 +479,15 @@ export interface SavedListing {
   lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  // Pricing alert fields (migration 014)
+  pricingAlertsEnabled: boolean;
+  lastAlertSentAt: string | null;
+  lastAlertDirection: string | null;
+  lastLivePriceStatus: string | null;
+  // Alert v2 fields (migration 015)
+  minimumBookingNights: number;
+  listingUrlValidationStatus: string | null;
+  listingUrlValidatedAt: string | null;
 }
 
 export interface ListingReport {

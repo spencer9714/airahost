@@ -301,9 +301,6 @@ export function RecommendationBanner({
           <Link href={`/r/${reportShareId}`}>
             <Button size="md">View full report</Button>
           </Link>
-          <p className="hidden text-right text-[11px] text-foreground/35 sm:block">
-            {listingName}
-          </p>
         </div>
       </div>
 

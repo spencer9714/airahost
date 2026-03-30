@@ -622,6 +622,16 @@ export default function ResultsPage({
               Report for: {report.inputAddress}
             </p>
           )}
+
+          <p className="mt-6 text-xs text-muted">
+            You can navigate away — this report will be ready when you return.
+          </p>
+          <Link
+            href="/dashboard"
+            className="mt-2 inline-block text-sm font-medium text-accent hover:underline"
+          >
+            ← Back to dashboard
+          </Link>
         </div>
       </div>
     );
@@ -656,6 +666,12 @@ export default function ResultsPage({
         <div className="text-center">
           <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
           <p className="text-muted">Loading report...</p>
+          <Link
+            href="/dashboard"
+            className="mt-4 inline-block text-sm font-medium text-accent hover:underline"
+          >
+            ← Back to dashboard
+          </Link>
         </div>
       </div>
     );

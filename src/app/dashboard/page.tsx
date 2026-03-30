@@ -111,6 +111,14 @@ type ListingRow = {
     linkedAt: string;
     shareId: string | null;
   } | null;
+  // Pricing alert fields (migration 014)
+  pricing_alerts_enabled?: boolean;
+  last_alert_sent_at?: string | null;
+  last_alert_direction?: string | null;
+  last_live_price_status?: string | null;
+  // Alert v2 fields (migration 015)
+  minimum_booking_nights?: number;
+  listing_url_validation_status?: string | null;
 };
 
 // RecentReportRow covers all statuses — recentReports from the API is not filtered by status.
@@ -288,6 +296,31 @@ export default function DashboardPage() {
     await loadDashboardData();
   }
 
+  async function handleSaveAlertSettings(
+    listingId: string,
+    settings: {
+      listingUrl?: string | null;
+      minimumBookingNights?: number;
+      pricingAlertsEnabled?: boolean;
+    }
+  ) {
+    const res = await fetch(`/api/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...(settings.listingUrl !== undefined && { listingUrl: settings.listingUrl }),
+        ...(settings.minimumBookingNights !== undefined && { minimumBookingNights: settings.minimumBookingNights }),
+        ...(settings.pricingAlertsEnabled !== undefined && { pricingAlertsEnabled: settings.pricingAlertsEnabled }),
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as { error?: string }).error ?? "Failed to save alert settings");
+    }
+    // Refresh listings so all fields (URL, min_nights, alert state) are in sync.
+    await loadDashboardData();
+  }
+
   // ── Derived state ─────────────────────────────────────────────────
   const activeListing = useMemo(
     () => listings.find((l) => l.id === activeListingId) ?? null,
@@ -354,21 +387,16 @@ export default function DashboardPage() {
       <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
 
         {/* ── Header ── */}
-        <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-foreground/30">
-              Host Dashboard
-            </p>
-            <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
-              {firstName ? `Welcome back, ${firstName}` : (userEmail || "Dashboard")}
-            </h1>
-            <p className="mt-1 text-base font-medium text-foreground/55">
-              {listingCountText} · pricing analytics
-            </p>
-          </div>
-          <Link href="/tool?from=dashboard">
-            <Button size="md" variant="secondary">Add new listing</Button>
-          </Link>
+        <div className="mb-8">
+          <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-foreground/30">
+            Host Dashboard
+          </p>
+          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
+            {firstName ? `Welcome back, ${firstName}` : (userEmail || "Dashboard")}
+          </h1>
+          <p className="mt-1 text-base font-medium text-foreground/55">
+            {listingCountText} · pricing analytics
+          </p>
         </div>
 
         {error && (
@@ -419,8 +447,17 @@ export default function DashboardPage() {
                     }
                     onRename={handleRenameListing}
                     onSavePreferredComps={handleSavePreferredComps}
+                    onSaveAlertSettings={handleSaveAlertSettings}
                   />
                 ))}
+                <Link href="/tool?from=dashboard" className="block">
+                  <button
+                    type="button"
+                    className="w-full rounded-2xl border border-dashed border-gray-200 py-3 text-sm font-medium text-foreground/35 transition-colors hover:border-gray-300 hover:text-foreground/55"
+                  >
+                    + Add new listing
+                  </button>
+                </Link>
               </div>
             )}
           </section>
@@ -448,7 +485,7 @@ export default function DashboardPage() {
                   <button
                     type="button"
                     onClick={() => setShowCustomPanel((v) => !v)}
-                    className={`text-xs font-semibold transition-colors ${
+                    className={`text-sm font-semibold transition-colors ${
                       showCustomPanel
                         ? "text-foreground/55"
                         : "text-blue-600 hover:text-blue-700"
@@ -576,6 +613,14 @@ export default function DashboardPage() {
                   lastAnalysisDate={activeListing.latestLinkedAt}
                 />
 
+                {/* ── Smart alerts ── */}
+                <SmartAlerts
+                  summary={activeSummary}
+                  compsSummary={activeSummary.compsSummary ?? null}
+                  priceDistribution={activeSummary.priceDistribution ?? null}
+                  observedListingPrice={activeSummary.observedListingPrice ?? null}
+                />
+
                 {/* ── 14-day pricing calendar ── */}
                 {activeCalendar.length > 0 && (
                   <PricingHeatmap
@@ -594,14 +639,6 @@ export default function DashboardPage() {
                   trigger={activeListing.latestTrigger ?? undefined}
                   shareId={activeReport.share_id}
                   compsUsed={activeSummary.compsSummary?.usedForPricing ?? null}
-                />
-
-                {/* ── Smart alerts ── */}
-                <SmartAlerts
-                  summary={activeSummary}
-                  compsSummary={activeSummary.compsSummary ?? null}
-                  priceDistribution={activeSummary.priceDistribution ?? null}
-                  observedListingPrice={activeSummary.observedListingPrice ?? null}
                 />
               </div>
             ) : activeListing ? (
