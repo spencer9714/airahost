@@ -117,3 +117,32 @@ export function resolveMarketCapturedAt(
     null
   );
 }
+
+/**
+ * For forecast_snapshot reports, inherit market_captured_at from the
+ * source live_analysis report rather than using the forecast generation time.
+ *
+ * Contract:
+ *   A forecast_snapshot derives its pricing from a prior live_analysis.
+ *   The market data age (freshness) should reflect when that live_analysis
+ *   captured Airbnb data — not when the forecast was computed.
+ *
+ * Usage (forecast generation API or worker):
+ *   const sourceMCT = resolveSnapshotMarketCapturedAt(sourceLiveReport);
+ *   // write sourceMCT as the forecast_snapshot report's market_captured_at
+ *   // (pass as source_market_captured_at to complete_job() in db.py)
+ *
+ * Falls back through completed_at → linkedAt → created_at, so pre-migration
+ * source reports still produce a reasonable approximate timestamp.
+ */
+export function resolveSnapshotMarketCapturedAt(
+  sourceLiveAnalysisReport: {
+    market_captured_at?: string | null;
+    completed_at?: string | null;
+    created_at?: string | null;
+  } | null | undefined,
+  /** Optional: listing_reports.created_at for the source report's link row */
+  sourceLinkedAt?: string | null
+): string | null {
+  return resolveMarketCapturedAt(sourceLiveAnalysisReport, sourceLinkedAt);
+}

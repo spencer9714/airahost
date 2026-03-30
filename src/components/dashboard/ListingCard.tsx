@@ -1,12 +1,17 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import type { RecommendedPrice, CalendarDay, DateMode } from "@/lib/schemas";
+import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
+import { computeFreshness, resolveMarketCapturedAt } from "@/lib/freshness";
 
 type LatestReport = {
   id: string;
   share_id: string;
   status: "ready";
+  report_type?: "live_analysis" | "forecast_snapshot" | string;
+  source_report_id?: string | null;
   created_at: string;
+  completed_at?: string | null;
+  market_captured_at?: string | null;
   input_date_start: string;
   input_date_end: string;
   result_summary: {
@@ -37,11 +42,9 @@ type ListingData = {
     listingUrl?: string | null;
     preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
   };
-  default_date_mode?: DateMode;
-  default_start_date?: string | null;
-  default_end_date?: string | null;
   latestReport: LatestReport;
   latestLinkedAt: string | null;
+  latestTrigger?: "scheduled" | "manual" | "rerun" | null;
   activeJob: ActiveJob;
 };
 
@@ -49,20 +52,9 @@ interface Props {
   listing: ListingData;
   isActive: boolean;
   onSelect: () => void;
-  onRunAnalysis: (
-    listingId: string,
-    dates: { startDate: string; endDate: string }
-  ) => Promise<void>;
   onDelete: () => void;
   onViewHistory: () => void;
-  isRunning: boolean;
   onRename: (listingId: string, nextName: string) => Promise<void>;
-  onSaveDateDefaults: (
-    listingId: string,
-    mode: DateMode,
-    startDate: string | null,
-    endDate: string | null
-  ) => void;
   onSavePreferredComps: (
     listingId: string,
     preferredComps: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null
@@ -101,45 +93,22 @@ function looksLikeUrl(str: string): boolean {
   return /^https?:\/\//i.test(str.trim());
 }
 
-function todayStr() {
-  return new Date().toISOString().split("T")[0];
-}
-
-function plus30Str() {
-  const d = new Date();
-  d.setDate(d.getDate() + 30);
-  return d.toISOString().split("T")[0];
-}
-
 export function ListingCard({
   listing,
   isActive,
   onSelect,
-  onRunAnalysis,
   onDelete,
   onViewHistory,
-  isRunning,
   onRename,
-  onSaveDateDefaults,
   onSavePreferredComps,
 }: Props) {
   const [editOpen, setEditOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
-  const [dateMode, setDateMode] = useState<DateMode>(
-    listing.default_date_mode ?? "next_30"
-  );
-  const [customStart, setCustomStart] = useState(
-    listing.default_start_date ?? todayStr()
-  );
-  const [customEnd, setCustomEnd] = useState(
-    listing.default_end_date ?? plus30Str()
-  );
   const [benchmarkDrafts, setBenchmarkDrafts] = useState<
     Array<{ listingUrl: string; note: string }>
   >([]);
   const [expandedBenchmarkIdx, setExpandedBenchmarkIdx] = useState<number | null>(null);
 
-  // Unified save state — one button saves name + dates + benchmarks together.
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -148,22 +117,18 @@ export function ListingCard({
   const displayTitle = listing.name?.trim() || listing.input_address || "Listing";
   const latest = listing.latestReport;
   const { activeJob } = listing;
-
-  const suggestedPrice =
-    latest?.result_summary?.recommendedPrice?.nightly ??
-    latest?.result_summary?.nightlyMedian ??
-    null;
-
   const attrs = listing.input_attributes;
+
+  const freshness = computeFreshness(
+    resolveMarketCapturedAt(latest, listing.latestLinkedAt)
+  );
 
   const statusColor =
     activeJob?.status === "running" || activeJob?.status === "queued"
       ? "bg-amber-400 animate-pulse"
       : activeJob?.status === "error"
       ? "bg-rose-400"
-      : latest !== null
-      ? "bg-emerald-500"
-      : "bg-gray-300";
+      : freshness.dotClass;
 
   const typeLabel = attrs.propertyType
     ? (PROPERTY_TYPE_SHORT[attrs.propertyType] ?? attrs.propertyType)
@@ -178,12 +143,7 @@ export function ListingCard({
     .filter(Boolean)
     .join(" · ");
 
-  const analysisDate = listing.latestLinkedAt
-    ? new Date(listing.latestLinkedAt).toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-      })
-    : null;
+  const freshnessLabel = latest !== null ? freshness.label : null;
 
   // Focus the rename input when the edit panel opens.
   useEffect(() => {
@@ -211,20 +171,8 @@ export function ListingCard({
     setExpandedBenchmarkIdx(null);
   }, [listing.input_attributes.preferredComps]);
 
-  function getActiveDates() {
-    if (dateMode === "next_30") {
-      return { startDate: todayStr(), endDate: plus30Str() };
-    }
-    return { startDate: customStart, endDate: customEnd };
-  }
-
-  async function handleRunClick() {
-    const dates = getActiveDates();
-    await onRunAnalysis(listing.id, dates);
-  }
-
   // ── Unified save ─────────────────────────────────────────────────
-  // One button commits name + analysis window + benchmarks together.
+  // One button commits name + benchmarks together.
   async function handleSaveAll() {
     if (isSaving) return;
     setIsSaving(true);
@@ -235,11 +183,7 @@ export function ListingCard({
       if (nextName && nextName !== displayTitle) {
         await onRename(listing.id, nextName);
       }
-      // 2. Analysis window (fire-and-forget; parent handles persistence).
-      const start = dateMode === "next_30" ? null : customStart;
-      const end = dateMode === "next_30" ? null : customEnd;
-      onSaveDateDefaults(listing.id, dateMode, start, end);
-      // 3. Benchmarks.
+      // 2. Benchmarks.
       const valid = benchmarkDrafts
         .map((item) => ({ listingUrl: item.listingUrl.trim(), note: item.note.trim() }))
         .filter((item) => item.listingUrl.includes("airbnb.com/rooms/"));
@@ -298,38 +242,20 @@ export function ListingCard({
             {factsLine}
           </p>
         )}
-      </div>
-
-      {/* ── Pricing + Analyze zone ── */}
-      <div className="flex items-end justify-between gap-3 px-5 pb-5 pt-2">
-        <div className="pl-3.5">
-          <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/25">
-            Suggested
-          </p>
-          {suggestedPrice != null ? (
-            <div className="mt-0.5 flex items-baseline gap-0.5">
-              <span className="text-[22px] font-bold leading-none tracking-tight text-foreground">
-                ${suggestedPrice}
+        {freshnessLabel && (
+          <div className="mt-0.5 flex items-center gap-1.5 pl-3.5">
+            <p className="text-[10px] text-foreground/30">{freshnessLabel}</p>
+            {listing.latestTrigger === "scheduled" ? (
+              <span className="rounded-full bg-teal-100 px-1.5 py-0.5 text-[9px] font-semibold text-teal-700">
+                Nightly
               </span>
-              <span className="text-xs text-foreground/35">/nt</span>
-            </div>
-          ) : activeJob?.status === "running" || activeJob?.status === "queued" ? (
-            <p className="mt-1 text-xs text-foreground/40">Analyzing…</p>
-          ) : (
-            <p className="mt-1 text-xs text-foreground/25">—</p>
-          )}
-          {analysisDate && (
-            <p className="mt-0.5 text-[10px] text-foreground/30">{analysisDate}</p>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={handleRunClick}
-          disabled={isRunning}
-          className="shrink-0 rounded-xl border border-blue-200/60 bg-blue-50/50 px-4 py-2.5 text-xs font-semibold text-blue-700 transition-colors hover:border-blue-300/60 hover:bg-blue-100/50 disabled:opacity-40"
-        >
-          {isRunning ? "Analyzing…" : "Analyze"}
-        </button>
+            ) : latest?.report_type === "forecast_snapshot" ? (
+              <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[9px] font-semibold text-violet-600">
+                Forecast
+              </span>
+            ) : null}
+          </div>
+        )}
       </div>
 
       {/* ── Footer: Edit + View ── */}
@@ -366,7 +292,8 @@ export function ListingCard({
       </div>
 
       {/* ── Edit panel ───────────────────────────────────────────────
-          Three sections. One Save button commits everything together.
+          Two sections: Property (read-only) + Name + Benchmarks.
+          One Save button commits everything together.
           All clicks stop propagation so nothing leaks to onSelect.
       ─────────────────────────────────────────────────────────────── */}
       {editOpen && (
@@ -457,63 +384,7 @@ export function ListingCard({
 
             <div className="h-px bg-gray-200/60" />
 
-            {/* ── § 2 Analysis window ── */}
-            <div className="space-y-3">
-              <p className="text-sm font-semibold text-foreground/55">
-                Analysis window
-              </p>
-              <div className="flex gap-0.5 rounded-lg bg-gray-100/80 p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setDateMode("next_30")}
-                  className={`flex-1 rounded-md py-2.5 text-sm font-semibold transition-all ${
-                    dateMode === "next_30"
-                      ? "bg-white text-foreground shadow-sm"
-                      : "text-foreground/45 hover:text-foreground/70"
-                  }`}
-                >
-                  Next 30 days
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDateMode("custom")}
-                  className={`flex-1 rounded-md py-2.5 text-sm font-semibold transition-all ${
-                    dateMode === "custom"
-                      ? "bg-white text-foreground shadow-sm"
-                      : "text-foreground/45 hover:text-foreground/70"
-                  }`}
-                >
-                  Custom
-                </button>
-              </div>
-              {dateMode === "custom" && (
-                <div className="grid grid-cols-2 gap-2.5">
-                  <label className="space-y-1.5">
-                    <span className="block text-sm font-medium text-foreground/50">Start</span>
-                    <input
-                      type="date"
-                      value={customStart}
-                      onChange={(e) => setCustomStart(e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-sm outline-none focus:border-gray-300"
-                    />
-                  </label>
-                  <label className="space-y-1.5">
-                    <span className="block text-sm font-medium text-foreground/50">End</span>
-                    <input
-                      type="date"
-                      value={customEnd}
-                      onChange={(e) => setCustomEnd(e.target.value)}
-                      min={customStart}
-                      className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 text-sm outline-none focus:border-gray-300"
-                    />
-                  </label>
-                </div>
-              )}
-            </div>
-
-            <div className="h-px bg-gray-200/60" />
-
-            {/* ── § 3 Benchmarks ── */}
+            {/* ── § 2 Benchmarks ── */}
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-foreground/55">

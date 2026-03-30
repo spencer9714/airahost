@@ -43,10 +43,23 @@ const SEVERITY_STYLES: Record<Alert["severity"], {
   },
 };
 
+/**
+ * Derive dashboard alerts.
+ *
+ * @param summary              Report summary from the pricing worker.
+ * @param comps                Comparable listings summary.
+ * @param dist                 Market price distribution.
+ * @param observedListingPrice Real listing price captured by the background
+ *   worker from the user's live Airbnb listing.  When present, market-position
+ *   alerts are based on the observed price rather than the recommendation.
+ *   null/undefined = worker has not yet observed the price; fall back to
+ *   recommendation-vs-market wording.
+ */
 function deriveAlerts(
   summary: ReportSummary,
   comps: CompsSummary | null,
-  dist: PriceDistribution | null
+  dist: PriceDistribution | null,
+  observedListingPrice: number | null | undefined
 ): Alert[] {
   const alerts: Alert[] = [];
 
@@ -65,24 +78,56 @@ function deriveAlerts(
     }
   }
 
-  // 2. Under / above market
-  const recNightly = summary.recommendedPrice?.nightly;
-  if (recNightly && summary.nightlyMedian) {
-    const diff = Math.round(summary.nightlyMedian - recNightly);
-    if (diff > 5) {
-      alerts.push({
-        id: "under-market",
-        severity: "warning",
-        title: "Priced below market",
-        description: `Your recommended price is $${diff} below the market median. This may attract more bookings but reduce revenue.`,
-      });
-    } else if (diff < -10) {
-      alerts.push({
-        id: "above-market",
-        severity: "danger",
-        title: "Priced above market",
-        description: `Your recommended price is $${Math.abs(diff)} above the median. Ensure your amenities and reviews justify the premium.`,
-      });
+  // 2. Market-position alert.
+  //
+  //    Priority:
+  //      a) observedListingPrice (worker-captured real price) — most accurate
+  //      b) recommendedPrice.nightly (our suggestion)        — fallback
+  //
+  //    When (a) is available, messaging is about the user's actual listing.
+  //    When only (b) is available, messaging is explicitly about the recommendation.
+  if (summary.nightlyMedian) {
+    const median = summary.nightlyMedian;
+
+    if (observedListingPrice != null) {
+      // Path A: observed listing price from worker
+      const diff = Math.round(median - observedListingPrice);
+      if (diff > 5) {
+        alerts.push({
+          id: "listing-under-market",
+          severity: "warning",
+          title: "Your listing is below market",
+          description: `Your live listing price is $${diff} below the market median. You may be leaving revenue on the table.`,
+        });
+      } else if (diff < -10) {
+        alerts.push({
+          id: "listing-above-market",
+          severity: "danger",
+          title: "Your listing is above market",
+          description: `Your live listing price is $${Math.abs(diff)} above the median. Ensure your amenities and reviews justify the premium.`,
+        });
+      }
+    } else {
+      // Path B: no observed price — compare recommendation vs market
+      const recNightly = summary.recommendedPrice?.nightly;
+      if (recNightly) {
+        const diff = Math.round(median - recNightly);
+        if (diff > 5) {
+          alerts.push({
+            id: "recommended-under-market",
+            severity: "warning",
+            title: "Recommended below market",
+            description: `The suggested price is $${diff} below the market median. This may attract more bookings but reduce revenue.`,
+          });
+        } else if (diff < -10) {
+          alerts.push({
+            id: "recommended-above-market",
+            severity: "danger",
+            title: "Recommended above market",
+            description: `The suggested price is $${Math.abs(diff)} above the median. Ensure your amenities and reviews justify the premium.`,
+          });
+        }
+      }
     }
   }
 
@@ -126,12 +171,19 @@ export function SmartAlerts({
   summary,
   compsSummary,
   priceDistribution,
+  observedListingPrice,
 }: {
   summary: ReportSummary;
   compsSummary: CompsSummary | null;
   priceDistribution: PriceDistribution | null;
+  /**
+   * Real listing price captured by the background worker from the user's
+   * live Airbnb listing.  Drives market-position alerts when present.
+   * Omit (or pass null) when not yet available.
+   */
+  observedListingPrice?: number | null;
 }) {
-  const alerts = deriveAlerts(summary, compsSummary, priceDistribution);
+  const alerts = deriveAlerts(summary, compsSummary, priceDistribution, observedListingPrice);
 
   return (
     <div className="rounded-2xl border border-border bg-white p-5 sm:p-6">

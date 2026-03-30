@@ -418,14 +418,167 @@ def _build_scrape_calendar(
     return summary, calendar
 
 
+def process_forecast_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
+    """
+    Process a forecast_snapshot job.
+
+    Reads result_summary + result_calendar from the source live_analysis report
+    (identified by source_report_id) and writes them to this job without scraping.
+    Inherits source_market_captured_at so freshness reflects when Airbnb data
+    was actually collected, not when the forecast was generated.
+    """
+    report_id = job["id"]
+    client = db_helpers.get_client()
+    start_time = time.time()
+
+    hb_stop = threading.Event()
+    hb_thread = threading.Thread(
+        target=_run_heartbeat,
+        args=(report_id, worker_token, hb_stop),
+        daemon=True,
+    )
+    hb_thread.start()
+
+    try:
+        source_report_id = job.get("source_report_id")
+        if not source_report_id:
+            logger.error(f"[{report_id}] forecast_snapshot has no source_report_id — failing")
+            db_helpers.fail_job(
+                client, report_id, worker_token,
+                error_message="Forecast configuration error: missing source report link.",
+                debug={
+                    "error": "source_report_id is null",
+                    "worker_host": socket.gethostname(),
+                    "worker_version": WORKER_VERSION,
+                    "total_ms": round((time.time() - start_time) * 1000),
+                },
+            )
+            return
+
+        logger.info(f"[{report_id}] forecast_snapshot: reading source {source_report_id[:8]}...")
+
+        # Fetch source live_analysis
+        source_result = (
+            client.table("pricing_reports")
+            .select("id, report_type, status, result_summary, result_calendar, market_captured_at, completed_at, created_at, core_version")
+            .eq("id", source_report_id)
+            .limit(1)
+            .execute()
+        )
+        source_rows = source_result.data or []
+        if not source_rows:
+            db_helpers.fail_job(
+                client, report_id, worker_token,
+                error_message="Forecast source report not found.",
+                debug={
+                    "error": f"source_report_id {source_report_id} not found in pricing_reports",
+                    "worker_host": socket.gethostname(),
+                    "worker_version": WORKER_VERSION,
+                    "total_ms": round((time.time() - start_time) * 1000),
+                },
+            )
+            return
+
+        source = source_rows[0]
+
+        if source.get("status") != "ready":
+            db_helpers.fail_job(
+                client, report_id, worker_token,
+                error_message="Forecast source report is not ready.",
+                debug={
+                    "error": f"source report status={source.get('status')} (expected ready)",
+                    "source_report_id": source_report_id,
+                    "worker_host": socket.gethostname(),
+                    "worker_version": WORKER_VERSION,
+                    "total_ms": round((time.time() - start_time) * 1000),
+                },
+            )
+            return
+
+        # Resolve source market_captured_at with fallback chain
+        source_mct = (
+            source.get("market_captured_at")
+            or source.get("completed_at")
+            or source.get("created_at")
+        )
+
+        # Deep-copy summary so we can annotate it without mutating the source
+        import copy
+        summary = copy.deepcopy(source.get("result_summary") or {})
+        calendar = source.get("result_calendar") or []
+
+        # Annotate summary with forecast provenance metadata
+        summary["forecastMeta"] = {
+            "source_report_id": source_report_id,
+            "source_market_captured_at": source_mct,
+            "forecast_generation_mode": "derived_snapshot",
+        }
+
+        total_ms = round((time.time() - start_time) * 1000)
+
+        debug = {
+            "forecast_generation_mode": "derived_snapshot",
+            "source_report_id": source_report_id,
+            "source_report_type": source.get("report_type"),
+            "source_market_captured_at": source_mct,
+            "source_core_version": source.get("core_version"),
+            "cache_hit": False,
+            "scrape": False,
+            "worker_host": socket.gethostname(),
+            "worker_version": WORKER_VERSION,
+            "total_ms": total_ms,
+        }
+
+        db_helpers.complete_job(
+            client, report_id, worker_token,
+            summary=summary,
+            calendar=calendar,
+            core_version=WORKER_VERSION + "+forecast",
+            debug=debug,
+            source_market_captured_at=source_mct,
+        )
+
+        logger.info(
+            f"[{report_id}] forecast_snapshot completed in {total_ms}ms "
+            f"(source={source_report_id[:8]}..., mct={source_mct})"
+        )
+
+    except Exception as exc:
+        elapsed_ms = round((time.time() - start_time) * 1000)
+        logger.error(f"[{report_id}] forecast_snapshot failed: {exc}")
+        try:
+            db_helpers.fail_job(
+                client, report_id, worker_token,
+                error_message="Forecast generation failed. Please try again.",
+                debug={
+                    "error": str(exc),
+                    "worker_host": socket.gethostname(),
+                    "worker_version": WORKER_VERSION,
+                    "total_ms": elapsed_ms,
+                },
+            )
+        except Exception as db_exc:
+            logger.error(f"[{report_id}] Failed to mark forecast job as error: {db_exc}")
+
+    finally:
+        hb_stop.set()
+        hb_thread.join(timeout=5)
+
+
 def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     """
     Process a single pricing report job.
 
-    Mode 1: If listing URL available → scrape with Playwright via CDP
-    Mode 2: If no listing URL → deterministic mock pricing
+    Dispatches to process_forecast_job for forecast_snapshot jobs.
+    For live_analysis jobs: scrapes with Playwright via CDP.
     """
     report_id = job["id"]
+
+    # Dispatch forecast_snapshot jobs to a separate, scrape-free path.
+    if job.get("report_type") == "forecast_snapshot":
+        process_forecast_job(job, worker_token)
+        return
+
     client = db_helpers.get_client()
     start_time = time.time()
 

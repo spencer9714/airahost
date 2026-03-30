@@ -45,7 +45,7 @@ type ReportSnapshot = {
 
 type HistoryRow = {
   id: string;
-  trigger: string;
+  trigger: "manual" | "rerun" | "scheduled" | string;
   created_at: string;
   pricing_reports: ReportSnapshot | ReportSnapshot[] | null;
 };
@@ -366,6 +366,7 @@ export default function ListingHistoryPage() {
               dateStart={latestReadyRow.report.input_date_start}
               dateEnd={latestReadyRow.report.input_date_end}
               reportType={latestReadyRow.report.report_type}
+              trigger={latestReadyRow.row.trigger}
               shareId={latestReadyRow.report.share_id}
               compsUsed={
                 latestReadyRow.report.result_summary?.compsSummary?.usedForPricing ?? null
@@ -673,9 +674,13 @@ export default function ListingHistoryPage() {
                         >
                           {report.status}
                         </span>
-                        <span className="text-xs text-muted">
-                          {row.trigger}
-                        </span>
+                        {row.trigger === "scheduled" ? (
+                          <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-teal-700">
+                            Nightly
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted">{row.trigger}</span>
+                        )}
                       </div>
                       <p className="text-sm">
                         <span className="font-medium">

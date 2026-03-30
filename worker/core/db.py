@@ -56,13 +56,14 @@ def complete_job(
     core_version: str,
     debug: Optional[Dict[str, Any]] = None,
     input_attributes: Optional[Dict[str, Any]] = None,
+    source_market_captured_at: Optional[str] = None,
 ) -> None:
     """Mark a job as ready with results. Idempotent — overwrites existing results.
 
-    Sets completed_at and market_captured_at to the current UTC time.
-    For fresh scrapes both fields are equal.  For forecast_snapshot reports the
-    caller is responsible for overriding market_captured_at after this call if
-    the underlying market basis was captured at a different time.
+    Sets completed_at to now.  market_captured_at is set to now for fresh
+    scrapes (live_analysis).  For forecast_snapshot reports, pass the source
+    live_analysis report's market_captured_at as source_market_captured_at so
+    freshness reflects when the underlying market data was actually captured.
     """
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
@@ -75,7 +76,9 @@ def complete_job(
         "error_message": None,
         # Explicit freshness timestamps (migration 010)
         "completed_at": now,
-        "market_captured_at": now,  # fresh scrape: capture time == completion time
+        # For forecast_snapshot: inherit market_captured_at from source live_analysis.
+        # For live_analysis (fresh scrape): capture time == completion time.
+        "market_captured_at": source_market_captured_at if source_market_captured_at is not None else now,
     }
     if debug:
         update["result_core_debug"] = debug

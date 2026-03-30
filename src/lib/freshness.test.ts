@@ -6,6 +6,7 @@
 import {
   computeFreshness,
   resolveMarketCapturedAt,
+  resolveSnapshotMarketCapturedAt,
   FRESHNESS_THRESHOLDS,
 } from "./freshness";
 
@@ -114,6 +115,36 @@ assert(
 assert(
   "null report → null",
   resolveMarketCapturedAt(null),
+  null
+);
+
+// ── resolveSnapshotMarketCapturedAt ───────────────────────────────────────────
+
+console.log("\nresolveSnapshotMarketCapturedAt:");
+
+assert(
+  "uses source market_captured_at",
+  resolveSnapshotMarketCapturedAt({ market_captured_at: MCT, completed_at: COMPLETED, created_at: CREATED }),
+  MCT
+);
+assert(
+  "falls back to source completed_at",
+  resolveSnapshotMarketCapturedAt({ market_captured_at: null, completed_at: COMPLETED, created_at: CREATED }),
+  COMPLETED
+);
+assert(
+  "falls back to sourceLinkedAt",
+  resolveSnapshotMarketCapturedAt({ market_captured_at: null, completed_at: null, created_at: CREATED }, LINKED),
+  LINKED
+);
+assert(
+  "falls back to source created_at",
+  resolveSnapshotMarketCapturedAt({ market_captured_at: null, completed_at: null, created_at: CREATED }),
+  CREATED
+);
+assert(
+  "null source → null",
+  resolveSnapshotMarketCapturedAt(null),
   null
 );
 

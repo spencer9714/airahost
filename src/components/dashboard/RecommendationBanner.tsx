@@ -20,25 +20,53 @@ interface Props {
     primaryUrl: string | null;
   } | null;
   lastAnalysisDate: string | null;
+  /**
+   * Real listing price captured by the background worker from the user's live
+   * Airbnb listing.  When present it becomes the primary basis for
+   * above-market / below-market positioning.  null/undefined means the worker
+   * hasn't observed the price yet — fall back to recommendation-vs-market copy.
+   */
+  observedListingPrice?: number | null;
 }
 
-function positionBadge(suggestedPrice: number, marketMedian: number) {
+/**
+ * Compute a market-position badge.
+ *
+ * @param price        The price to compare (observed listing price OR recommended price).
+ * @param marketMedian The market median nightly rate.
+ * @param source       Semantic source of `price` — controls badge wording.
+ *   "observed"    → "Your price X% above/below market"  (worker-observed listing price)
+ *   "recommended" → "Recommendation X% above/below market"  (our forecast suggestion)
+ */
+function marketPositionBadge(
+  price: number,
+  marketMedian: number,
+  source: "observed" | "recommended"
+): { label: string; color: string } | null {
   if (marketMedian <= 0) return null;
-  const pct = Math.round((suggestedPrice / marketMedian - 1) * 100);
+  const pct = Math.round((price / marketMedian - 1) * 100);
+
   if (pct < -3) {
     return {
-      label: `${Math.abs(pct)}% below market`,
+      label:
+        source === "observed"
+          ? `Your price ${Math.abs(pct)}% below market`
+          : `Recommendation ${Math.abs(pct)}% below market`,
       color: "bg-emerald-50 text-emerald-800 border-emerald-300",
     };
   }
   if (pct > 3) {
     return {
-      label: `${pct}% above market`,
+      label:
+        source === "observed"
+          ? `Your price ${pct}% above market`
+          : `Recommendation ${pct}% above market`,
       color: "bg-amber-50 text-amber-800 border-amber-300",
     };
   }
   return {
-    label: "At market",
+    label:
+      source === "observed" ? "Your price at market" : "Recommendation at market",
     color: "bg-gray-100 text-gray-700 border-gray-300",
   };
 }
@@ -53,10 +81,16 @@ export function RecommendationBanner({
   propertyMeta,
   benchmarkMeta,
   lastAnalysisDate,
+  observedListingPrice,
 }: Props) {
-  const suggested = recommendedPrice?.nightly ?? summary.nightlyMedian;
+  const recommended = recommendedPrice?.nightly ?? summary.nightlyMedian;
   const median = summary.nightlyMedian;
-  const badge = positionBadge(suggested, median);
+
+  // Market-position badge: prefer observed listing price when available.
+  const badge =
+    observedListingPrice != null
+      ? marketPositionBadge(observedListingPrice, median, "observed")
+      : marketPositionBadge(recommended, median, "recommended");
 
   const stats = [
     {
@@ -90,23 +124,62 @@ export function RecommendationBanner({
         {/* Left: price block */}
         <div className="space-y-2">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-widest text-foreground/40">
-              Suggested nightly rate
-            </p>
-            <div className="mt-1.5 flex items-baseline gap-3">
-              <p className="text-5xl font-bold tracking-tight">${suggested}</p>
-              {badge && (
-                <span
-                  className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.color}`}
-                >
-                  {badge.label}
-                </span>
-              )}
-            </div>
-            {median > 0 && suggested !== median && (
-              <p className="mt-1 text-sm text-foreground/50">
-                Market median: <span className="font-semibold text-foreground/70">${median}</span>
-              </p>
+            {/* When a worker-observed listing price is available, show it first
+                as the primary pricing signal. The recommendation stays visible
+                below as context. */}
+            {observedListingPrice != null ? (
+              <>
+                <p className="text-xs font-semibold uppercase tracking-widest text-foreground/40">
+                  Your listing price
+                </p>
+                <div className="mt-1.5 flex items-baseline gap-3">
+                  <p className="text-5xl font-bold tracking-tight">
+                    ${observedListingPrice}
+                  </p>
+                  {badge && (
+                    <span
+                      className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.color}`}
+                    >
+                      {badge.label}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2 space-y-0.5 text-sm text-foreground/50">
+                  {median > 0 && (
+                    <p>
+                      Market median:{" "}
+                      <span className="font-semibold text-foreground/70">${median}</span>
+                    </p>
+                  )}
+                  <p>
+                    Suggested:{" "}
+                    <span className="font-semibold text-foreground/70">${recommended}</span>
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                {/* No observed listing price — show recommendation with explicit qualifier */}
+                <p className="text-xs font-semibold uppercase tracking-widest text-foreground/40">
+                  Suggested nightly rate
+                </p>
+                <div className="mt-1.5 flex items-baseline gap-3">
+                  <p className="text-5xl font-bold tracking-tight">${recommended}</p>
+                  {badge && (
+                    <span
+                      className={`inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.color}`}
+                    >
+                      {badge.label}
+                    </span>
+                  )}
+                </div>
+                {median > 0 && recommended !== median && (
+                  <p className="mt-1 text-sm text-foreground/50">
+                    Market median:{" "}
+                    <span className="font-semibold text-foreground/70">${median}</span>
+                  </p>
+                )}
+              </>
             )}
           </div>
 

@@ -11,6 +11,11 @@ interface Props {
   dateStart: string;
   dateEnd: string;
   reportType?: "live_analysis" | "forecast_snapshot" | string;
+  /**
+   * listing_reports.trigger — 'scheduled' | 'manual' | 'rerun'.
+   * Used to distinguish nightly auto-reports from user-triggered live analyses.
+   */
+  trigger?: string;
   shareId?: string | null;
   compsUsed?: number | null;
 }
@@ -28,12 +33,28 @@ export function ForecastBasis({
   dateStart,
   dateEnd,
   reportType = "live_analysis",
+  trigger,
   shareId,
   compsUsed,
 }: Props) {
   const { dotClass, label, hint, status } = computeFreshness(marketCapturedAt);
-  const typeLabel =
-    reportType === "forecast_snapshot" ? "Forecast snapshot" : "Live analysis";
+
+  const isNightly = trigger === "scheduled";
+  const isForecastSnapshot = reportType === "forecast_snapshot";
+
+  // Human-readable label for how this report was generated
+  const typeLabel = isForecastSnapshot
+    ? "Forecast snapshot"
+    : isNightly
+    ? "30-Day Market Report"
+    : "Live analysis";
+
+  // Subtitle shown below the label row
+  const typeNote = isForecastSnapshot
+    ? "Derived from a prior live scrape — no fresh Airbnb data was fetched."
+    : isNightly
+    ? "Auto-generated nightly · based on your listing settings and live Airbnb market data"
+    : null;
 
   return (
     <div className="rounded-2xl border border-border bg-white p-5 sm:p-6">
@@ -42,7 +63,7 @@ export function ForecastBasis({
       </p>
 
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2.5">
-        {/* Freshness dot + type + age */}
+        {/* Freshness dot + type label + age */}
         <div className="flex items-center gap-1.5">
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
           <span className="text-sm font-medium text-foreground/70">{typeLabel}</span>
@@ -72,8 +93,12 @@ export function ForecastBasis({
         )}
       </div>
 
+      {typeNote && (
+        <p className="mt-3 text-xs text-foreground/45">{typeNote}</p>
+      )}
+
       {hint && (
-        <p className="mt-3 text-xs font-medium text-amber-600">{hint}</p>
+        <p className="mt-2 text-xs font-medium text-amber-600">{hint}</p>
       )}
 
       {shareId && (

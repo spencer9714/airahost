@@ -27,6 +27,7 @@ type LatestReport = {
   share_id: string;
   status: "ready";
   report_type?: "live_analysis" | "forecast_snapshot";
+  source_report_id?: string | null;
   created_at: string;
   /** Set when status transitions to ready (migration 010). Null for older reports. */
   completed_at?: string | null;
@@ -55,6 +56,7 @@ type ActiveJob = {
   status: "queued" | "running" | "error";
   linkedAt: string;
   shareId: string | null;
+  trigger?: string;
 };
 
 type ListingRow = {
@@ -79,6 +81,7 @@ type ListingRow = {
   default_end_date?: string | null;
   latestReport: LatestReport;
   latestLinkedAt: string | null;
+  latestTrigger: "scheduled" | "manual" | "rerun" | null;
   activeJob: ActiveJob | null;
 };
 
@@ -193,23 +196,6 @@ export default function DashboardPage() {
     } finally {
       setRerunningId(null);
     }
-  }
-
-  function handleSaveDateDefaults(
-    listingId: string,
-    mode: DateMode,
-    startDate: string | null,
-    endDate: string | null
-  ) {
-    void fetch(`/api/listings/${listingId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        defaultDateMode: mode,
-        defaultStartDate: startDate,
-        defaultEndDate: endDate,
-      }),
-    });
   }
 
   async function handleDelete(listingId: string) {
@@ -372,14 +358,11 @@ export default function DashboardPage() {
                     listing={listing}
                     isActive={listing.id === activeListingId}
                     onSelect={() => setActiveListingId(listing.id)}
-                    onRunAnalysis={handleRunAnalysis}
                     onDelete={() => handleDelete(listing.id)}
                     onViewHistory={() =>
                       router.push(`/dashboard/listings/${listing.id}`)
                     }
-                    isRunning={rerunningId === listing.id}
                     onRename={handleRenameListing}
-                    onSaveDateDefaults={handleSaveDateDefaults}
                     onSavePreferredComps={handleSavePreferredComps}
                   />
                 ))}
@@ -399,13 +382,21 @@ export default function DashboardPage() {
                       30-Day Forecast
                     </p>
                     {/* Report type badge */}
-                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                      activeReport.report_type === "forecast_snapshot"
-                        ? "bg-violet-100 text-violet-700"
-                        : "bg-blue-50 text-blue-600"
-                    }`}>
-                      {activeReport.report_type === "forecast_snapshot" ? "Forecast" : "Live"}
-                    </span>
+                    {(() => {
+                      const isNightly = activeListing.latestTrigger === "scheduled";
+                      const isForecast = activeReport.report_type === "forecast_snapshot";
+                      return (
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                          isForecast
+                            ? "bg-violet-100 text-violet-700"
+                            : isNightly
+                            ? "bg-teal-50 text-teal-700"
+                            : "bg-blue-50 text-blue-600"
+                        }`}>
+                          {isForecast ? "Forecast" : isNightly ? "Nightly" : "Live"}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <button
                     type="button"
@@ -478,12 +469,16 @@ export default function DashboardPage() {
                     {activeListing.activeJob.status === "error" ? (
                       <>
                         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
-                        Last analysis failed — showing pricing from your previous completed run.
+                        {activeListing.activeJob.trigger === "scheduled"
+                          ? "Nightly report failed — showing your last completed report."
+                          : "Last analysis failed — showing pricing from your previous completed run."}
                       </>
                     ) : (
                       <>
                         <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
-                        New analysis running — pricing below is from your last completed run.
+                        {activeListing.activeJob.trigger === "scheduled"
+                          ? "Nightly 30-day report generating — pricing below is from your last run."
+                          : "New analysis running — pricing below is from your last completed run."}
                       </>
                     )}
                   </div>
@@ -541,6 +536,7 @@ export default function DashboardPage() {
                   dateStart={activeReport.input_date_start}
                   dateEnd={activeReport.input_date_end}
                   reportType={activeReport.report_type}
+                  trigger={activeListing.latestTrigger ?? undefined}
                   shareId={activeReport.share_id}
                   compsUsed={activeSummary.compsSummary?.usedForPricing ?? null}
                 />

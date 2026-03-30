@@ -8,6 +8,7 @@ interface ReportSnapshot {
   share_id: string;
   status: string;
   report_type?: string;
+  source_report_id?: string | null;
   created_at: string;
   completed_at?: string | null;
   market_captured_at?: string | null;
@@ -87,7 +88,7 @@ export async function GET() {
     const { data: linkedRows, error: linkedError } = await supabase
       .from("listing_reports")
       .select(
-        "saved_listing_id, pricing_report_id, created_at, trigger, pricing_reports:pricing_report_id(id, share_id, status, report_type, created_at, completed_at, market_captured_at, input_date_start, input_date_end, result_summary, result_calendar)"
+        "saved_listing_id, pricing_report_id, created_at, trigger, pricing_reports:pricing_report_id(id, share_id, status, report_type, source_report_id, created_at, completed_at, market_captured_at, input_date_start, input_date_end, result_summary, result_calendar)"
       )
       .in("saved_listing_id", listingIds)
       .order("created_at", { ascending: false });
@@ -113,7 +114,7 @@ export async function GET() {
       const { data: fallbackRows } = await admin
         .from("pricing_reports")
         .select(
-          "id, share_id, status, report_type, created_at, completed_at, market_captured_at, input_date_start, input_date_end, result_summary, result_calendar"
+          "id, share_id, status, report_type, source_report_id, created_at, completed_at, market_captured_at, input_date_start, input_date_end, result_summary, result_calendar"
         )
         .in("id", missingReportIds);
 
@@ -177,6 +178,7 @@ export async function GET() {
               status: jobStatus as "queued" | "running" | "error",
               linkedAt: jobEntry!.row.created_at,
               shareId: jobEntry!.report?.share_id ?? null,
+              trigger: jobEntry!.row.trigger ?? "manual",
             }
           : null;
 
@@ -186,6 +188,9 @@ export async function GET() {
         latestReport: readyEntry?.report ?? null,
         // latestLinkedAt reflects when the ready report was linked — used as "last analysed" date.
         latestLinkedAt: readyEntry?.row.created_at ?? null,
+        // latestTrigger: how this report was created — 'scheduled' | 'manual' | 'rerun'
+        // Dashboard uses this to label nightly auto-reports vs manual live analyses.
+        latestTrigger: readyEntry?.row.trigger ?? null,
         activeJob,
       };
     });
