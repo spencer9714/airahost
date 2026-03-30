@@ -33,13 +33,49 @@ const DEDUP_HOURS = 23;
 /** How many days of coverage each nightly report provides (always 30). */
 const NIGHTLY_DAYS = 30;
 
-function nightlyDateRange(): { startDate: string; endDate: string } {
-  const tomorrow = new Date();
-  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  const end = new Date(tomorrow);
-  end.setUTCDate(end.getUTCDate() + NIGHTLY_DAYS - 1);
-  const fmt = (d: Date) => d.toISOString().split("T")[0];
-  return { startDate: fmt(tomorrow), endDate: fmt(end) };
+/** Fallback timezone for listings that have no resolved timezone yet. */
+const FALLBACK_TIMEZONE = "America/Los_Angeles";
+
+/**
+ * Compute the nightly date range for a specific IANA timezone.
+ * startDate = local tomorrow in that timezone
+ * endDate   = local tomorrow + 29 days
+ *
+ * Uses Intl.DateTimeFormat to get the correct local calendar date,
+ * avoiding UTC truncation errors for listings outside UTC.
+ */
+function nightlyDateRangeForTimezone(timezone: string): { startDate: string; endDate: string } {
+  let tz = timezone;
+  // Validate the timezone — fall back if Intl rejects it
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: tz });
+  } catch {
+    tz = FALLBACK_TIMEZONE;
+  }
+
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+
+  // Get today's local date string (YYYY-MM-DD) in the listing's timezone
+  const todayParts = fmt.formatToParts(new Date());
+  const todayStr = `${todayParts.find(p => p.type === "year")!.value}-${todayParts.find(p => p.type === "month")!.value}-${todayParts.find(p => p.type === "day")!.value}`;
+
+  // Advance by 1 day (tomorrow) and by NIGHTLY_DAYS days (end) using UTC math
+  // anchored on the local date — avoids DST drift within the window.
+  const todayDate = new Date(`${todayStr}T12:00:00Z`); // noon UTC = safe midday anchor
+  const startMs = todayDate.getTime() + 1 * 24 * 60 * 60 * 1000;
+  const endMs   = todayDate.getTime() + NIGHTLY_DAYS * 24 * 60 * 60 * 1000;
+
+  const fmtDate = (ms: number) => {
+    const parts = fmt.formatToParts(new Date(ms));
+    return `${parts.find(p => p.type === "year")!.value}-${parts.find(p => p.type === "month")!.value}-${parts.find(p => p.type === "day")!.value}`;
+  };
+
+  return { startDate: fmtDate(startMs), endDate: fmtDate(endMs) };
 }
 
 type SkipReason =
@@ -73,7 +109,6 @@ export async function POST(req: NextRequest) {
   }
 
   const admin = getSupabaseAdmin();
-  const { startDate, endDate } = nightlyDateRange();
   const dedupCutoff = new Date(
     Date.now() - DEDUP_HOURS * 60 * 60 * 1000
   ).toISOString();
@@ -84,7 +119,7 @@ export async function POST(req: NextRequest) {
   const { data: listings, error: listingsErr } = await admin
     .from("saved_listings")
     .select(
-      "id, name, user_id, input_address, input_attributes, default_discount_policy"
+      "id, name, user_id, input_address, input_attributes, default_discount_policy, listing_timezone"
     )
     .order("created_at", { ascending: false });
 
@@ -135,6 +170,10 @@ export async function POST(req: NextRequest) {
       });
       continue;
     }
+
+    // Per-listing timezone-aware date range
+    const listingTz = (listing.listing_timezone as string | null | undefined) ?? FALLBACK_TIMEZONE;
+    const { startDate, endDate } = nightlyDateRangeForTimezone(listingTz);
 
     const attrs = (listing.input_attributes ?? {}) as Record<string, unknown>;
     const address: string = listing.input_address ?? "";
@@ -187,6 +226,7 @@ export async function POST(req: NextRequest) {
       report_type: "live_analysis",
       input_address: address,
       target_env: targetEnv,
+      job_lane: "nightly",
       input_attributes: inputAttributes,
       input_date_start: startDate,
       input_date_end: endDate,
@@ -251,7 +291,7 @@ export async function POST(req: NextRequest) {
   const skipped = results.length - scheduled;
 
   console.log(
-    `[nightly/schedule] ${startDate}→${endDate}: ` +
+    `[nightly/schedule] per-listing timezone dates: ` +
       `${scheduled} scheduled, ${skipped} skipped of ${listings.length} listings`
   );
 
@@ -259,7 +299,6 @@ export async function POST(req: NextRequest) {
     scheduled,
     skipped,
     total: listings.length,
-    dateRange: { startDate, endDate },
     results,
   });
 }

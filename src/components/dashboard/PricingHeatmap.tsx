@@ -49,7 +49,7 @@ function tilePrice(ratio: number): string {
 }
 
 export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
-  const days = calendar.slice(0, 14);
+  const days = calendar;
   if (days.length === 0) return null;
 
   const basePrices = days.map((d) => d.basePrice);
@@ -65,7 +65,7 @@ export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
       {/* Header */}
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <h3 className="text-base font-bold tracking-tight">14-day outlook</h3>
+          <h3 className="text-base font-bold tracking-tight">30-Day Market Board</h3>
           <Sparkline values={basePrices} min={minP} max={maxP} />
         </div>
         <div className="inline-flex gap-0.5 rounded-lg border border-border bg-gray-100/80 p-0.5">
@@ -92,7 +92,7 @@ export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
         </div>
       </div>
 
-      {/* Tile grid: 2 cols mobile → 7 cols on lg (2 perfect weeks) */}
+      {/* Tile grid: 2 cols mobile → 7 cols on lg (weekly rows) */}
       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 lg:grid-cols-7">
         {days.map((day, i) => {
           const price = displayPrices[i];

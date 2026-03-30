@@ -147,6 +147,11 @@ export default function ToolPage() {
   const [isSignedIn, setIsSignedIn] = useState(false);
   const [saveToListings, setSaveToListings] = useState(false);
   const [saveListingName, setSaveListingName] = useState("");
+  const [duplicateSaveInfo, setDuplicateSaveInfo] = useState<{
+    shareId: string;
+    existingListingId: string;
+    existingListingName: string | null;
+  } | null>(null);
 
   useEffect(() => {
     const supabase = getSupabaseBrowser();
@@ -198,6 +203,7 @@ export default function ToolPage() {
   async function handleSubmit() {
     setLoading(true);
     setError("");
+    setDuplicateSaveInfo(null);
 
     try {
       const res = await fetch("/api/reports", {
@@ -266,7 +272,16 @@ export default function ToolPage() {
       }
 
       const data = await res.json();
-      router.push(`/r/${data.shareId}`);
+
+      if (data.listingAlreadySaved && data.existingListingId) {
+        setDuplicateSaveInfo({
+          shareId: data.shareId,
+          existingListingId: data.existingListingId,
+          existingListingName: data.existingListingName ?? null,
+        });
+      } else {
+        router.push(`/r/${data.shareId}`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
     } finally {
@@ -292,9 +307,9 @@ export default function ToolPage() {
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 sm:py-10">
-      <h1 className="mb-2 text-2xl font-bold sm:text-3xl">Analyze your listing</h1>
+      <h1 className="mb-2 text-2xl font-bold sm:text-3xl">Add new listing</h1>
       <p className="mb-6 text-sm text-muted sm:mb-8 sm:text-base">
-        Tell us about your property and pricing strategy.
+        Enter your property details to generate a pricing analysis.
       </p>
 
       <div className="flex flex-col gap-8 lg:flex-row">
@@ -860,6 +875,35 @@ export default function ToolPage() {
                   <p className="rounded-xl bg-red-50 p-3 text-sm text-warning">
                     {error}
                   </p>
+                )}
+
+                {duplicateSaveInfo && (
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                    <p className="text-sm font-semibold text-blue-800">
+                      This listing is already in your dashboard
+                      {duplicateSaveInfo.existingListingName
+                        ? ` — "${duplicateSaveInfo.existingListingName}"`
+                        : ""}
+                      .
+                    </p>
+                    <p className="mt-1 text-xs text-blue-600">
+                      Your report was linked to the existing listing. No duplicate was created.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-3">
+                      <a
+                        href={`/r/${duplicateSaveInfo.shareId}`}
+                        className="text-sm font-medium text-blue-700 hover:underline"
+                      >
+                        View report →
+                      </a>
+                      <a
+                        href="/dashboard"
+                        className="text-sm font-medium text-blue-700 hover:underline"
+                      >
+                        Go to dashboard →
+                      </a>
+                    </div>
+                  </div>
                 )}
 
                 {isSignedIn ? (

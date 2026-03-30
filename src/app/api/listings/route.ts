@@ -123,20 +123,31 @@ export async function GET() {
       }
     }
 
-    // ── Two-pass per-listing selection ───────────────────────────
-    // latestJobByListing  → most recent link of ANY status (for active-job tracking)
-    // latestReadyByListing → most recent link whose report is status="ready" (for pricing display)
+    // ── Per-listing selection ────────────────────────────────────
+    // Priority order for source-of-truth report (live_analysis only):
+    //   1. Most recent ready report with trigger=scheduled (nightly live_analysis)
+    //   2. Most recent ready live_analysis (manual/rerun)
+    //   forecast_snapshot rows are ignored — no longer a dashboard concept.
     //
-    // This decouples "what is running right now" from "what pricing data to show".
-    // If the newest run failed or is still in-progress, we still surface the last
-    // successful report's pricing rather than blanking the dashboard.
+    // latestJobByListing  → most recent link of ANY status (for active-job banner)
+    // nightlyReadyByListing → most recent scheduled+live_analysis ready
+    // liveReadyByListing  → most recent live_analysis ready (manual/rerun)
+    // latestNightlyJobByListing → most recent scheduled link (any status) for activeNightlyJob
     const latestJobByListing = new Map<
       string,
       { row: ListingReportLinkRow; report: ReportSnapshot | null }
     >();
-    const latestReadyByListing = new Map<
+    const nightlyReadyByListing = new Map<
       string,
       { row: ListingReportLinkRow; report: ReportSnapshot }
+    >();
+    const liveReadyByListing = new Map<
+      string,
+      { row: ListingReportLinkRow; report: ReportSnapshot }
+    >();
+    const latestNightlyJobByListing = new Map<
+      string,
+      { row: ListingReportLinkRow; report: ReportSnapshot | null }
     >();
 
     for (const row of links) {
@@ -152,15 +163,42 @@ export async function GET() {
         latestJobByListing.set(id, { row, report });
       }
 
-      // Most recent READY report (keep iterating until we find one)
-      if (report?.status === "ready" && !latestReadyByListing.has(id)) {
-        latestReadyByListing.set(id, { row, report });
+      // Most recent scheduled link overall (for activeNightlyJob)
+      if (row.trigger === "scheduled" && !latestNightlyJobByListing.has(id)) {
+        latestNightlyJobByListing.set(id, { row, report });
+      }
+
+      if (report?.status === "ready" && report.report_type !== "forecast_snapshot") {
+        // Only consider live_analysis reports. forecast_snapshot rows are ignored.
+        if (row.trigger === "scheduled" && !nightlyReadyByListing.has(id)) {
+          nightlyReadyByListing.set(id, { row, report });
+        } else if (!liveReadyByListing.has(id)) {
+          // manual, rerun, or duplicate scheduled entry
+          liveReadyByListing.set(id, { row, report });
+        }
       }
     }
 
     const listingsWithLatest = listingRows.map((listing) => {
-      const readyEntry = latestReadyByListing.get(listing.id);
+      const nightlyEntry = nightlyReadyByListing.get(listing.id);
+      const liveEntry = liveReadyByListing.get(listing.id);
       const jobEntry = latestJobByListing.get(listing.id);
+      const nightlyJobEntry = latestNightlyJobByListing.get(listing.id);
+
+      // Source-of-truth: nightly (scheduled+live_analysis) > live_analysis (manual/rerun)
+      // forecast_snapshot rows are never selected.
+      const readyEntry = nightlyEntry ?? liveEntry ?? null;
+
+      // runType: what kind of report is currently displayed
+      const runType: "nightly" | "live" | null = nightlyEntry
+        ? "nightly"
+        : liveEntry
+        ? "live"
+        : null;
+
+      // fallbackReason: why we aren't showing a nightly (only relevant when live is shown)
+      const fallbackReason: "no_nightly" | null =
+        !nightlyEntry && liveEntry ? "no_nightly" : null;
 
       const jobStatus = (jobEntry?.report?.status ?? null) as
         | "queued"
@@ -170,8 +208,6 @@ export async function GET() {
         | null;
 
       // activeJob is only set when the most recent linked report is NOT ready.
-      // This tells the UI a new analysis is running or the last one failed,
-      // so it can show a banner while still displaying the ready report's pricing.
       const activeJob =
         jobStatus && jobStatus !== "ready"
           ? {
@@ -182,16 +218,31 @@ export async function GET() {
             }
           : null;
 
+      // activeNightlyJob: nightly scheduled job that is currently running/queued/errored
+      const nightlyJobStatus = nightlyJobEntry?.report?.status ?? null;
+      const activeNightlyJob =
+        nightlyJobStatus && nightlyJobStatus !== "ready"
+          ? {
+              status: nightlyJobStatus as "queued" | "running" | "error",
+              linkedAt: nightlyJobEntry!.row.created_at,
+              shareId: nightlyJobEntry!.report?.share_id ?? null,
+            }
+          : null;
+
       return {
         ...listing,
-        // latestReport is ALWAYS the most recent ready report (or null if none exist).
+        // latestReport: source-of-truth ready report (nightly > live_analysis)
         latestReport: readyEntry?.report ?? null,
-        // latestLinkedAt reflects when the ready report was linked — used as "last analysed" date.
         latestLinkedAt: readyEntry?.row.created_at ?? null,
-        // latestTrigger: how this report was created — 'scheduled' | 'manual' | 'rerun'
-        // Dashboard uses this to label nightly auto-reports vs manual live analyses.
         latestTrigger: readyEntry?.row.trigger ?? null,
+        // runType: semantic label for what is being shown
+        runType,
+        // fallbackReason: why nightly isn't shown (for dashboard state banners)
+        fallbackReason,
+        // lastNightlyCompletedAt: when nightly last produced a ready report
+        lastNightlyCompletedAt: nightlyEntry?.report?.completed_at ?? null,
         activeJob,
+        activeNightlyJob,
       };
     });
 
