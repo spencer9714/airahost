@@ -268,7 +268,7 @@ export function RecommendationBanner({
             {propertyMeta && (
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-sm text-foreground/55">
-                  {propertyMeta.propertyType} · {propertyMeta.guests} guest
+                  {propertyMeta.propertyType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())} · {propertyMeta.guests} guest
                   {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
                   {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
                   {propertyMeta.baths !== 1 ? "s" : ""}
