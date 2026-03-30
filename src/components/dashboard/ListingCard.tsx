@@ -382,9 +382,7 @@ export function ListingCard({
         </div>
 
         {/* ── Co-Host Feature ── */}
-        <div className="px-5 pb-4">
-          <CoHostFeature listing={{ id: listing.id, name: listing.name, input_attributes: listing.input_attributes }} />
-        </div>
+        <CoHostFeature listing={{ id: listing.id, name: listing.name, input_attributes: listing.input_attributes }} />
 
         {/* ── Pricing alerts row ───────────────────────────────────────────
             Visible in normal card view (hidden when edit panel is open,

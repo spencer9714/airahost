@@ -15,11 +15,8 @@ interface CoHostFeatureProps {
   listing: Listing;
 }
 
-const AIRAHOST_COHOST_EMAIL = process.env.NEXT_PUBLIC_AIRAHOST_COHOST_EMAIL;
-
 export function CoHostFeature({ listing }: CoHostFeatureProps) {
   const [showPopover, setShowPopover] = useState(false);
-  const [copied, setCopied] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
 
   // Close popover when clicking outside
@@ -38,44 +35,30 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
     (listing.input_attributes?.listing_url as string | null | undefined);
   const listingId = extractAirbnbListingId(listingUrl);
 
-  const handleCopyEmail = () => {
-    if (AIRAHOST_COHOST_EMAIL) {
-      navigator.clipboard.writeText(AIRAHOST_COHOST_EMAIL);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
-  if (!listingId) {
-    return (
-      <div className="w-full">
-        <button
-          disabled
-          title="Airbnb listing URL required"
-          className="w-full rounded-xl bg-accent/10 py-2.5 text-sm font-semibold text-accent/40 cursor-not-allowed transition-colors"
-        >
-          Add Airahost as Co-host
-        </button>
-        <p className="mt-1.5 text-center text-xs text-foreground/40">
-          Airbnb listing URL required
-        </p>
-      </div>
-    );
-  }
-
-  const cohostInviteUrl = `https://www.airbnb.com/hosting/listings/editor/${listingId}/details/co-hosts/invite`;
+  const cohostInviteUrl = listingId
+    ? `https://www.airbnb.com/hosting/listings/editor/${listingId}/details/co-hosts/invite`
+    : null;
 
   return (
-    <div className="w-full space-y-2.5">
-      <div className="flex items-center space-x-2">
-        <a
-          href={cohostInviteUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex-grow rounded-xl bg-accent py-2.5 text-center text-sm font-semibold text-white transition-colors hover:bg-accent/90"
-        >
+    <div
+      className={`flex items-center justify-between px-5 py-3 transition-colors border-t ${
+        listingId
+          ? "border-gray-100/80"
+          : "border-accent/10 bg-accent/5"
+      }`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Left: label + info popover */}
+      <div className="flex min-w-0 items-center gap-2">
+        {!listingId && <span className="text-sm">🏠</span>}
+        <span className={`text-xs font-semibold ${listingId ? "text-foreground/50" : "text-accent"}`}>
           Add Airahost as Co-host
-        </a>
+        </span>
+        <span className={`text-[11px] ${listingId ? "text-foreground/35" : "text-accent/50"}`}>
+          {listingId ? "Tap to invite" : "Needs listing URL"}
+        </span>
+
+        {/* Info popover */}
         <div className="relative" ref={popoverRef}>
           <button
             type="button"
@@ -83,18 +66,17 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
               e.stopPropagation();
               setShowPopover(!showPopover);
             }}
-            className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-foreground/50 transition-colors hover:bg-gray-200 hover:text-foreground/80"
+            className="flex items-center justify-center text-foreground/25 transition-colors hover:text-foreground/50"
             aria-label="More info"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"></circle>
               <line x1="12" y1="16" x2="12" y2="12"></line>
               <line x1="12" y1="8" x2="12.01" y2="8"></line>
             </svg>
           </button>
-
           {showPopover && (
-            <div className="absolute bottom-full right-0 z-50 mb-2 w-72 rounded-xl border border-gray-200/80 bg-white p-4 shadow-lg" onClick={(e) => e.stopPropagation()}>
+            <div className="absolute bottom-full left-0 z-50 mb-2 w-72 rounded-xl border border-gray-200/80 bg-white p-4 shadow-lg" onClick={(e) => e.stopPropagation()}>
               <div className="space-y-2.5">
                 <h4 className="font-semibold text-sm text-gray-900">{cohostBenefits.title}</h4>
                 <p className="text-xs text-gray-500 leading-relaxed">{cohostBenefits.intro}</p>
@@ -109,33 +91,27 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
         </div>
       </div>
 
-      {AIRAHOST_COHOST_EMAIL && (
-        <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
-          <span className="truncate text-xs font-medium text-gray-500">
-            {AIRAHOST_COHOST_EMAIL}
-          </span>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              handleCopyEmail();
-            }}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700"
-            aria-label="Copy email"
-            title="Copy email"
-          >
-            {copied ? (
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3 w-3 text-emerald-600">
-                <polyline points="20 6 9 17 4 12"></polyline>
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3 w-3">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
-            )}
-          </button>
-        </div>
+      {/* Right: toggle */}
+      {cohostInviteUrl ? (
+        <a
+          href={cohostInviteUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          aria-label="Open Airbnb co-host invite"
+          className="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full bg-emerald-500 transition-colors focus:outline-none"
+        >
+          <span className="inline-block h-3.5 w-3.5 translate-x-4 rounded-full bg-white shadow transition-transform" />
+        </a>
+      ) : (
+        <button
+          type="button"
+          disabled
+          aria-label="Listing URL required"
+          className="relative inline-flex h-5 w-9 shrink-0 cursor-not-allowed items-center rounded-full bg-accent transition-colors focus:outline-none opacity-60"
+        >
+          <span className="inline-block h-3.5 w-3.5 translate-x-1 rounded-full bg-white shadow transition-transform" />
+        </button>
       )}
     </div>
   );
