@@ -441,8 +441,8 @@ export function ListingCard({
           </div>
         )}
 
-        {/* ── Footer: Edit + View ── */}
-        <div className="flex items-center justify-between border-t border-gray-100/80 px-5 py-3">
+        {/* ── Footer: Edit/Close ── */}
+        <div className="flex items-center justify-end border-t border-gray-100/80 px-5 py-3">
           <button
             type="button"
             onClick={() => {
