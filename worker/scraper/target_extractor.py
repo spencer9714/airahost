@@ -609,7 +609,16 @@ _NIGHTLY_PRICE_RES = [
     re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s*/\s*night", re.I),
     re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s+per\s+night", re.I),
     re.compile(r"(\d{1,4}(?:,\d{3})?)\s+USD\s*/\s*night", re.I),
+    # "for 1 night" — already a per-night price, no division needed (captured below)
+    re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s+for\s+1\s+nights?", re.I),
 ]
+
+# Matches trip-total format: "$300 for 2 nights" — requires division by N.
+# Group 1 = price digits, Group 2 = night count (N ≥ 2).
+_TRIP_TOTAL_RE = re.compile(
+    r"\$\s*(\d{1,4}(?:,\d{3})?)\s+for\s+([2-9]|\d{2,})\s+nights?",
+    re.I,
+)
 
 # JavaScript run inside the browser to classify price candidates in the booking widget.
 # For each price element found near a "/night" label it records:
@@ -637,8 +646,11 @@ _BOOKING_WIDGET_PRICE_JS = """
 
   // Matches a bare dollar amount with no surrounding text: "$465", "$1,234"
   const BARE_PRICE_RE = /^\\$?\\s*(\\d{1,4}(?:,\\d{3})*)\\s*$/;
-  // Matches "$X /night" or "$X per night" somewhere in a string
-  const PRICE_NIGHT_RE = /\\$\\s*(\\d{1,4}(?:,\\d{3})?)\\s*(?:\\/\\s*night|per\\s+night)/i;
+  // Matches price+night label in various Airbnb formats:
+  //   "$X /night"  |  "$X per night"  |  "$X for 1 night"  |  "$X for N nights"
+  const PRICE_NIGHT_RE = /\\$\\s*(\\d{1,4}(?:,\\d{3})?)\\s*(?:\\/\\s*night|per\\s+night|for\\s+\\d+\\s+nights?)/i;
+  // Detects multi-night trip totals: "for N nights" where N >= 2
+  const TRIP_NIGHTS_RE = /for\\s+(\\d+)\\s+nights?/i;
 
   // Find the booking widget container (most-to-least specific).
   const WIDGET_SELS = [
@@ -657,8 +669,7 @@ _BOOKING_WIDGET_PRICE_JS = """
   const allEls = Array.from(widget.querySelectorAll('span, b, strong, em'));
 
   // Find the smallest elements whose innerText matches the "$X /night" compound
-  // pattern — these are the price+night containers (e.g. the header span that
-  // wraps both the price number and the "/night" label).
+  // pattern (now including "for N nights" trip-total format).
   const nightContainers = [];
   for (const el of allEls) {
     const t = (el.innerText || '').trim();
@@ -675,6 +686,11 @@ _BOOKING_WIDGET_PRICE_JS = """
   const seenEls = new Set();
 
   for (const container of nightContainers.slice(0, 3)) {
+    // Detect trip-night count from the container text (e.g. "for 2 nights").
+    const containerText = (container.innerText || '').trim();
+    const tripM = containerText.match(TRIP_NIGHTS_RE);
+    const tripNights = tripM ? parseInt(tripM[1], 10) : 1;
+
     const priceEls = container.querySelectorAll('span, b, strong, em');
     for (const el of priceEls) {
       if (seenEls.has(el)) continue;
@@ -684,10 +700,11 @@ _BOOKING_WIDGET_PRICE_JS = """
       const m = text.match(BARE_PRICE_RE);
       if (!m) continue;
       const value = parseFloat(m[1].replace(',', ''));
-      if (isNaN(value) || value < 10 || value > 15000) continue;
+      if (isNaN(value) || value < 10 || value > 150000) continue;
       seenEls.add(el);
       candidates.push({
         value,
+        tripNights,
         strikethrough: isLineThrough(el),
         domIndex: allEls.indexOf(el),
       });
@@ -717,6 +734,8 @@ def select_nightly_price_from_candidates(
     * When multiple non-strikethrough candidates exist, pick the **last** one
       in DOM order: Airbnb always places the original price before the discounted
       price in the DOM, so the last non-strikethrough entry is the discounted one.
+    * If ``tripNights`` > 1 on the chosen candidate, the raw value is a trip total
+      that must be divided by tripNights to produce the per-night figure.
     * Returns (price, price_kind) or None if no valid candidate exists.
       price_kind: "nightly_discounted" if strikethrough originals are also present,
                   "nightly_standard" otherwise.
@@ -734,13 +753,62 @@ def select_nightly_price_from_candidates(
     # a discount is active, or the sole price when there is no discount).
     non_st_sorted = sorted(non_st, key=lambda c: c.get("domIndex", 0))
     best = non_st_sorted[-1]
-    price_val = float(best["value"])
+    raw_val = float(best["value"])
+    trip_nights = int(best.get("tripNights") or 1)
+    if trip_nights < 1:
+        trip_nights = 1
+
+    # Divide trip totals to arrive at per-night price.
+    price_val = raw_val / trip_nights if trip_nights > 1 else raw_val
 
     if not (10 <= price_val <= 10000):
         return None
 
     price_kind = "nightly_discounted" if has_strikethrough else "nightly_standard"
     return price_val, price_kind
+
+
+def _extract_text_price_matches(text: str) -> List[Tuple[int, float]]:
+    """
+    Scan ``text`` for all nightly-price and trip-total-price patterns and return
+    a list of (position, per_night_price) tuples.
+
+    Handles:
+      * ``$X /night``        → per-night as-is
+      * ``$X per night``     → per-night as-is
+      * ``$X for 1 night``   → per-night as-is
+      * ``$X for N nights``  → divide by N to get per-night (N >= 2)
+      * ``X USD /night``     → per-night as-is
+
+    "N nights minimum" labels are NOT matched because the pattern requires a
+    dollar sign immediately before the amount.
+    """
+    matches: List[Tuple[int, float]] = []
+
+    # Per-night patterns — use raw price value directly.
+    for pat in _NIGHTLY_PRICE_RES:
+        for m in pat.finditer(text):
+            try:
+                p = float(m.group(1).replace(",", ""))
+                if 10 <= p <= 10000:
+                    matches.append((m.start(), p))
+            except Exception:
+                continue
+
+    # Trip-total pattern — divide by night count.
+    for m in _TRIP_TOTAL_RE.finditer(text):
+        try:
+            raw = float(m.group(1).replace(",", ""))
+            nights = int(m.group(2))
+            if nights < 2:
+                continue
+            per_night = raw / nights
+            if 10 <= per_night <= 10000:
+                matches.append((m.start(), per_night))
+        except Exception:
+            continue
+
+    return matches
 
 
 def extract_nightly_price_from_listing_page(
@@ -878,15 +946,7 @@ def extract_nightly_price_from_listing_page(
             # When multiple prices are present prefer the LAST match (the discounted
             # price follows the original in the DOM / text order).
             if widget_text:
-                text_matches: List[Tuple[int, float]] = []
-                for pat in _NIGHTLY_PRICE_RES:
-                    for m in pat.finditer(widget_text):
-                        try:
-                            p = float(m.group(1).replace(",", ""))
-                            if 10 <= p <= 10000:
-                                text_matches.append((m.start(), p))
-                        except Exception:
-                            continue
+                text_matches = _extract_text_price_matches(widget_text)
                 if text_matches:
                     text_matches.sort(key=lambda x: x[0])
                     price = text_matches[-1][1]  # last = discounted if discount present
@@ -925,20 +985,7 @@ def extract_nightly_price_from_listing_page(
     breakdown_pos = search_area.lower().find("show price breakdown")
     cutoff = breakdown_pos if breakdown_pos > 0 else len(search_area)
 
-    body_matches: List[Tuple[int, float]] = []
-    for pat in _NIGHTLY_PRICE_RES:
-        for m in pat.finditer(search_area):
-            try:
-                price = float(m.group(1).replace(",", ""))
-                if 10 <= price <= 10000:
-                    body_matches.append((m.start(), price))
-                else:
-                    logger.warning(
-                        f"[benchmark] Body-text price ${price} out of range "
-                        f"(raw='{m.group(0)}'), skipping"
-                    )
-            except Exception:
-                continue
+    body_matches: List[Tuple[int, float]] = _extract_text_price_matches(search_area)
 
     if body_matches:
         body_matches.sort(key=lambda x: x[0])
