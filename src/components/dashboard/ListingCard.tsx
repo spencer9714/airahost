@@ -464,14 +464,6 @@ export function ListingCard({
           >
             {editOpen ? "Close" : "Edit"}
           </button>
-          {latest?.share_id && (
-            <Link
-              href={`/r/${latest.share_id}`}
-              className="text-sm font-medium text-foreground/35 transition-colors hover:text-foreground/60"
-            >
-              View →
-            </Link>
-          )}
         </div>
 
         {/* ── Edit panel ───────────────────────────────────────────────
