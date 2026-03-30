@@ -273,21 +273,20 @@ export function RecommendationBanner({
           {/* Property + benchmark meta */}
           <div className="space-y-1">
             {propertyMeta && (
-              <p className="text-sm text-foreground/55">
-                {propertyMeta.propertyType} · {propertyMeta.guests} guest
-                {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
-                {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
-                {propertyMeta.baths !== 1 ? "s" : ""}
-              </p>
-            )}
-            {benchmarkMeta?.count ? (
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-800">
-                  {benchmarkMeta.count} benchmark
-                  {benchmarkMeta.count !== 1 ? "s" : ""}
-                </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm text-foreground/55">
+                  {propertyMeta.propertyType} · {propertyMeta.guests} guest
+                  {propertyMeta.guests !== 1 ? "s" : ""} · {propertyMeta.beds} bed
+                  {propertyMeta.beds !== 1 ? "s" : ""} · {propertyMeta.baths} bath
+                  {propertyMeta.baths !== 1 ? "s" : ""}
+                </p>
+                {benchmarkMeta?.count ? (
+                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">
+                    {benchmarkMeta.count} benchmark{benchmarkMeta.count !== 1 ? "s" : ""}
+                  </span>
+                ) : null}
               </div>
-            ) : null}
+            )}
             {lastAnalysisDate && (
               <p className="text-sm text-foreground/35">
                 Market data from {new Date(lastAnalysisDate).toLocaleDateString()}
