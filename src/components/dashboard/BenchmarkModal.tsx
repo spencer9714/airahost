@@ -34,7 +34,7 @@ function shortenUrl(raw: string): string {
 }
 
 export function BenchmarkModal({
-  listing,
+
   initialComps,
   onClose,
   onSave,

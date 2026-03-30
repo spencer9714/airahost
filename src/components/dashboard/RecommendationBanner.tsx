@@ -109,7 +109,6 @@ export function RecommendationBanner({
   summary,
   recommendedPrice,
   reportShareId,
-  listingName,
   airbnbListingLabel,
   propertyMeta,
   benchmarkMeta,

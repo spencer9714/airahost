@@ -245,7 +245,7 @@ export function generatePricingReport(
   );
 
   // Keep this rand() call so the seed sequence stays stable for all inputs.
-  const _unusedMarketRand = rand();
+  void rand();
 
   // Recommended price: 3–8% above median, with weekday/weekend awareness.
   const recNightly = Math.round(median * (1.03 + rand() * 0.05));

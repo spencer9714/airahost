@@ -34,8 +34,8 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
   }, []);
 
   const listingUrl =
-    (listing.input_attributes as any)?.listingUrl ||
-    (listing.input_attributes as any)?.listing_url;
+    (listing.input_attributes?.listingUrl as string | null | undefined) ||
+    (listing.input_attributes?.listing_url as string | null | undefined);
   const listingId = extractAirbnbListingId(listingUrl);
 
   const handleCopyEmail = () => {

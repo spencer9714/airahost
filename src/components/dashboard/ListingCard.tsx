@@ -97,26 +97,13 @@ function cleanTitle(raw: string): string {
     .trim();
 }
 
-function shortenUrl(raw: string): string {
-  try {
-    const u = new URL(raw);
-    const path = u.pathname.replace(/\/$/, "");
-    return u.hostname + (path.length > 30 ? path.slice(0, 30) + "…" : path);
-  } catch {
-    return raw;
-  }
-}
-
-function looksLikeUrl(str: string): boolean {
-  return /^https?:\/\//i.test(str.trim());
-}
 
 export function ListingCard({
   listing,
   isActive,
   onSelect,
   onDelete,
-  onViewHistory,
+
   onRename,
   onSavePreferredComps,
   onSaveAlertSettings,
@@ -396,7 +383,7 @@ export function ListingCard({
 
         {/* ── Co-Host Feature ── */}
         <div className="px-5 pb-4">
-          <CoHostFeature listing={listing as any} />
+          <CoHostFeature listing={{ id: listing.id, name: listing.name, input_attributes: listing.input_attributes }} />
         </div>
 
         {/* ── Pricing alerts row ───────────────────────────────────────────
