@@ -1283,6 +1283,7 @@ def main():
 
             if job is None:
                 # No work — wait with current backoff
+                logger.debug(f"[poll] idle (env={WORKER_ENV}, lane={WORKER_LANE}, backoff={backoff:.0f}s)")
                 _shutdown_event.wait(backoff)
                 backoff = min(backoff * 1.5, max_backoff)
                 continue
@@ -1291,6 +1292,11 @@ def main():
             backoff = POLL_SECONDS
             report_id = job["id"]
             attempts = job.get("worker_attempts", 0)
+            logger.info(
+                f"[{report_id}] claimed "
+                f"(job_lane={job.get('job_lane', '?')}, target_env={job.get('target_env', '?')}, "
+                f"worker_env={WORKER_ENV}, worker_lane={WORKER_LANE}, attempt={attempts})"
+            )
 
             if attempts > MAX_ATTEMPTS:
                 logger.warning(f"[{report_id}] Exceeded max attempts ({attempts}), marking error")
