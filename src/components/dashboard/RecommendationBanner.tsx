@@ -8,6 +8,7 @@ interface Props {
   recommendedPrice: RecommendedPrice | null;
   reportShareId: string;
   listingName: string;
+  airbnbListingLabel?: string | null;
   propertyMeta: {
     propertyType: string;
     guests: number;
@@ -107,6 +108,7 @@ export function RecommendationBanner({
   recommendedPrice,
   reportShareId,
   listingName,
+  airbnbListingLabel,
   propertyMeta,
   benchmarkMeta,
   lastAnalysisDate,
@@ -300,6 +302,11 @@ export function RecommendationBanner({
           <Link href={`/r/${reportShareId}`}>
             <Button size="md">View full report</Button>
           </Link>
+          {airbnbListingLabel ? (
+            <p className="max-w-[240px] text-right text-xs font-medium text-foreground/40">
+              {airbnbListingLabel}
+            </p>
+          ) : null}
         </div>
       </div>
 

@@ -10,6 +10,7 @@ import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
+import { extractAirbnbListingId } from "@/lib/airbnb-utils";
 import { resolveMarketCapturedAt } from "@/lib/freshness";
 import type {
   PropertyType,
@@ -88,6 +89,7 @@ type ListingRow = {
     amenities?: string[];
     address?: string;
     listingUrl?: string | null;
+    listing_url?: string | null;
     preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
   };
   created_at: string;
@@ -381,6 +383,20 @@ export default function DashboardPage() {
   }
 
   const firstName = userName ? userName.split(" ")[0] : null;
+  const activeAirbnbListingLabel = activeListing
+    ? (() => {
+        const airbnbId =
+          extractAirbnbListingId(
+            activeListing.input_attributes.listingUrl ??
+              activeListing.input_attributes.listing_url ??
+              null
+          ) ??
+          activeListing.input_address.match(/Airbnb Listing #(\d+)/i)?.[1] ??
+          null;
+
+        return airbnbId ? `Airbnb Listing #${airbnbId}` : null;
+      })()
+    : null;
 
   return (
     <div className="min-h-screen bg-gray-50/50">
@@ -589,6 +605,7 @@ export default function DashboardPage() {
                 {/* ── Price summary ── */}
                 <RecommendationBanner
                   listingName={activeListing.name}
+                  airbnbListingLabel={activeAirbnbListingLabel}
                   summary={activeSummary}
                   recommendedPrice={activeSummary.recommendedPrice ?? null}
                   reportShareId={activeReport.share_id}
