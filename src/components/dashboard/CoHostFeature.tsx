@@ -16,6 +16,7 @@ interface CoHostFeatureProps {
 }
 
 export function CoHostFeature({ listing }: CoHostFeatureProps) {
+  const [enabled, setEnabled] = useState(false);
   const [showPopover, setShowPopover] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -39,10 +40,12 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
     ? `https://www.airbnb.com/hosting/listings/editor/${listingId}/details/co-hosts/invite`
     : null;
 
+  const isOn = enabled && !!listingId;
+
   return (
     <div
       className={`flex items-center justify-between px-5 py-3 transition-colors border-t ${
-        listingId
+        isOn
           ? "border-gray-100/80"
           : "border-accent/10 bg-accent/5"
       }`}
@@ -50,8 +53,8 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
     >
       {/* Left: label + info popover */}
       <div className="flex min-w-0 items-center gap-2">
-        {!listingId && <span className="text-sm">🏠</span>}
-        <span className={`text-sm font-semibold ${listingId ? "text-foreground/50" : "text-accent"}`}>
+        {!isOn && <span className="text-sm">🏠</span>}
+        <span className={`text-sm font-semibold ${isOn ? "text-foreground/50" : "text-accent"}`}>
           Add Airahost as Co-host
         </span>
         {!listingId && (
@@ -92,27 +95,28 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
       </div>
 
       {/* Right: toggle */}
-      {cohostInviteUrl ? (
-        <a
-          href={cohostInviteUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          aria-label="Open Airbnb co-host invite"
-          className="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full bg-emerald-500 transition-colors focus:outline-none"
-        >
-          <span className="inline-block h-3.5 w-3.5 translate-x-4 rounded-full bg-white shadow transition-transform" />
-        </a>
-      ) : (
-        <button
-          type="button"
-          disabled
-          aria-label="Listing URL required"
-          className="relative inline-flex h-5 w-9 shrink-0 cursor-not-allowed items-center rounded-full bg-accent transition-colors focus:outline-none opacity-60"
-        >
-          <span className="inline-block h-3.5 w-3.5 translate-x-1 rounded-full bg-white shadow transition-transform" />
-        </button>
-      )}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={isOn}
+        aria-label={isOn ? "Disable co-host" : "Enable co-host"}
+        disabled={!listingId}
+        onClick={() => {
+          if (!enabled && cohostInviteUrl) {
+            window.open(cohostInviteUrl, "_blank", "noopener,noreferrer");
+          }
+          setEnabled((v) => !v);
+        }}
+        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none disabled:cursor-not-allowed disabled:opacity-60 ${
+          isOn ? "bg-emerald-500" : "bg-accent"
+        }`}
+      >
+        <span
+          className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+            isOn ? "translate-x-4" : "translate-x-1"
+          }`}
+        />
+      </button>
     </div>
   );
 }
