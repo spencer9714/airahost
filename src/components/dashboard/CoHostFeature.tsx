@@ -52,7 +52,7 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
         <button
           disabled
           title="Airbnb listing URL required"
-          className="w-full rounded-xl bg-gray-100 py-2.5 text-sm font-semibold text-gray-400 cursor-not-allowed transition-colors"
+          className="w-full rounded-xl bg-accent/10 py-2.5 text-sm font-semibold text-accent/40 cursor-not-allowed transition-colors"
         >
           Add Airahost as Co-host
         </button>
@@ -72,7 +72,7 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
           href={cohostInviteUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex-grow rounded-xl bg-gray-900 py-2.5 text-center text-sm font-semibold text-white transition-colors hover:bg-gray-800"
+          className="flex-grow rounded-xl bg-accent py-2.5 text-center text-sm font-semibold text-white transition-colors hover:bg-accent/90"
         >
           Add Airahost as Co-host
         </a>
