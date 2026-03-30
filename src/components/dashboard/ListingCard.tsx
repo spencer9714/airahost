@@ -403,7 +403,7 @@ export function ListingCard({
               {!alertsEnabled && (
                 <span className="text-sm">🔔</span>
               )}
-              <span className={`text-xs font-semibold ${alertsEnabled ? "text-foreground/50" : "text-accent"}`}>
+              <span className={`text-sm font-semibold ${alertsEnabled ? "text-foreground/50" : "text-accent"}`}>
                 {alertsEnabled ? "Pricing alerts" : "Enable pricing alerts"}
               </span>
               <span

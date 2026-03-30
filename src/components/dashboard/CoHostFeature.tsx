@@ -51,12 +51,12 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
       {/* Left: label + info popover */}
       <div className="flex min-w-0 items-center gap-2">
         {!listingId && <span className="text-sm">🏠</span>}
-        <span className={`text-xs font-semibold ${listingId ? "text-foreground/50" : "text-accent"}`}>
+        <span className={`text-sm font-semibold ${listingId ? "text-foreground/50" : "text-accent"}`}>
           Add Airahost as Co-host
         </span>
-        <span className={`text-[11px] ${listingId ? "text-foreground/35" : "text-accent/50"}`}>
-          {listingId ? "Tap to invite" : "Needs listing URL"}
-        </span>
+        {!listingId && (
+          <span className="text-[11px] text-accent/50">Needs listing URL</span>
+        )}
 
         {/* Info popover */}
         <div className="relative" ref={popoverRef}>
@@ -66,10 +66,10 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
               e.stopPropagation();
               setShowPopover(!showPopover);
             }}
-            className="flex items-center justify-center text-foreground/25 transition-colors hover:text-foreground/50"
+            className="flex items-center justify-center text-foreground/35 transition-colors hover:text-foreground/60"
             aria-label="More info"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"></circle>
               <line x1="12" y1="16" x2="12" y2="12"></line>
               <line x1="12" y1="8" x2="12.01" y2="8"></line>
