@@ -53,7 +53,6 @@ export function CoHostFeature({ listing }: CoHostFeatureProps) {
     >
       {/* Left: label + info popover */}
       <div className="flex min-w-0 items-center gap-2">
-        {!isOn && <span className="text-sm">🏠</span>}
         <span className={`text-sm font-semibold ${isOn ? "text-foreground/50" : "text-accent"}`}>
           Add Airahost as Co-host
         </span>

@@ -400,9 +400,6 @@ export function ListingCard({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex min-w-0 items-center gap-2">
-              {!alertsEnabled && (
-                <span className="text-sm">🔔</span>
-              )}
               <span className={`text-sm font-semibold ${alertsEnabled ? "text-foreground/50" : "text-accent"}`}>
                 {alertsEnabled ? "Pricing alerts" : "Enable pricing alerts"}
               </span>
