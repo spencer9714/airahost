@@ -250,26 +250,15 @@ export function RecommendationBanner({
 
               {/* Live price unavailable — explain why */}
               <div className="mt-2 rounded-lg border border-gray-100 bg-gray-50/80 px-3 py-2.5">
-                {livePriceStatus === "no_listing_url" || !hasListingUrl ? (
-                  <p className="text-xs text-foreground/50">
-                    <span className="font-semibold text-foreground/65">Live price unavailable.</span>{" "}
-                    Add your Airbnb listing URL in settings to compare your current price to the market.
-                  </p>
-                ) : livePriceStatus === "no_price_found" ? (
-                  <p className="text-xs text-foreground/50">
-                    <span className="font-semibold text-foreground/65">Live price unavailable.</span>{" "}
-                    Could not read your current listing price from Airbnb for this date.
-                  </p>
-                ) : livePriceStatus === "scrape_failed" ? (
-                  <p className="text-xs text-foreground/50">
-                    <span className="font-semibold text-foreground/65">Live price check failed.</span>{" "}
-                    The Airbnb page could not be accessed. Will retry on next nightly run.
-                  </p>
-                ) : (
-                  <p className="text-xs text-foreground/50">
-                    Live price not yet captured for this report.
-                  </p>
-                )}
+                <p className="text-xs text-foreground/50">
+                  {livePriceStatus === "no_listing_url" || !hasListingUrl
+                    ? "Add your Airbnb listing URL in settings to see live pricing."
+                    : livePriceStatus === "no_price_found"
+                    ? "Live price not found for this date."
+                    : livePriceStatus === "scrape_failed"
+                    ? "Live price check failed — will retry tonight."
+                    : "Live price not yet captured."}
+                </p>
               </div>
             </div>
           )}
