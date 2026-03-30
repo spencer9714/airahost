@@ -2,6 +2,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
 import { computeFreshness, resolveMarketCapturedAt } from "@/lib/freshness";
+import { CoHostFeature } from "./CoHostFeature";
 
 type LatestReport = {
   id: string;
@@ -213,7 +214,7 @@ export function ListingCard({
 
   return (
     <div
-      className={`relative overflow-hidden rounded-2xl transition-all duration-150 ${
+      className={`relative rounded-2xl transition-all duration-150 ${
         editOpen
           ? "bg-white shadow-[0_6px_24px_rgba(0,0,0,0.11),0_0_0_1px_rgba(0,0,0,0.09)]"
           : isActive
@@ -291,6 +292,11 @@ export function ListingCard({
         )}
       </div>
 
+      {/* ── Co-Host Feature ── */}
+      <div className="px-5 pb-4">
+        <CoHostFeature listing={listing as any} />
+      </div>
+
       {/* ── Footer: Edit + View ── */}
       <div className="flex items-center justify-between border-t border-gray-100/80 px-5 py-3">
         <button
@@ -331,7 +337,7 @@ export function ListingCard({
       ─────────────────────────────────────────────────────────────── */}
       {editOpen && (
         <div
-          className="border-t border-gray-200/70 bg-gray-50/60 px-5 pb-6 pt-4"
+          className="border-t border-gray-200/70 bg-gray-50/60 px-5 pb-6 pt-4 rounded-b-2xl"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Mode header */}
