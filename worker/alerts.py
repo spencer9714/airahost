@@ -292,50 +292,40 @@ def _build_email(
     """
     is_high = direction == "PRICED_HIGH"
     direction_word = "above" if is_high else "below"
-    action_verb = "Lowering" if is_high else "Raising"
-    pct_abs = abs(round(vs_recommended_pct, 1))
     status_color = "#dc2626" if is_high else "#16a34a"  # red / green
+
+    # Show % vs market median
+    vs_market_pct = abs(round((live_price - market_median) / market_median * 100, 1)) if market_median else 0
 
     min_stay_note_text = ""
     min_stay_note_html = ""
-    # Show a note when the fallback used more nights than the configured minimum
     if booking_nights_basis is not None and booking_nights_basis > minimum_booking_nights:
         min_stay_note_text = (
             f"\nNote: A {minimum_booking_nights}-night booking was unavailable, "
             f"so this price is based on a {booking_nights_basis}-night booking "
-            f"(per-night rate from Airbnb's booking widget). "
-            f"Your listing likely has a {booking_nights_basis}-night minimum stay.\n"
+            f"(per-night rate from Airbnb's booking widget).\n"
         )
         min_stay_note_html = (
             '<p style="margin:0 0 16px;font-size:12px;color:#9ca3af;font-style:italic;">'
             f"Note: {minimum_booking_nights}-night booking unavailable — "
-            f"price from a {booking_nights_basis}-night booking (per-night rate). "
-            f"Your listing may have a {booking_nights_basis}-night minimum stay.</p>"
+            f"price from a {booking_nights_basis}-night booking (per-night rate).</p>"
         )
 
-    suggestion_text = (
-        f"{action_verb} your price to around ${round(recommended_price)}/night "
-        f"may {'reduce your competitiveness' if not is_high else 'improve your booking rate'}."
-        if is_high
-        else f"{action_verb} your price to around ${round(recommended_price)}/night "
-        "could increase your earnings."
-    )
-    # Simpler suggestion
     if is_high:
         suggestion_text = (
-            f"Consider lowering your price to around ${round(recommended_price)}/night "
-            "to stay competitive."
+            f"We recommend lowering your price to ${round(recommended_price)}/night "
+            "to improve your competitiveness and booking rate."
         )
     else:
         suggestion_text = (
-            f"You may be able to earn more by raising your price to around "
-            f"${round(recommended_price)}/night."
+            f"We recommend raising your price to ${round(recommended_price)}/night "
+            "— you may be leaving money on the table."
         )
 
     subject = (
-        f"Your {listing_name} may be priced too high — {date_basis}"
+        f"Your {listing_name} is priced {vs_market_pct}% above the market — {date_basis}"
         if is_high
-        else f"Your {listing_name} may be leaving money on the table — {date_basis}"
+        else f"Your {listing_name} is priced {vs_market_pct}% below the market — {date_basis}"
     )
 
     report_url = f"{dashboard_url}/r/{report_share_id}" if report_share_id else dashboard_url
@@ -344,13 +334,13 @@ def _build_email(
     # ── Plain text ────────────────────────────────────────────────────────
     text_body = f"""Hi,
 
-We checked your listing price for {listing_name} for {date_basis}.
+We checked your listing price for {listing_name} on {date_basis}.
 
-  YOUR LIVE PRICE:  ${round(live_price)}/night
-  MARKET MEDIAN:    ${round(market_median)}/night
-  RECOMMENDED:      ${round(recommended_price)}/night
+  YOUR LIVE PRICE:   ${round(live_price)}/night
+  MARKET MEDIAN:     ${round(market_median)}/night
+  OUR RECOMMENDED:   ${round(recommended_price)}/night
 
-You are priced {pct_abs}% {direction_word} our recommendation.
+You are priced {vs_market_pct}% {direction_word} the market median.
 
 {suggestion_text}
 {min_stay_note_text}
@@ -360,12 +350,10 @@ View your full market report:
 Manage alert settings:
 {settings_url}
 
-—
 The Airahost Team
 
 You're receiving this because pricing alerts are enabled for this listing.
-To disable alerts for this listing, visit your dashboard settings:
-{settings_url}
+To disable: {settings_url}
 """
 
     # ── HTML ──────────────────────────────────────────────────────────────
@@ -402,8 +390,8 @@ To disable alerts for this listing, visit your dashboard settings:
         </td>
       </tr>
       <tr style="border-top:1px solid #f3f4f6;">
-        <td style="padding:7px 0;color:#374151;font-size:14px;">Recommended</td>
-        <td style="padding:7px 0;text-align:right;font-weight:600;font-size:14px;color:#374151;">
+        <td style="padding:7px 0;color:#374151;font-size:14px;font-weight:600;">Our recommendation</td>
+        <td style="padding:7px 0;text-align:right;font-weight:700;font-size:15px;color:#111827;">
           ${round(recommended_price)}<span style="font-size:12px;font-weight:400;color:#9ca3af;">/night</span>
         </td>
       </tr>
@@ -414,22 +402,21 @@ To disable alerts for this listing, visit your dashboard settings:
   <div style="padding:16px 28px 24px;">
     <p style="margin:0 0 12px;font-size:15px;color:#111827;">
       You are priced
-      <strong style="color:{status_color};">{pct_abs}% {direction_word}</strong>
-      our recommendation.
+      <strong style="color:{status_color};">{vs_market_pct}% {direction_word} the market median.</strong>
     </p>
     <p style="margin:0 0 20px;font-size:14px;color:#6b7280;">{suggestion_text}</p>
     {min_stay_note_html}
     <a href="{report_url}"
        style="display:block;background:#111827;color:#fff;text-decoration:none;text-align:center;
               padding:13px;border-radius:8px;font-size:14px;font-weight:600;">
-      View Full Market Report →
+      View Full Market Report &#8594;
     </a>
   </div>
 
   <!-- Footer -->
   <div style="padding:14px 28px;border-top:1px solid #f3f4f6;background:#f9fafb;">
     <p style="margin:0;font-size:11px;color:#9ca3af;text-align:center;">
-      Pricing alerts are enabled for this listing. ·
+      Pricing alerts are enabled for this listing. &#183;
       <a href="{settings_url}" style="color:#6b7280;text-decoration:underline;">Manage alert settings</a>
     </p>
   </div>
@@ -789,7 +776,6 @@ def run_alert_evaluation(
             live_price=live_price,
             live_price_status=live_price_status,
             market_median=market_median_f,
-            recommended_price=recommended_price_f,
             vs_recommended_pct=round(vs_recommended_pct, 2),
             vs_market_pct=round(vs_market_pct, 2),
             booking_nights_basis=nights_used,
@@ -813,7 +799,6 @@ def run_alert_evaluation(
             live_price=live_price,
             live_price_status=live_price_status,
             market_median=market_median_f,
-            recommended_price=recommended_price_f,
             vs_recommended_pct=round(vs_recommended_pct, 2),
             vs_market_pct=round(vs_market_pct, 2),
             booking_nights_basis=nights_used,
@@ -838,7 +823,6 @@ def run_alert_evaluation(
             live_price=live_price,
             live_price_status=live_price_status,
             market_median=market_median_f,
-            recommended_price=recommended_price_f,
             vs_recommended_pct=round(vs_recommended_pct, 2),
             vs_market_pct=round(vs_market_pct, 2),
             booking_nights_basis=nights_used,
@@ -902,7 +886,6 @@ def run_alert_evaluation(
             live_price=live_price,
             live_price_status=live_price_status,
             market_median=market_median_f,
-            recommended_price=recommended_price_f,
             vs_recommended_pct=round(vs_recommended_pct, 2),
             vs_market_pct=round(vs_market_pct, 2),
             email_sent_to=to_email,
@@ -927,7 +910,6 @@ def run_alert_evaluation(
             live_price=live_price,
             live_price_status=live_price_status,
             market_median=market_median_f,
-            recommended_price=recommended_price_f,
             vs_recommended_pct=round(vs_recommended_pct, 2),
             vs_market_pct=round(vs_market_pct, 2),
             email_sent_to=to_email,
@@ -962,7 +944,6 @@ def run_alert_evaluation(
         live_price=live_price,
         live_price_status=live_price_status,
         market_median=market_median_f,
-        recommended_price=recommended_price_f,
         vs_recommended_pct=round(vs_recommended_pct, 2),
         vs_market_pct=round(vs_market_pct, 2),
         email_sent_to=to_email,
