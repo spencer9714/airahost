@@ -472,6 +472,7 @@ def _send_via_resend(
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
+            "User-Agent": "airahost-worker/1.0",
         },
         method="POST",
     )
