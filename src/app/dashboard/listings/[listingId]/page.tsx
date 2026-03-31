@@ -376,6 +376,10 @@ export default function ListingHistoryPage() {
                 <PriceLineChart
                   calendar={latestReadyRow.report.result_calendar}
                   pricingMode={pricingMode}
+                  observedListingPrice={
+                    (latestReadyRow.report.result_summary as { observedListingPrice?: number | null } | null)
+                      ?.observedListingPrice ?? null
+                  }
                 />
               )}
 

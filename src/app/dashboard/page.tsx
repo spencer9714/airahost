@@ -636,6 +636,7 @@ export default function DashboardPage() {
                   <PriceLineChart
                     calendar={activeCalendar}
                     pricingMode={pricingMode}
+                    observedListingPrice={activeSummary.observedListingPrice ?? null}
                   />
                 )}
 
