@@ -10,15 +10,23 @@ interface Props {
   observedListingPrice?: number | null;
 }
 
-// Chart canvas constants
+// Canvas constants
 const W = 560;
-const H = 200;
-const PAD_L = 52; // room for Y-axis labels
-const PAD_R = 12;
-const PAD_T = 14;
-const PAD_B = 28; // room for X-axis labels
+const H = 186;
+const PAD_L = 46;
+const PAD_R = 16;
+const PAD_T = 10;
+const PAD_B = 26;
 const CHART_W = W - PAD_L - PAD_R;
 const CHART_H = H - PAD_T - PAD_B;
+
+// Color palette — aligned with the product's Airbnb-adjacent design
+const C_MARKET    = "#c6cdd8";  // muted cool gray — clearly secondary
+const C_SUGGESTED = "#374151";  // charcoal — deliberate, premium primary
+const C_LIVE      = "#ff385c";  // product accent — brand signal for live price
+const C_GRID      = "#f0f1f3";  // barely-there grid
+const C_AXIS      = "#aab0bc";  // quiet axis labels
+const C_BASELINE  = "#e4e7eb";  // x-axis rule
 
 function roundTick(value: number): number {
   const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
@@ -39,16 +47,15 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
   if (days.length < 2) return null;
 
   // ── Field mapping ──────────────────────────────────────────────
-  // Market    : baseDailyPrice (post-LM-adjusted base) with fallback to legacy basePrice
-  // Suggested : effectiveDailyPrice* (all adjustments incl. discount) with legacy fallback
+  // Market    : baseDailyPrice ?? basePrice (market-driven base, post-LM)
+  // Suggested : effectiveDailyPrice* (all adjustments) with legacy fallback
   // Live      : observedListingPrice — single observed value, NOT a series
-  const marketPrices = days.map((d) => d.baseDailyPrice ?? d.basePrice);
-  const suggestedPrices = days.map((d) => {
-    if (pricingMode === "refundable") {
-      return d.effectiveDailyPriceRefundable ?? d.refundablePrice;
-    }
-    return d.effectiveDailyPriceNonRefundable ?? d.nonRefundablePrice;
-  });
+  const marketPrices    = days.map((d) => d.baseDailyPrice ?? d.basePrice);
+  const suggestedPrices = days.map((d) =>
+    pricingMode === "refundable"
+      ? (d.effectiveDailyPriceRefundable    ?? d.refundablePrice)
+      : (d.effectiveDailyPriceNonRefundable ?? d.nonRefundablePrice)
+  );
 
   // ── Scaling — include live price so marker stays in-frame ──────
   const livePrice = observedListingPrice ?? null;
@@ -59,7 +66,7 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
   ];
   const rawMin = Math.min(...allPrices);
   const rawMax = Math.max(...allPrices);
-  const padding = (rawMax - rawMin) * 0.12 || 10;
+  const padding = (rawMax - rawMin) * 0.14 || 12;
   const minY = Math.max(0, rawMin - padding);
   const maxY = rawMax + padding;
   const rangeY = maxY - minY;
@@ -71,22 +78,27 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
     return PAD_T + CHART_H - ((price - minY) / rangeY) * CHART_H;
   }
 
-  // ── Polyline point strings ─────────────────────────────────────
-  const marketPoints = days
-    .map((_, i) => `${toX(i).toFixed(1)},${toY(marketPrices[i]).toFixed(1)}`)
-    .join(" ");
-  const suggestedPoints = days
-    .map((_, i) => `${toX(i).toFixed(1)},${toY(suggestedPrices[i]).toFixed(1)}`)
-    .join(" ");
+  // ── Polyline strings ───────────────────────────────────────────
+  const marketPoints    = days.map((_, i) => `${toX(i).toFixed(1)},${toY(marketPrices[i]).toFixed(1)}`).join(" ");
+  const suggestedPoints = days.map((_, i) => `${toX(i).toFixed(1)},${toY(suggestedPrices[i]).toFixed(1)}`).join(" ");
 
-  // ── Y-axis ticks (4 levels) ────────────────────────────────────
-  const yTicks = Array.from({ length: 4 }, (_, i) => {
-    const raw = minY + (rangeY * i) / 3;
+  // ── Area fill path under suggested line ───────────────────────
+  const chartBottom = (PAD_T + CHART_H).toFixed(1);
+  const suggestedAreaPath = [
+    `M ${toX(0).toFixed(1)},${chartBottom}`,
+    ...days.map((_, i) => `L ${toX(i).toFixed(1)},${toY(suggestedPrices[i]).toFixed(1)}`),
+    `L ${toX(days.length - 1).toFixed(1)},${chartBottom}`,
+    "Z",
+  ].join(" ");
+
+  // ── Y-axis ticks (3 — fewer lines = more breathing room) ──────
+  const yTicks = Array.from({ length: 3 }, (_, i) => {
+    const raw = minY + (rangeY * (i + 0.5)) / 3;
     const val = roundTick(raw);
     return { val, y: toY(val) };
   });
 
-  // ── X-axis labels (first, every 7th, last) ─────────────────────
+  // ── X-axis labels ──────────────────────────────────────────────
   const xLabels: { i: number; label: string }[] = [];
   for (let i = 0; i < days.length; i++) {
     if (i === 0 || i % 7 === 0 || i === days.length - 1) {
@@ -99,98 +111,56 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
   }
 
   // ── Summary stats ──────────────────────────────────────────────
-  const avgMarket = avg(marketPrices);
+  const avgMarket    = avg(marketPrices);
   const avgSuggested = avg(suggestedPrices);
-  const avgGap = avgSuggested - avgMarket;
+  const avgGap       = avgSuggested - avgMarket;
 
-  // ── Live price marker position ─────────────────────────────────
-  // Rendered at the first day (index 0) — live price is always observed on the report start date.
-  const liveDotX = toX(0);
-  const liveDotY = livePrice != null ? toY(livePrice) : null;
+  // ── Live marker position (day 0 = report start date) ──────────
+  const liveDotX   = toX(0);
+  const liveDotY   = livePrice != null ? toY(livePrice) : null;
+  const hasLive    = livePrice != null && liveDotY != null;
 
-  // Label goes right of the dot; nudge up slightly for readability.
-  // If dot is very close to top edge, push label down instead.
-  const labelAboveDot = liveDotY != null && liveDotY > PAD_T + 18;
-  const labelY = liveDotY != null
-    ? (labelAboveDot ? liveDotY - 12 : liveDotY + 20)
-    : 0;
-  const labelX = liveDotX + 11;
-  // Approximate label width based on text content
-  const labelText = livePrice != null ? `Live $${livePrice}` : "";
-  const labelW = 8 * labelText.length + 8; // rough char estimate
-
-  const hasLiveMarker = livePrice != null && liveDotY != null;
+  // Label floats above or below the dot depending on available space
+  const labelText  = hasLive ? `$${livePrice}` : "";
+  const labelW     = Math.max(28, labelText.length * 6.5 + 10);
+  const labelAbove = liveDotY != null && liveDotY > PAD_T + 22;
+  const labelY     = liveDotY != null ? (labelAbove ? liveDotY - 15 : liveDotY + 10) : 0;
+  const labelX     = liveDotX + 10;
 
   return (
-    <div className="rounded-2xl border border-border bg-white p-5 sm:p-6">
-      {/* ── Header + summary ── */}
-      <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-        <div>
-          <h3 className="text-base font-bold tracking-tight">Market vs Suggested Price</h3>
-          <p className="mt-0.5 text-xs text-foreground/40">
-            {pricingMode === "refundable" ? "Refundable" : "Non-refundable"} · {days.length} days
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
-          <span>
-            <span className="text-foreground/40">Avg market </span>
-            <span className="font-semibold text-foreground/65">${avgMarket}</span>
-          </span>
-          <span>
-            <span className="text-foreground/40">Avg suggested </span>
-            <span className="font-semibold text-indigo-600">${avgSuggested}</span>
-          </span>
-          <span>
-            <span className="text-foreground/40">Gap </span>
-            <span
-              className={`font-semibold ${
-                avgGap > 0
-                  ? "text-indigo-500"
-                  : avgGap < 0
-                  ? "text-emerald-600"
-                  : "text-foreground/50"
-              }`}
-            >
-              {avgGap > 0 ? "+" : ""}{avgGap}
-            </span>
-          </span>
-          {hasLiveMarker && (
-            <span>
-              <span className="text-foreground/40">Live </span>
-              <span className="font-semibold text-amber-600">${livePrice}</span>
-            </span>
-          )}
-        </div>
+    <div className="rounded-2xl border border-border bg-white">
+
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between gap-3 px-5 pt-5 sm:px-6 sm:pt-5">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/30">
+          Market vs Suggested
+        </p>
+        <span className="text-[10px] text-foreground/30">
+          {pricingMode === "refundable" ? "Refundable" : "Non-refundable"} · {days.length} days
+        </span>
       </div>
 
       {/* ── SVG chart ── */}
-      <div className="w-full overflow-hidden">
+      <div className="mt-2 w-full overflow-hidden">
         <svg
           viewBox={`0 0 ${W} ${H}`}
           preserveAspectRatio="xMidYMid meet"
           className="w-full"
-          style={{ height: "auto", minHeight: 130, maxHeight: 210 }}
-          aria-label="Market vs Suggested Price line chart"
+          style={{ height: "auto", minHeight: 110, maxHeight: 196 }}
+          aria-label="Market vs Suggested Price chart"
           role="img"
         >
           {/* Y-axis grid lines + labels */}
           {yTicks.map(({ val, y }) => (
             <g key={val}>
-              <line
-                x1={PAD_L}
-                y1={y}
-                x2={W - PAD_R}
-                y2={y}
-                stroke="#f3f4f6"
-                strokeWidth="1"
-              />
+              <line x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} stroke={C_GRID} strokeWidth="1" />
               <text
-                x={PAD_L - 7}
+                x={PAD_L - 6}
                 y={y}
                 textAnchor="end"
                 dominantBaseline="middle"
-                fontSize="10"
-                fill="#9ca3af"
+                fontSize="9"
+                fill={C_AXIS}
               >
                 ${val}
               </text>
@@ -203,7 +173,7 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
             y1={PAD_T + CHART_H}
             x2={W - PAD_R}
             y2={PAD_T + CHART_H}
-            stroke="#e5e7eb"
+            stroke={C_BASELINE}
             strokeWidth="1"
           />
 
@@ -212,81 +182,76 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
             <text
               key={i}
               x={toX(i)}
-              y={H - 6}
+              y={H - 4}
               textAnchor="middle"
-              fontSize="10"
-              fill="#9ca3af"
+              fontSize="9"
+              fill={C_AXIS}
             >
               {label}
             </text>
           ))}
 
-          {/* Market price line (slate) */}
+          {/* Suggested area fill — very subtle, adds depth without noise */}
+          <path d={suggestedAreaPath} fill={C_SUGGESTED} opacity="0.05" />
+
+          {/* Market line — light, receding */}
           <polyline
             points={marketPoints}
             fill="none"
-            stroke="#94a3b8"
-            strokeWidth="2"
+            stroke={C_MARKET}
+            strokeWidth="1.75"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
 
-          {/* Suggested price line (indigo) — visual primary */}
+          {/* Suggested line — charcoal, visual primary */}
           <polyline
             points={suggestedPoints}
             fill="none"
-            stroke="#6366f1"
+            stroke={C_SUGGESTED}
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
 
-          {/* Data point dots — only for shorter ranges to avoid clutter */}
+          {/* Data point dots — short ranges only */}
           {days.length <= 14 &&
             days.map((_, i) => (
-              <circle key={`m${i}`} cx={toX(i)} cy={toY(marketPrices[i])} r="2.5" fill="#94a3b8" />
+              <circle key={`m${i}`} cx={toX(i)} cy={toY(marketPrices[i])} r="2" fill={C_MARKET} />
             ))}
           {days.length <= 14 &&
             days.map((_, i) => (
-              <circle key={`s${i}`} cx={toX(i)} cy={toY(suggestedPrices[i])} r="3" fill="#6366f1" />
+              <circle key={`s${i}`} cx={toX(i)} cy={toY(suggestedPrices[i])} r="2.75" fill={C_SUGGESTED} />
             ))}
 
-          {/* ── Current live price marker ───────────────────────────────
-              Single observed value at start-date position.
-              Rendered as a distinct amber marker — NOT a trend line.
-          ────────────────────────────────────────────────────────────── */}
-          {hasLiveMarker && liveDotY != null && (
+          {/* ── Live price marker ───────────────────────────────────────
+              Single observed value at start-date (day 0).
+              Uses brand accent — NOT a trend line.
+          ──────────────────────────────────────────────────────────── */}
+          {hasLive && liveDotY != null && (
             <g aria-label={`Current live price: $${livePrice}`}>
-              {/* Outer pulse ring */}
-              <circle
-                cx={liveDotX}
-                cy={liveDotY}
-                r={9}
-                fill="none"
-                stroke="#f59e0b"
-                strokeWidth="1.5"
-                opacity="0.35"
-              />
-              {/* Inner solid dot */}
-              <circle cx={liveDotX} cy={liveDotY} r={4.5} fill="#f59e0b" />
-              {/* Label bubble */}
+              {/* Outer halo */}
+              <circle cx={liveDotX} cy={liveDotY} r={8} fill={C_LIVE} opacity="0.13" />
+              {/* Core dot */}
+              <circle cx={liveDotX} cy={liveDotY} r={4} fill={C_LIVE} />
+              {/* Price label */}
               <rect
                 x={labelX}
-                y={labelY - 6}
+                y={labelY}
                 width={labelW}
-                height={14}
-                rx={3.5}
-                fill="#fef3c7"
-                stroke="#fcd34d"
+                height={13}
+                rx={3}
+                fill="white"
+                stroke={C_LIVE}
                 strokeWidth="0.75"
               />
               <text
                 x={labelX + labelW / 2}
-                y={labelY + 4.5}
+                y={labelY + 9}
                 textAnchor="middle"
-                fontSize="9"
+                fontSize="8.5"
                 fontWeight="600"
-                fill="#92400e"
+                fill={C_LIVE}
               >
                 {labelText}
               </text>
@@ -295,31 +260,69 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
         </svg>
       </div>
 
-      {/* ── Legend ── */}
-      <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs text-foreground/50">
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block rounded-full bg-slate-400"
-            style={{ width: 16, height: 2 }}
-          />
-          Market
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span
-            className="inline-block rounded-full bg-indigo-500"
-            style={{ width: 16, height: 2.5 }}
-          />
-          Suggested
-        </span>
-        {hasLiveMarker && (
+      {/* ── Stats + legend ── */}
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-t border-border px-5 py-4 sm:px-6">
+
+        {/* Stat pills */}
+        <div className="flex flex-wrap gap-x-5 gap-y-2.5">
+          <div>
+            <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
+              Market avg
+            </p>
+            <p className="mt-0.5 text-sm font-medium text-foreground/50">${avgMarket}</p>
+          </div>
+          <div>
+            <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
+              Suggested avg
+            </p>
+            <p className="mt-0.5 text-sm font-semibold text-foreground/80">${avgSuggested}</p>
+          </div>
+          <div>
+            <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
+              Gap
+            </p>
+            <p className={`mt-0.5 text-sm font-medium ${avgGap === 0 ? "text-foreground/35" : "text-foreground/55"}`}>
+              {avgGap > 0 ? "+" : ""}{avgGap}
+            </p>
+          </div>
+          {hasLive && (
+            <div>
+              <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
+                Your live
+              </p>
+              <p className="mt-0.5 text-sm font-semibold" style={{ color: C_LIVE }}>
+                ${livePrice}
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Legend */}
+        <div className="flex items-center gap-4 text-[11px] text-foreground/35">
           <span className="flex items-center gap-1.5">
             <span
-              className="inline-block rounded-full bg-amber-400"
-              style={{ width: 8, height: 8 }}
+              className="inline-block rounded-full"
+              style={{ width: 14, height: 1.75, background: C_MARKET }}
             />
-            Current live
+            Market
           </span>
-        )}
+          <span className="flex items-center gap-1.5">
+            <span
+              className="inline-block rounded-full"
+              style={{ width: 14, height: 2.5, background: C_SUGGESTED }}
+            />
+            Suggested
+          </span>
+          {hasLive && (
+            <span className="flex items-center gap-1.5">
+              <span
+                className="inline-block rounded-full"
+                style={{ width: 7, height: 7, background: C_LIVE }}
+              />
+              Live
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );
