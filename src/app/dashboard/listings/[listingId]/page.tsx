@@ -6,6 +6,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
+import { PriceLineChart } from "@/components/dashboard/PriceLineChart";
 import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
@@ -188,21 +189,16 @@ export default function ListingHistoryPage() {
     }
   }
 
-  // Derive the source-of-truth report: nightly live_analysis > manual/rerun live_analysis.
-  // forecast_snapshot rows are ignored and never selected.
+  // Board source-of-truth: latest scheduled nightly ready report ONLY.
+  // manual / rerun / custom reports are history only — never shown on the board.
   const latestReadyRow = useMemo(() => {
-    let nightly: { row: HistoryRow; report: ReportSnapshot } | null = null;
-    let live: { row: HistoryRow; report: ReportSnapshot } | null = null;
     for (const row of rows) {
       const report = getReport(row);
-      if (!report || report.status !== "ready") continue;
-      if (row.trigger === "scheduled" && !nightly) {
-        nightly = { row, report };
-      } else if (!live) {
-        live = { row, report };
+      if (report?.status === "ready" && row.trigger === "scheduled") {
+        return { row, report };
       }
     }
-    return nightly ?? live ?? null;
+    return null;
   }, [rows]);
 
   async function handleSavePinnedComps() {
@@ -289,9 +285,9 @@ export default function ListingHistoryPage() {
       <div className="space-y-4">
         <div className="flex items-center gap-2.5">
           <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-            {latestReadyRow?.row.trigger === "scheduled" ? "Nightly Market Update" : "Current Market Board"}
+            Nightly Market Report
           </p>
-          {latestReadyRow?.row.trigger === "scheduled" && (
+          {latestReadyRow && (
             <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[9px] font-semibold text-teal-700">
               Nightly
             </span>
@@ -374,6 +370,15 @@ export default function ListingHistoryPage() {
               );
             })()}
 
+            {/* Price line chart */}
+            {latestReadyRow.report.result_calendar &&
+              latestReadyRow.report.result_calendar.length > 1 && (
+                <PriceLineChart
+                  calendar={latestReadyRow.report.result_calendar}
+                  pricingMode={pricingMode}
+                />
+              )}
+
             {/* 30-day pricing calendar */}
             {latestReadyRow.report.result_calendar &&
               latestReadyRow.report.result_calendar.length > 0 && (
@@ -402,9 +407,9 @@ export default function ListingHistoryPage() {
           </>
         ) : (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-12 text-center">
-            <p className="text-sm font-medium text-foreground/50">No market data yet</p>
+            <p className="text-sm font-medium text-foreground/50">No nightly report yet</p>
             <p className="mt-1 text-xs text-foreground/35">
-              Run a live analysis below to see your first nightly market board.
+              This board updates nightly. Custom analyses are saved to history below and don&apos;t replace this board.
             </p>
           </div>
         )}

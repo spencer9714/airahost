@@ -124,24 +124,18 @@ export async function GET() {
     }
 
     // ── Per-listing selection ────────────────────────────────────
-    // Priority order for source-of-truth report (live_analysis only):
-    //   1. Most recent ready report with trigger=scheduled (nightly live_analysis)
-    //   2. Most recent ready live_analysis (manual/rerun)
-    //   forecast_snapshot rows are ignored — no longer a dashboard concept.
+    // source-of-truth = latest scheduled nightly ready report ONLY.
+    // manual / rerun / custom reports are never selected as the board report;
+    // they live in recentReports / history only.
     //
-    // latestJobByListing  → most recent link of ANY status (for active-job banner)
-    // nightlyReadyByListing → most recent scheduled+live_analysis ready
-    // liveReadyByListing  → most recent live_analysis ready (manual/rerun)
-    // latestNightlyJobByListing → most recent scheduled link (any status) for activeNightlyJob
+    // latestJobByListing        → most recent link of ANY status (for active-job banner)
+    // nightlyReadyByListing     → most recent scheduled ready report (board source-of-truth)
+    // latestNightlyJobByListing → most recent scheduled link any status (for activeNightlyJob)
     const latestJobByListing = new Map<
       string,
       { row: ListingReportLinkRow; report: ReportSnapshot | null }
     >();
     const nightlyReadyByListing = new Map<
-      string,
-      { row: ListingReportLinkRow; report: ReportSnapshot }
-    >();
-    const liveReadyByListing = new Map<
       string,
       { row: ListingReportLinkRow; report: ReportSnapshot }
     >();
@@ -163,42 +157,32 @@ export async function GET() {
         latestJobByListing.set(id, { row, report });
       }
 
-      // Most recent scheduled link overall (for activeNightlyJob)
+      // Most recent scheduled link overall (for activeNightlyJob banner)
       if (row.trigger === "scheduled" && !latestNightlyJobByListing.has(id)) {
         latestNightlyJobByListing.set(id, { row, report });
       }
 
-      if (report?.status === "ready" && report.report_type !== "forecast_snapshot") {
-        // Only consider live_analysis reports. forecast_snapshot rows are ignored.
-        if (row.trigger === "scheduled" && !nightlyReadyByListing.has(id)) {
-          nightlyReadyByListing.set(id, { row, report });
-        } else if (!liveReadyByListing.has(id)) {
-          // manual, rerun, or duplicate scheduled entry
-          liveReadyByListing.set(id, { row, report });
-        }
+      // Board source-of-truth: scheduled + ready only. forecast_snapshot ignored.
+      if (
+        row.trigger === "scheduled" &&
+        report?.status === "ready" &&
+        report.report_type !== "forecast_snapshot" &&
+        !nightlyReadyByListing.has(id)
+      ) {
+        nightlyReadyByListing.set(id, { row, report });
       }
     }
 
     const listingsWithLatest = listingRows.map((listing) => {
       const nightlyEntry = nightlyReadyByListing.get(listing.id);
-      const liveEntry = liveReadyByListing.get(listing.id);
       const jobEntry = latestJobByListing.get(listing.id);
       const nightlyJobEntry = latestNightlyJobByListing.get(listing.id);
 
-      // Source-of-truth: nightly (scheduled+live_analysis) > live_analysis (manual/rerun)
-      // forecast_snapshot rows are never selected.
-      const readyEntry = nightlyEntry ?? liveEntry ?? null;
+      // Board source-of-truth: nightly scheduled ready report only. Null if none exists.
+      const readyEntry = nightlyEntry ?? null;
 
-      // runType: what kind of report is currently displayed
-      const runType: "nightly" | "live" | null = nightlyEntry
-        ? "nightly"
-        : liveEntry
-        ? "live"
-        : null;
-
-      // fallbackReason: why we aren't showing a nightly (only relevant when live is shown)
-      const fallbackReason: "no_nightly" | null =
-        !nightlyEntry && liveEntry ? "no_nightly" : null;
+      // runType: "nightly" when there is a ready nightly report, null otherwise.
+      const runType: "nightly" | null = nightlyEntry ? "nightly" : null;
 
       const jobStatus = (jobEntry?.report?.status ?? null) as
         | "queued"
@@ -231,14 +215,12 @@ export async function GET() {
 
       return {
         ...listing,
-        // latestReport: source-of-truth ready report (nightly > live_analysis)
+        // latestReport: latest scheduled nightly ready report only. Null if none.
         latestReport: readyEntry?.report ?? null,
         latestLinkedAt: readyEntry?.row.created_at ?? null,
         latestTrigger: readyEntry?.row.trigger ?? null,
-        // runType: semantic label for what is being shown
+        // runType: "nightly" when board has data, null when empty.
         runType,
-        // fallbackReason: why nightly isn't shown (for dashboard state banners)
-        fallbackReason,
         // lastNightlyCompletedAt: when nightly last produced a ready report
         lastNightlyCompletedAt: nightlyEntry?.report?.completed_at ?? null,
         activeJob,

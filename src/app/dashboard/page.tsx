@@ -7,6 +7,7 @@ import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import { RecommendationBanner } from "@/components/dashboard/RecommendationBanner";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
+import { PriceLineChart } from "@/components/dashboard/PriceLineChart";
 import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
@@ -101,10 +102,8 @@ type ListingRow = {
   latestReport: LatestReport;
   latestLinkedAt: string | null;
   latestTrigger: "scheduled" | "manual" | "rerun" | null;
-  /** Semantic source type currently displayed: nightly > live */
-  runType: "nightly" | "live" | null;
-  /** Why nightly isn't shown — set to "no_nightly" when showing a manual live analysis */
-  fallbackReason: "no_nightly" | null;
+  /** "nightly" when the board has a ready nightly report, null otherwise */
+  runType: "nightly" | null;
   /** When the nightly last completed successfully */
   lastNightlyCompletedAt: string | null;
   activeJob: ActiveJob | null;
@@ -489,15 +488,10 @@ export default function DashboardPage() {
                 <div className="flex items-center justify-between px-0.5">
                   <div className="flex items-center gap-2.5">
                     <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-                      {activeListing.runType === "nightly" ? "Nightly Market Report" : "30-Day Market Board"}
+                      Nightly Market Report
                     </p>
-                    {/* Report type badge */}
-                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                      activeListing.runType === "nightly"
-                        ? "bg-teal-50 text-teal-700"
-                        : "bg-blue-50 text-blue-600"
-                    }`}>
-                      {activeListing.runType === "nightly" ? "Nightly" : "Live"}
+                    <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-teal-700">
+                      Nightly
                     </span>
                   </div>
                   <button
@@ -596,14 +590,6 @@ export default function DashboardPage() {
                     )}
                   </div>
                 )}
-                {/* Fallback banner: no nightly yet, showing manual live analysis data */}
-                {activeListing.runType === "live" && activeListing.fallbackReason === "no_nightly" && !activeListing.activeNightlyJob && (
-                  <div className="flex items-center gap-3 rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-xs font-medium text-blue-600">
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400" />
-                    Showing your last live analysis. Nightly auto-reports will appear here once the scheduler runs.
-                  </div>
-                )}
-
                 {/* ── Price summary ── */}
                 <RecommendationBanner
                   listingName={activeListing.name}
@@ -645,7 +631,15 @@ export default function DashboardPage() {
                   observedListingPrice={activeSummary.observedListingPrice ?? null}
                 />
 
-                {/* ── 14-day pricing calendar ── */}
+                {/* ── Price line chart ── */}
+                {activeCalendar.length > 1 && (
+                  <PriceLineChart
+                    calendar={activeCalendar}
+                    pricingMode={pricingMode}
+                  />
+                )}
+
+                {/* ── 30-day pricing calendar ── */}
                 {activeCalendar.length > 0 && (
                   <PricingHeatmap
                     calendar={activeCalendar}
@@ -666,26 +660,26 @@ export default function DashboardPage() {
                 />
               </div>
             ) : activeListing ? (
-              /* Listing selected but no ready report */
+              /* Listing selected but no nightly ready report */
               <div className="space-y-4">
                 {/* Panel header */}
                 <div className="px-0.5">
                   <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-                    30-Day Market Board
+                    Nightly Market Report
                   </p>
                 </div>
 
-                {activeListing.activeJob?.status === "running" ||
-                activeListing.activeJob?.status === "queued" ? (
+                {activeListing.activeNightlyJob?.status === "running" ||
+                activeListing.activeNightlyJob?.status === "queued" ? (
                   <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-14 text-center">
-                    <span className="mb-3 inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-                    <p className="text-sm font-semibold text-foreground/60">Analysis in progress</p>
+                    <span className="mb-3 inline-block h-2 w-2 animate-pulse rounded-full bg-teal-400" />
+                    <p className="text-sm font-semibold text-foreground/60">Nightly report generating</p>
                     <p className="mt-1 text-sm text-foreground/40">
-                      Your market analysis will appear here when complete.
+                      Your 30-day market board will appear here once complete.
                     </p>
-                    {activeListing.activeJob.shareId && (
+                    {activeListing.activeNightlyJob.shareId && (
                       <Link
-                        href={`/r/${activeListing.activeJob.shareId}`}
+                        href={`/r/${activeListing.activeNightlyJob.shareId}`}
                         className="mt-3 text-xs font-medium text-accent hover:underline"
                       >
                         View live progress →
@@ -693,13 +687,13 @@ export default function DashboardPage() {
                     )}
                   </div>
                 ) : (
-                  /* No report at all — show CTA with date picker */
+                  /* No nightly report yet — explain board semantics, offer custom analysis */
                   <div className="rounded-2xl border border-dashed border-border bg-white p-8">
                     <p className="text-sm font-semibold text-foreground/60">
-                      No market data yet for {activeListing.name}
+                      No nightly report yet for {activeListing.name}
                     </p>
                     <p className="mt-1 text-sm text-foreground/40">
-                      Run a custom analysis to see market pricing for this listing.
+                      This board updates nightly. Custom analyses are saved to history and don&apos;t replace the board.
                     </p>
                     <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end">
                       <label className="flex-1 space-y-1.5">
@@ -736,9 +730,9 @@ export default function DashboardPage() {
                         {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
                       </button>
                     </div>
-                    {activeListing.activeJob?.status === "error" && (
+                    {activeListing.activeNightlyJob?.status === "error" && (
                       <p className="mt-3 text-xs text-rose-600">
-                        Last analysis failed. Adjust dates or try again.
+                        Last nightly report failed. It will retry on the next scheduled run.
                       </p>
                     )}
                   </div>
@@ -801,9 +795,20 @@ export default function DashboardPage() {
                     <p className="truncate text-sm font-medium text-foreground">
                       {item.listingName}
                     </p>
-                    <p className="text-xs text-foreground/35">
-                      {new Date(item.linkedAt).toLocaleDateString()}
-                    </p>
+                    <div className="mt-0.5 flex items-center gap-1.5">
+                      <span className={`rounded-full px-1.5 py-px text-[10px] font-semibold ${
+                        item.trigger === "scheduled"
+                          ? "bg-teal-50 text-teal-700"
+                          : item.trigger === "manual"
+                          ? "bg-blue-50 text-blue-600"
+                          : "bg-gray-100 text-gray-500"
+                      }`}>
+                        {item.trigger === "scheduled" ? "Nightly" : item.trigger === "manual" ? "Custom" : "Rerun"}
+                      </span>
+                      <span className="text-xs text-foreground/35">
+                        {new Date(item.linkedAt).toLocaleDateString()}
+                      </span>
+                    </div>
                   </div>
                   <div className="ml-4 flex shrink-0 items-center gap-3">
                     {(() => {

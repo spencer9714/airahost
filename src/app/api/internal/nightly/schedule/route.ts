@@ -16,8 +16,14 @@
  * Auth:
  *   Authorization: Bearer <INTERNAL_API_SECRET>
  *
+ * Optional body (for local / single-listing testing):
+ *   { "listingId": "<uuid>" }           — schedule one listing only
+ *   { "listingIds": ["<uuid>", ...] }   — schedule a subset of listings
+ *   (omit body entirely to schedule all listings — default scheduler behaviour)
+ *
  * Response (always 200 for scheduler-safe retries):
- *   { scheduled, skipped, total, results[] }
+ *   { filter, scheduled, skipped, total, results[] }
+ *   filter: "all" | { listingIds: string[] }
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -82,11 +88,12 @@ type SkipReason =
   | "duplicate_pending"
   | "duplicate_recent_ready"
   | "no_attributes"
-  | "api_error";
+  | "api_error"
+  | "not_found";
 
 type ResultEntry = {
   listingId: string;
-  listingName: string;
+  listingName: string | null;
   scheduled: boolean;
   reason?: SkipReason | "created";
   reportId?: string;
@@ -108,21 +115,84 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // ── Parse optional listing filter from body ─────────────────────────────
+  // Always read the raw text first — don't rely on content-type alone.
+  // Empty string → no body → full schedule (default).
+  let filterIds: string[] | null = null; // null = schedule all (default)
+  const rawBody = (await req.text()).trim();
+
+  if (rawBody.length > 0) {
+    let body: unknown;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body" },
+        { status: 400 }
+      );
+    }
+
+    if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+      const b = body as Record<string, unknown>;
+
+      if ("listingId" in b) {
+        if (typeof b.listingId !== "string" || !b.listingId) {
+          return NextResponse.json(
+            { error: "listingId must be a non-empty string" },
+            { status: 400 }
+          );
+        }
+        filterIds = [b.listingId];
+      } else if ("listingIds" in b) {
+        if (!Array.isArray(b.listingIds) || (b.listingIds as unknown[]).length === 0) {
+          return NextResponse.json(
+            { error: "listingIds must be a non-empty array" },
+            { status: 400 }
+          );
+        }
+        if (!(b.listingIds as unknown[]).every((x) => typeof x === "string" && x.length > 0)) {
+          return NextResponse.json(
+            { error: "listingIds must contain non-empty strings" },
+            { status: 400 }
+          );
+        }
+        filterIds = b.listingIds as string[];
+      }
+      // body present but neither field → treat as full run
+    } else if (body !== null) {
+      return NextResponse.json(
+        { error: "Body must be a JSON object" },
+        { status: 400 }
+      );
+    }
+  }
+
+  const isFiltered = filterIds !== null;
+
   const admin = getSupabaseAdmin();
   const dedupCutoff = new Date(
     Date.now() - DEDUP_HOURS * 60 * 60 * 1000
   ).toISOString();
   const now = new Date().toISOString();
   const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
-  console.log(`[nightly/schedule] target_env=${targetEnv} job_lane=nightly`);
+  console.log(
+    `[nightly/schedule] target_env=${targetEnv} job_lane=nightly` +
+    (isFiltered ? ` filter=partial listingIds=${filterIds!.join(",")}` : " filter=all")
+  );
 
-  // ── Fetch all saved listings ─────────────────────────────────────────────
-  const { data: listings, error: listingsErr } = await admin
+  // ── Fetch listings (all, or filtered subset) ─────────────────────────────
+  let listingsQuery = admin
     .from("saved_listings")
     .select(
       "id, name, user_id, input_address, input_attributes, default_discount_policy, listing_timezone"
     )
     .order("created_at", { ascending: false });
+
+  if (isFiltered) {
+    listingsQuery = listingsQuery.in("id", filterIds!);
+  }
+
+  const { data: listings, error: listingsErr } = await listingsQuery;
 
   if (listingsErr) {
     console.error("[nightly/schedule] listings fetch failed", listingsErr);
@@ -133,7 +203,29 @@ export async function POST(req: NextRequest) {
   }
 
   if (!listings || listings.length === 0) {
-    return NextResponse.json({ scheduled: 0, skipped: 0, total: 0, results: [] });
+    return NextResponse.json({
+      filter: isFiltered ? { listingIds: filterIds } : "all",
+      scheduled: 0,
+      skipped: 0,
+      total: 0,
+      results: [],
+    });
+  }
+
+  // ── Report not-found IDs when a filter was requested ────────────────────
+  const results: ResultEntry[] = [];
+  if (isFiltered) {
+    const foundIds = new Set(listings.map((l) => l.id));
+    for (const reqId of filterIds!) {
+      if (!foundIds.has(reqId)) {
+        results.push({
+          listingId: reqId,
+          listingName: null,
+          scheduled: false,
+          reason: "not_found",
+        });
+      }
+    }
   }
 
   // ── Per-listing dedup check: any scheduled job in last DEDUP_HOURS hours ──
@@ -159,8 +251,6 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Create jobs ───────────────────────────────────────────────────────────
-  const results: ResultEntry[] = [];
-
   for (const listing of listings) {
     if (recentlyScheduled.has(listing.id)) {
       results.push({
@@ -290,16 +380,18 @@ export async function POST(req: NextRequest) {
 
   const scheduled = results.filter((r) => r.scheduled).length;
   const skipped = results.length - scheduled;
+  const filter = isFiltered ? { listingIds: filterIds } : "all";
 
   console.log(
-    `[nightly/schedule] per-listing timezone dates: ` +
-      `${scheduled} scheduled, ${skipped} skipped of ${listings.length} listings`
+    `[nightly/schedule] done: filter=${isFiltered ? `partial(${filterIds!.join(",")})` : "all"} ` +
+      `${scheduled} scheduled, ${skipped} skipped of ${results.length} total`
   );
 
   return NextResponse.json({
+    filter,
     scheduled,
     skipped,
-    total: listings.length,
+    total: results.length,
     results,
   });
 }

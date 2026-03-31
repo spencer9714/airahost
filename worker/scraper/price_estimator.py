@@ -197,6 +197,7 @@ def _build_daily_transparent_result(
     extraction_warnings: List[str],
     discount_evidence: Optional[Dict[str, Any]] = None,
     benchmark_info: Optional[Dict[str, Any]] = None,
+    target_price_confidence: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -372,6 +373,9 @@ def _build_daily_transparent_result(
             "amenities": target.amenities or [],
             "rating": target.rating,
             "reviews": target.reviews,
+            "nightlyPrice": target.nightly_price,
+            "currency": target.currency or "USD",
+            "priceConfidence": target_price_confidence,
         },
         "queryCriteria": query_criteria,
         "compsSummary": {
@@ -648,6 +652,27 @@ def run_scrape(
             extraction_warnings.extend(warnings)
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
 
+            # Step 1b: Capture date-aware target price (non-fatal)
+            _target_price_confidence: Optional[str] = None
+            try:
+                from worker.scraper.target_extractor import extract_nightly_price_from_listing_page
+                _tp, _tp_conf = extract_nightly_price_from_listing_page(
+                    page, listing_url, checkin, checkout
+                )
+                if _tp is not None:
+                    target.nightly_price = _tp
+                    _target_price_confidence = _tp_conf
+                    logger.info(
+                        f"[run_scrape] Target price captured: ${_tp} (confidence={_tp_conf})"
+                    )
+                else:
+                    logger.warning(
+                        f"[run_scrape] Target price capture returned None (confidence={_tp_conf})"
+                    )
+                    _target_price_confidence = _tp_conf
+            except Exception as _tp_exc:
+                logger.warning(f"[run_scrape] Target price capture failed (non-fatal): {_tp_exc}")
+
             # Phase 3B: coordinate priority — page-extracted > geocoded > none.
             # extract_target_spec() may populate target.lat/lng from JSON-LD geo.
             # Only fall back to geocoded coords when the page gave us nothing.
@@ -834,6 +859,7 @@ def run_scrape(
                     all_day_results,
                     preferred_comps,
                 ),
+                target_price_confidence=_target_price_confidence,
             )
             # Phase 3B: surface page-extracted coords so main.py can write them back to DB
             if target.lat is not None and target.lng is not None:

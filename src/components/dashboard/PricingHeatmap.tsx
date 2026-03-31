@@ -6,37 +6,6 @@ interface Props {
   onModeChange: (mode: "refundable" | "nonRefundable") => void;
 }
 
-function Sparkline({ values, min, max }: { values: number[]; min: number; max: number }) {
-  if (values.length < 2) return null;
-  const W = 80;
-  const H = 24;
-  const range = max - min || 1;
-  const points = values
-    .map((v, i) => {
-      const x = (i / (values.length - 1)) * W;
-      const y = H - ((v - min) / range) * H;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  return (
-    <svg
-      width={W}
-      height={H}
-      viewBox={`0 0 ${W} ${H}`}
-      className="text-accent/70 overflow-visible"
-      aria-hidden="true"
-    >
-      <polyline
-        points={points}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 function tileBg(_ratio: number, isWeekend: boolean): string {
   return isWeekend ? "bg-gray-50/70 border-gray-100/80" : "bg-white border-gray-100/60";
@@ -66,7 +35,6 @@ export function PricingHeatmap({ calendar, pricingMode, onModeChange }: Props) {
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <h3 className="text-base font-bold tracking-tight">30-Day Market Board</h3>
-          <Sparkline values={basePrices} min={minP} max={maxP} />
         </div>
         <div className="inline-flex gap-0.5 rounded-lg border border-border bg-gray-100/80 p-0.5">
           <button
