@@ -88,6 +88,8 @@ type SkipReason =
   | "duplicate_pending"
   | "duplicate_recent_ready"
   | "no_attributes"
+  | "missing_listing_url"
+  | "invalid_listing_url"
   | "api_error"
   | "not_found";
 
@@ -279,13 +281,23 @@ export async function POST(req: NextRequest) {
       continue;
     }
 
-    // Determine input mode — mirror /api/reports logic
-    const VALID_INPUT_MODES = ["url", "criteria", "criteria-by-city", "criteria-by-zip"];
-    const savedInputMode = VALID_INPUT_MODES.includes(attrs.inputMode as string)
-      ? (attrs.inputMode as string)
-      : "criteria";
+    // Nightly eligibility gate: only listings with a valid Airbnb room URL.
+    // Address-only listings fall through to criteria mode in the worker and
+    // produce stable errors — exclude them here instead.
     const listingUrl = (attrs.listingUrl as string | null | undefined) ?? null;
-    const inputMode = listingUrl ? "url" : savedInputMode;
+    const isValidListingUrl = !!(listingUrl && listingUrl.includes("airbnb.com/rooms/"));
+    if (!isValidListingUrl) {
+      results.push({
+        listingId: listing.id,
+        listingName: listing.name,
+        scheduled: false,
+        reason: listingUrl ? "invalid_listing_url" : "missing_listing_url",
+      });
+      continue;
+    }
+
+    // inputMode is always "url" here — ineligible listings are skipped above.
+    const inputMode = "url";
 
     const discountPolicy = (listing.default_discount_policy ?? {}) as Record<string, unknown>;
 

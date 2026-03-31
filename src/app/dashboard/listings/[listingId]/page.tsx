@@ -63,7 +63,7 @@ type ListingDetail = {
   id: string;
   name: string;
   input_address: string;
-  input_attributes?: { preferredComps?: PreferredComp[] | null };
+  input_attributes?: { preferredComps?: PreferredComp[] | null; listingUrl?: string | null };
 };
 
 type StatusFilter = "all" | "ready" | "error";
@@ -405,14 +405,28 @@ export default function ListingHistoryPage() {
               }
             />
           </>
-        ) : (
-          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-12 text-center">
-            <p className="text-sm font-medium text-foreground/50">No nightly report yet</p>
-            <p className="mt-1 text-xs text-foreground/35">
-              This board updates nightly. Custom analyses are saved to history below and don&apos;t replace this board.
-            </p>
-          </div>
-        )}
+        ) : (() => {
+          const hasListingUrl = !!(listing?.input_attributes?.listingUrl?.includes("airbnb.com/rooms/"));
+          return hasListingUrl ? (
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-white px-8 py-12 text-center">
+              <p className="text-sm font-medium text-foreground/50">No nightly report yet</p>
+              <p className="mt-1 text-xs text-foreground/35">
+                This board updates nightly. Custom analyses are saved to history below and don&apos;t replace this board.
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-amber-100 bg-amber-50/50 px-6 py-5">
+              <p className="text-sm font-semibold text-amber-800">Nightly tracking not active</p>
+              <p className="mt-1 text-xs text-amber-700/80">
+                This listing doesn&apos;t have an Airbnb listing URL, so daily market updates are not scheduled.
+                You can still run a <strong>Custom Analysis</strong> below at any time.
+              </p>
+              <p className="mt-2 text-xs text-amber-600/70">
+                To enable nightly tracking, add your Airbnb listing URL in the listing settings on the dashboard.
+              </p>
+            </div>
+          );
+        })()}
       </div>
 
       {/* ════════════════════════════════════════

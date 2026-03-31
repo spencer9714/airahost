@@ -384,6 +384,22 @@ export function ListingCard({
         {/* ── Co-Host Feature ── */}
         <CoHostFeature listing={{ id: listing.id, name: listing.name, input_attributes: listing.input_attributes }} />
 
+        {/* ── Nightly tracking nudge ──────────────────────────────────────
+            Only shown when no valid Airbnb listing URL is set.
+            Not a hard error — just an onboarding prompt.
+        ─────────────────────────────────────────────────────────────────── */}
+        {!isEligible && !editOpen && (
+          <div
+            className="mx-4 mb-3 rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2.5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-[11px] font-semibold text-amber-700">Nightly updates not active</p>
+            <p className="mt-0.5 text-[11px] text-amber-600/80">
+              Add your Airbnb listing URL to enable daily market tracking.
+            </p>
+          </div>
+        )}
+
         {/* ── Pricing alerts row ───────────────────────────────────────────
             Visible in normal card view (hidden when edit panel is open,
             since the panel already has alert settings).
