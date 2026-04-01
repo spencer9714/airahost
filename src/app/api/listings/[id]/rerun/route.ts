@@ -121,6 +121,17 @@ export async function POST(
         { status: 400 }
       );
     }
+    // 30-day inclusive window limit
+    const rangeDays =
+      Math.round(
+        (new Date(dates.endDate).getTime() - new Date(dates.startDate).getTime()) / 86400000
+      ) + 1;
+    if (rangeDays > 30) {
+      return NextResponse.json(
+        { error: "Custom analysis can cover up to 30 days." },
+        { status: 400 }
+      );
+    }
 
     const isCacheHit = cachedSummary !== null;
     const shareId = generateShareId();

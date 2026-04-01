@@ -165,11 +165,29 @@ export default function DashboardPage() {
   });
   const [customEnd, setCustomEnd] = useState(() => {
     const d = new Date();
-    d.setDate(d.getDate() + 30);
+    d.setDate(d.getDate() + 29); // tomorrow start + 29 days end = 30 inclusive days
     return d.toISOString().split("T")[0];
   });
   // Today's date string used as the minimum selectable date across all date inputs.
   const todayStr = new Date().toISOString().split("T")[0];
+  // Max end date = start + 29 days (30 inclusive days total).
+  const maxCustomEnd = customStart
+    ? (() => {
+        const d = new Date(customStart + "T12:00:00Z");
+        d.setUTCDate(d.getUTCDate() + 29);
+        return d.toISOString().split("T")[0];
+      })()
+    : "";
+  // True when the selected range exceeds 30 inclusive days.
+  const customRangeInvalid =
+    !!(customStart && customEnd) &&
+    Math.round(
+      (new Date(customEnd + "T12:00:00Z").getTime() -
+        new Date(customStart + "T12:00:00Z").getTime()) /
+        86400000
+    ) +
+      1 >
+      30;
 
   const loadDashboardData = useCallback(async () => {
     setLoading(true);
@@ -230,6 +248,12 @@ export default function DashboardPage() {
     const todayStr = new Date().toISOString().split("T")[0];
     if (dates.startDate < todayStr) return;
     if (dates.endDate < dates.startDate) return;
+    // 30-day limit
+    const days =
+      Math.round(
+        (new Date(dates.endDate).getTime() - new Date(dates.startDate).getTime()) / 86400000
+      ) + 1;
+    if (days > 30) return;
 
     setRerunningId(listingId);
     try {
@@ -543,13 +567,14 @@ export default function DashboardPage() {
                           type="date"
                           value={customEnd}
                           min={customStart || todayStr}
+                          max={maxCustomEnd}
                           onChange={(e) => setCustomEnd(e.target.value)}
                           className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
                         />
                       </label>
                       <button
                         type="button"
-                        disabled={!customStart || !customEnd || customStart < todayStr || rerunningId === activeListing.id}
+                        disabled={!customStart || !customEnd || customStart < todayStr || customRangeInvalid || rerunningId === activeListing.id}
                         onClick={() => {
                           void handleRunAnalysis(activeListing.id, {
                             startDate: customStart,
@@ -561,6 +586,11 @@ export default function DashboardPage() {
                         {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
                       </button>
                     </div>
+                    {customRangeInvalid && (
+                      <p className="mt-2 text-xs text-amber-700">
+                        Select a date range of 30 days or less.
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -724,13 +754,14 @@ export default function DashboardPage() {
                           type="date"
                           value={customEnd}
                           min={customStart || todayStr}
+                          max={maxCustomEnd}
                           onChange={(e) => setCustomEnd(e.target.value)}
                           className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
                         />
                       </label>
                       <button
                         type="button"
-                        disabled={!customStart || !customEnd || customStart < todayStr || rerunningId === activeListing.id}
+                        disabled={!customStart || !customEnd || customStart < todayStr || customRangeInvalid || rerunningId === activeListing.id}
                         onClick={() => {
                           void handleRunAnalysis(activeListing.id, {
                             startDate: customStart,
@@ -742,6 +773,11 @@ export default function DashboardPage() {
                         {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
                       </button>
                     </div>
+                    {customRangeInvalid && (
+                      <p className="mt-2 text-xs text-amber-700">
+                        Select a date range of 30 days or less.
+                      </p>
+                    )}
                     {activeListing.activeNightlyJob?.status === "error" && (
                       <p className="mt-3 text-xs text-rose-600">
                         Last nightly report failed. It will retry on the next scheduled run.

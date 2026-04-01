@@ -56,6 +56,18 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
+      // 30-day inclusive window limit
+      const rangeDays =
+        Math.round(
+          (new Date(dateRange.endDate).getTime() - new Date(dateRange.startDate).getTime()) /
+            86400000
+        ) + 1;
+      if (rangeDays > 30) {
+        return NextResponse.json(
+          { error: "Custom analysis can cover up to 30 days." },
+          { status: 400 }
+        );
+      }
 
       const authClient = await getSupabaseServer();
       const {

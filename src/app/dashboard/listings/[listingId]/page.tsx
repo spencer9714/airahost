@@ -83,10 +83,28 @@ export default function ListingHistoryPage() {
   const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
   const [customEnd, setCustomEnd] = useState(() => {
     const d = new Date();
-    d.setDate(d.getDate() + 30);
+    d.setDate(d.getDate() + 29); // today start + 29 days end = 30 inclusive days
     return d.toISOString().split("T")[0];
   });
   const [isRunningCustom, setIsRunningCustom] = useState(false);
+  // Max end date = start + 29 days (30 inclusive days total).
+  const maxCustomEnd = customStart
+    ? (() => {
+        const d = new Date(customStart + "T12:00:00Z");
+        d.setUTCDate(d.getUTCDate() + 29);
+        return d.toISOString().split("T")[0];
+      })()
+    : "";
+  // True when the selected range exceeds 30 inclusive days.
+  const customRangeInvalid =
+    !!(customStart && customEnd) &&
+    Math.round(
+      (new Date(customEnd + "T12:00:00Z").getTime() -
+        new Date(customStart + "T12:00:00Z").getTime()) /
+        86400000
+    ) +
+      1 >
+      30;
 
   // Preferred comps state (list)
   const [showPinnedComps, setShowPinnedComps] = useState(false);
@@ -168,6 +186,14 @@ export default function ListingHistoryPage() {
     if (!customStart || !customEnd) return;
     if (customStart < todayStr) return;
     if (customEnd < customStart) return;
+    // 30-day limit
+    const days =
+      Math.round(
+        (new Date(customEnd + "T12:00:00Z").getTime() -
+          new Date(customStart + "T12:00:00Z").getTime()) /
+          86400000
+      ) + 1;
+    if (days > 30) return;
     setIsRunningCustom(true);
     try {
       const res = await fetch(`/api/listings/${listingId}/rerun`, {
@@ -487,19 +513,25 @@ export default function ListingHistoryPage() {
                 type="date"
                 value={customEnd}
                 min={customStart || todayStr}
+                max={maxCustomEnd}
                 onChange={(e) => setCustomEnd(e.target.value)}
                 className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
               />
             </label>
             <button
               type="button"
-              disabled={isRunningCustom || !customStart || !customEnd || customStart < todayStr}
+              disabled={isRunningCustom || !customStart || !customEnd || customStart < todayStr || customRangeInvalid}
               onClick={handleRunCustomAnalysis}
               className="shrink-0 rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
             >
               {isRunningCustom ? "Starting…" : "Run analysis"}
             </button>
           </div>
+          {customRangeInvalid && (
+            <p className="mt-2 text-xs text-amber-700">
+              Select a date range of 30 days or less.
+            </p>
+          )}
         </div>
       </div>
 
