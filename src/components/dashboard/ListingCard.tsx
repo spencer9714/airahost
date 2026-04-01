@@ -367,27 +367,6 @@ export function ListingCard({
             <p className="truncate text-base font-semibold tracking-tight text-foreground">
               {cleanTitle(displayTitle)}
             </p>
-            {/* ── Airbnb listing link / setup hint ── */}
-            {isEligible ? (
-              <a
-                href={normalizeAirbnbUrl(attrs.listingUrl!)}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                title="Open on Airbnb"
-                className="ml-auto shrink-0 text-[10px] font-medium text-foreground/30 hover:text-foreground/60 transition-colors"
-              >
-                ↗ Airbnb
-              </a>
-            ) : (
-              <span
-                onClick={(e) => { e.stopPropagation(); setEditOpen(true); setDraftName(displayTitle); }}
-                title="Add your Airbnb listing URL"
-                className="ml-auto shrink-0 cursor-pointer text-[10px] font-medium text-foreground/25 hover:text-foreground/50 transition-colors"
-              >
-                + URL
-              </span>
-            )}
           </div>
           {factsLine && (
             <p className="mt-1.5 truncate pl-3.5 text-sm font-medium text-foreground/35">

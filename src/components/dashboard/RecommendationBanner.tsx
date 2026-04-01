@@ -9,6 +9,8 @@ interface Props {
   reportShareId: string;
   listingName: string;
   airbnbListingLabel?: string | null;
+  /** Valid Airbnb room URL for the target listing. When present, the label becomes a clickable link. */
+  airbnbListingUrl?: string | null;
   propertyMeta: {
     propertyType: string;
     guests: number;
@@ -110,6 +112,7 @@ export function RecommendationBanner({
   recommendedPrice,
   reportShareId,
   airbnbListingLabel,
+  airbnbListingUrl,
   propertyMeta,
   benchmarkMeta,
   onManageBenchmarks,
@@ -304,9 +307,20 @@ export function RecommendationBanner({
             <Button size="md">View full report</Button>
           </Link>
           {airbnbListingLabel ? (
-            <p className="max-w-[240px] text-right text-xs font-medium text-foreground/40">
-              {airbnbListingLabel}
-            </p>
+            airbnbListingUrl ? (
+              <a
+                href={airbnbListingUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="max-w-60 text-right text-xs font-medium text-foreground/40 hover:text-foreground/65 transition-colors"
+              >
+                {airbnbListingLabel} ↗
+              </a>
+            ) : (
+              <p className="max-w-60 text-right text-xs font-medium text-foreground/40">
+                {airbnbListingLabel}
+              </p>
+            )
           ) : null}
         </div>
       </div>

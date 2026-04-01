@@ -386,16 +386,26 @@ export default function DashboardPage() {
   const firstName = userName ? userName.split(" ")[0] : null;
   const activeAirbnbListingLabel = activeListing
     ? (() => {
+        const rawUrl =
+          activeListing.input_attributes.listingUrl ??
+          activeListing.input_attributes.listing_url ??
+          null;
         const airbnbId =
-          extractAirbnbListingId(
-            activeListing.input_attributes.listingUrl ??
-              activeListing.input_attributes.listing_url ??
-              null
-          ) ??
+          extractAirbnbListingId(rawUrl) ??
           activeListing.input_address.match(/Airbnb Listing #(\d+)/i)?.[1] ??
           null;
-
         return airbnbId ? `Airbnb Listing #${airbnbId}` : null;
+      })()
+    : null;
+
+  // Valid Airbnb room URL for the active listing — used to make the label clickable.
+  const activeAirbnbListingUrl = activeListing
+    ? (() => {
+        const rawUrl =
+          activeListing.input_attributes.listingUrl ??
+          activeListing.input_attributes.listing_url ??
+          null;
+        return rawUrl?.includes("airbnb.com/rooms/") ? rawUrl : null;
       })()
     : null;
 
@@ -594,6 +604,7 @@ export default function DashboardPage() {
                 <RecommendationBanner
                   listingName={activeListing.name}
                   airbnbListingLabel={activeAirbnbListingLabel}
+                  airbnbListingUrl={activeAirbnbListingUrl}
                   summary={activeSummary}
                   recommendedPrice={activeSummary.recommendedPrice ?? null}
                   reportShareId={activeReport.share_id}
