@@ -906,23 +906,49 @@ def extract_nightly_price_from_listing_page(
             )
             time.sleep(2.0)
 
-    # Wait for the booking widget to render (React hydration happens after domcontentloaded).
-    # Expanded selector list covers Airbnb's evolving data-testid attributes.
-    # If the widget doesn't appear within 6s, proceed anyway — L1/L3 may still succeed.
+    # Phase 1 — wait for the booking widget container to appear in the DOM.
+    # React hydration happens after domcontentloaded, so the data-testid elements
+    # may not yet be present immediately after page.goto() returns.
+    _WIDGET_SELECTOR = ", ".join([
+        '[data-testid="book-it-default"]',
+        '[data-testid="book-it-sidebar"]',
+        '[data-testid="price-block"]',
+        '[data-testid="book-it-price-breakdown"]',
+        '[data-section-id="BOOK_IT_SIDEBAR"]',
+        '[data-section-id="BOOK_IT_DEFAULT"]',
+    ])
     try:
-        page.wait_for_selector(
-            ", ".join([
-                '[data-testid="book-it-default"]',
-                '[data-testid="book-it-sidebar"]',
-                '[data-testid="price-block"]',
-                '[data-testid="book-it-price-breakdown"]',
-                '[data-section-id="BOOK_IT_SIDEBAR"]',
-                '[data-section-id="BOOK_IT_DEFAULT"]',
-            ]),
-            timeout=6000,
-        )
+        page.wait_for_selector(_WIDGET_SELECTOR, timeout=6000)
     except Exception:
-        page.wait_for_timeout(1000)  # short fixed wait as last resort before extraction
+        pass  # Widget may not appear (blocked, unavailable dates) — proceed anyway
+
+    # Phase 2 — wait for actual price content to load inside the widget.
+    # After the widget container mounts, Airbnb fires a pricing XHR that can take
+    # 2–4 s to resolve. Without this step the widget is present but shows an empty
+    # or loading-skeleton state ("CHECK-IN ... loading"), causing both L2 DOM scan
+    # and the regex fallback to find nothing.
+    # We poll (up to 8 s) until a dollar price ($X) appears; stop as soon as it does.
+    _PRICE_READY_JS = r"""() => {
+        const sels = [
+            '[data-testid="book-it-default"]',
+            '[data-testid="book-it-sidebar"]',
+            '[data-testid="price-block"]',
+            '[data-testid="book-it-price-breakdown"]',
+            '[data-section-id="BOOK_IT_SIDEBAR"]',
+            '[data-section-id="BOOK_IT_DEFAULT"]',
+        ];
+        for (const sel of sels) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const t = (el.innerText || el.textContent || '').trim();
+            if (t && /\$\s*\d{2,}/.test(t)) return true;
+        }
+        return false;
+    }"""
+    try:
+        page.wait_for_function(_PRICE_READY_JS, timeout=8000, polling=400)
+    except Exception:
+        pass  # Timeout or price genuinely absent — proceed to extraction layers
 
     # ── Layer 1: ld+json structured data (high confidence) ────────────────
     # Airbnb's LodgingBusiness schema includes rating and address but deliberately
