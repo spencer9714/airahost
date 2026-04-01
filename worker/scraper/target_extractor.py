@@ -646,17 +646,22 @@ _BOOKING_WIDGET_PRICE_JS = """
 
   // Matches a bare dollar amount with no surrounding text: "$465", "$1,234"
   const BARE_PRICE_RE = /^\\$?\\s*(\\d{1,4}(?:,\\d{3})*)\\s*$/;
-  // Matches price+night label in various Airbnb formats:
+  // Matches price+night label in various Airbnb formats (compound, within one element):
   //   "$X /night"  |  "$X per night"  |  "$X for 1 night"  |  "$X for N nights"
   const PRICE_NIGHT_RE = /\\$\\s*(\\d{1,4}(?:,\\d{3})?)\\s*(?:\\/\\s*night|per\\s+night|for\\s+\\d+\\s+nights?)/i;
   // Detects multi-night trip totals: "for N nights" where N >= 2
   const TRIP_NIGHTS_RE = /for\\s+(\\d+)\\s+nights?/i;
+  // Matches a "/night" or "per night" label in isolation (used for sibling scan)
+  const PER_NIGHT_LABEL_RE = /^\\/\\s*night$|^per\\s+night$/i;
 
-  // Find the booking widget container (most-to-least specific).
+  // Find the booking widget container — expanded selector list for Airbnb's evolving markup.
   const WIDGET_SELS = [
     '[data-testid="book-it-default"]',
+    '[data-testid="book-it-sidebar"]',
     '[data-testid="price-block"]',
     '[data-testid="book-it-price-breakdown"]',
+    '[data-section-id="BOOK_IT_SIDEBAR"]',
+    '[data-section-id="BOOK_IT_DEFAULT"]',
   ];
   let widget = null;
   for (const s of WIDGET_SELS) {
@@ -668,8 +673,8 @@ _BOOKING_WIDGET_PRICE_JS = """
   // All inline elements in the widget, in document order.
   const allEls = Array.from(widget.querySelectorAll('span, b, strong, em'));
 
-  // Find the smallest elements whose innerText matches the "$X /night" compound
-  // pattern (now including "for N nights" trip-total format).
+  // ── Primary approach: find containers with compound "$X /night" in innerText ──
+  // Works when price and unit are in the same element (older Airbnb markup).
   const nightContainers = [];
   for (const el of allEls) {
     const t = (el.innerText || '').trim();
@@ -686,7 +691,6 @@ _BOOKING_WIDGET_PRICE_JS = """
   const seenEls = new Set();
 
   for (const container of nightContainers.slice(0, 3)) {
-    // Detect trip-night count from the container text (e.g. "for 2 nights").
     const containerText = (container.innerText || '').trim();
     const tripM = containerText.match(TRIP_NIGHTS_RE);
     const tripNights = tripM ? parseInt(tripM[1], 10) : 1;
@@ -694,7 +698,6 @@ _BOOKING_WIDGET_PRICE_JS = """
     const priceEls = container.querySelectorAll('span, b, strong, em');
     for (const el of priceEls) {
       if (seenEls.has(el)) continue;
-      // Skip elements that contain block children (they are containers, not leaves).
       if (el.querySelectorAll('div, p, h1, h2, h3').length > 0) continue;
       const text = (el.textContent || '').trim();
       const m = text.match(BARE_PRICE_RE);
@@ -709,13 +712,54 @@ _BOOKING_WIDGET_PRICE_JS = """
         domIndex: allEls.indexOf(el),
       });
     }
-    if (candidates.length > 0) break; // stop at the most-specific container
+    if (candidates.length > 0) break;
   }
 
+  // ── Fallback: sibling scan for split price + "/night" label ──────────────
+  // Modern Airbnb often renders price and "/night" as separate sibling spans:
+  //   <span>$465</span><span>/night</span>
+  // Neither span alone matches PRICE_NIGHT_RE, so nightContainers is empty.
+  // Fix: find "/night" label elements, then scan siblings/cousins for bare prices.
+  if (candidates.length === 0) {
+    const allWidgetEls = Array.from(widget.querySelectorAll('span, b, strong, em, div'));
+    for (const labelEl of allWidgetEls) {
+      const lt = (labelEl.innerText || labelEl.textContent || '').trim();
+      if (!PER_NIGHT_LABEL_RE.test(lt)) continue;
+
+      // Collect price candidates from: parent's children, grandparent's children.
+      const searchRoots = [labelEl.parentElement, labelEl.parentElement?.parentElement]
+        .filter(Boolean);
+      for (const root of searchRoots) {
+        const priceEls = root.querySelectorAll('span, b, strong, em');
+        for (const el of priceEls) {
+          if (seenEls.has(el)) continue;
+          if (el.querySelectorAll('div, p').length > 0) continue;
+          const text = (el.textContent || '').trim();
+          const m = text.match(BARE_PRICE_RE);
+          if (!m) continue;
+          const value = parseFloat(m[1].replace(',', ''));
+          if (isNaN(value) || value < 10 || value > 150000) continue;
+          seenEls.add(el);
+          candidates.push({
+            value,
+            tripNights: 1,
+            strikethrough: isLineThrough(el),
+            domIndex: candidates.length,
+          });
+        }
+        if (candidates.length > 0) break;
+      }
+      if (candidates.length > 0) break;
+    }
+  }
+
+  const widgetText = (widget.innerText || '').substring(0, 800);
   return {
     candidates,
     hasWidget: true,
-    widgetText: (widget.innerText || '').substring(0, 600),
+    widgetText,
+    nightContainersFound: nightContainers.length,
+    usedSiblingFallback: candidates.length > 0 && nightContainers.length === 0,
   };
 }
 """
@@ -854,16 +898,22 @@ def extract_nightly_price_from_listing_page(
             time.sleep(2.0)
 
     # Wait for the booking widget to render (React hydration happens after domcontentloaded).
-    # L2 DOM selectors are client-rendered; the ld+json (L1) and body text (L3) are server-
-    # rendered and available immediately, but the widget is the most reliable price source.
+    # Expanded selector list covers Airbnb's evolving data-testid attributes.
     # If the widget doesn't appear within 6s, proceed anyway — L1/L3 may still succeed.
     try:
         page.wait_for_selector(
-            '[data-testid="book-it-default"], [data-testid="price-block"]',
+            ", ".join([
+                '[data-testid="book-it-default"]',
+                '[data-testid="book-it-sidebar"]',
+                '[data-testid="price-block"]',
+                '[data-testid="book-it-price-breakdown"]',
+                '[data-section-id="BOOK_IT_SIDEBAR"]',
+                '[data-section-id="BOOK_IT_DEFAULT"]',
+            ]),
             timeout=6000,
         )
     except Exception:
-        page.wait_for_timeout(800)  # short fixed wait as last resort before extraction
+        page.wait_for_timeout(1000)  # short fixed wait as last resort before extraction
 
     # ── Layer 1: ld+json structured data (high confidence) ────────────────
     # Airbnb's LodgingBusiness schema includes rating and address but deliberately
@@ -925,10 +975,17 @@ def extract_nightly_price_from_listing_page(
             dom_candidates: List[Dict[str, Any]] = dom_result.get("candidates") or []
             widget_text: str = dom_result.get("widgetText") or ""
             has_widget: bool = bool(dom_result.get("hasWidget"))
+            night_containers_found: int = dom_result.get("nightContainersFound", -1)
+            used_sibling_fallback: bool = bool(dom_result.get("usedSiblingFallback"))
 
             logger.debug(
-                f"[benchmark] DOM candidates (n={len(dom_candidates)}): {dom_candidates}"
+                f"[price_extract] L2 widget={has_widget} "
+                f"nightContainers={night_containers_found} "
+                f"siblingFallback={used_sibling_fallback} "
+                f"candidates={len(dom_candidates)} url={listing_url}"
             )
+            if dom_candidates:
+                logger.debug(f"[price_extract] L2 candidates: {dom_candidates}")
 
             selected = select_nightly_price_from_candidates(dom_candidates)
             if selected is not None:
@@ -936,30 +993,41 @@ def extract_nightly_price_from_listing_page(
                 non_st_count = sum(1 for c in dom_candidates if not c.get("strikethrough"))
                 st_count = sum(1 for c in dom_candidates if c.get("strikethrough"))
                 logger.info(
-                    f"[benchmark] DOM price=${price} kind={price_kind} "
-                    f"(non_strikethrough={non_st_count}, strikethrough={st_count}) "
+                    f"[price_extract] L2 DOM price=${price} kind={price_kind} "
+                    f"(non_st={non_st_count} st={st_count} sibling={used_sibling_fallback}) "
                     f"from {listing_url}"
                 )
                 return price, "medium"
 
             # Structured scan found nothing — fall back to regex on the widget text.
-            # When multiple prices are present prefer the LAST match (the discounted
-            # price follows the original in the DOM / text order).
             if widget_text:
                 text_matches = _extract_text_price_matches(widget_text)
                 if text_matches:
                     text_matches.sort(key=lambda x: x[0])
-                    price = text_matches[-1][1]  # last = discounted if discount present
+                    price = text_matches[-1][1]
                     logger.info(
-                        f"[benchmark] DOM widget-text fallback price=${price} "
+                        f"[price_extract] L2 widget-text regex price=${price} "
                         f"(last of {len(text_matches)} matches) from {listing_url}"
                     )
                     return price, "medium"
+                else:
+                    # Diagnostic: log what widgetText actually contained so we can
+                    # see whether the price is there in a non-matching format.
+                    logger.warning(
+                        f"[price_extract] L2 widget found but regex found 0 matches. "
+                        f"widgetText[:300]={widget_text[:300]!r} url={listing_url}"
+                    )
+            else:
+                if has_widget:
+                    logger.warning(
+                        f"[price_extract] L2 widget found but widgetText is empty. "
+                        f"url={listing_url}"
+                    )
 
             if not has_widget:
-                logger.debug(
-                    f"[benchmark] No booking widget found via data-testid, "
-                    "falling through to body-text layer"
+                logger.warning(
+                    f"[price_extract] L2 no booking widget found via any data-testid. "
+                    f"url={listing_url}"
                 )
     except Exception as exc:
         logger.debug(f"[benchmark] Layer 2 JS evaluation failed: {exc}")
@@ -992,14 +1060,18 @@ def extract_nightly_price_from_listing_page(
         pre_breakdown = [(pos, p) for pos, p in body_matches if pos < cutoff]
         chosen_pos, price = (pre_breakdown[-1] if pre_breakdown else body_matches[-1])
         logger.info(
-            f"[benchmark] Body-text price=${price} "
+            f"[price_extract] L3 body-text price=${price} "
             f"(last of {len(body_matches)} matches, pre_breakdown={len(pre_breakdown)}) "
             f"from {listing_url}"
         )
         return price, "low"
 
+    # All three layers failed — log a body-text sample so the next run can diagnose
+    # whether the price IS present in the page but in a non-matching format, or
+    # whether the page returned an error/unavailable state.
     logger.warning(
-        f"[benchmark] Could not extract nightly price from listing page: {listing_url}"
+        f"[price_extract] All layers failed for {listing_url}. "
+        f"body[:400]={search_area[:400]!r}"
     )
     return None, "failed"
 
