@@ -4,26 +4,29 @@
  * Railway cron endpoint — call this once per day (e.g. 00:00 UTC).
  *
  * What it does:
- *   For every saved_listing, creates a live_analysis pricing_report covering
- *   the next 30 days (tomorrow → tomorrow + 29).  The worker processes it
- *   exactly like a manual live analysis — it scrapes fresh Airbnb market data
- *   using the listing's saved address, amenities, property type, and benchmark
- *   / comparable-list settings.
- *
- *   trigger = 'scheduled' on listing_reports distinguishes these from
- *   manual runs so the dashboard can label them "30-Day Market Report".
+ *   For every saved_listing with a valid Airbnb listing URL, creates a
+ *   live_analysis pricing_report covering the next 30 days (tomorrow →
+ *   tomorrow + 29).  trigger = 'scheduled' on listing_reports distinguishes
+ *   these from manual runs so the dashboard can label them "Nightly Market Report".
  *
  * Auth:
  *   Authorization: Bearer <INTERNAL_API_SECRET>
  *
  * Optional body (for local / single-listing testing):
- *   { "listingId": "<uuid>" }           — schedule one listing only
- *   { "listingIds": ["<uuid>", ...] }   — schedule a subset of listings
- *   (omit body entirely to schedule all listings — default scheduler behaviour)
+ *   { "listingId": "<uuid>" }              — schedule one listing only
+ *   { "listingIds": ["<uuid>", ...] }      — schedule a subset of listings
+ *   (omit body entirely to schedule all eligible listings — default behaviour)
+ *
+ * Local-dev force bypass:
+ *   { "listingId": "<uuid>", "force": true }
+ *   Skips the 23-hour dedup check for the specified listing(s).
+ *   Only allowed when WORKER_TARGET_ENV === "local".  Returns 400 in production.
+ *   Requires listingId / listingIds — "force: true" without a filter is rejected.
  *
  * Response (always 200 for scheduler-safe retries):
- *   { filter, scheduled, skipped, total, results[] }
+ *   { filter, force, scheduled, skipped, total, results[] }
  *   filter: "all" | { listingIds: string[] }
+ *   force: boolean
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -121,6 +124,7 @@ export async function POST(req: NextRequest) {
   // Always read the raw text first — don't rely on content-type alone.
   // Empty string → no body → full schedule (default).
   let filterIds: string[] | null = null; // null = schedule all (default)
+  let forceDedup = false;                 // bypass 23-hour dedup — local-only
   const rawBody = (await req.text()).trim();
 
   if (rawBody.length > 0) {
@@ -160,7 +164,30 @@ export async function POST(req: NextRequest) {
         }
         filterIds = b.listingIds as string[];
       }
-      // body present but neither field → treat as full run
+
+      // ── force: true — local-dev dedup bypass ───────────────────────────────
+      if (b.force === true) {
+        // Must have a listing filter — force on all listings is never allowed.
+        if (filterIds === null) {
+          return NextResponse.json(
+            { error: "force:true requires listingId or listingIds — cannot force-run all listings" },
+            { status: 400 }
+          );
+        }
+        // Only allowed when WORKER_TARGET_ENV === "local".
+        const targetEnvCheck = process.env.WORKER_TARGET_ENV ?? "production";
+        if (targetEnvCheck !== "local") {
+          return NextResponse.json(
+            {
+              error: `force:true is only allowed when WORKER_TARGET_ENV=local (current: ${targetEnvCheck})`,
+              hint: "Set WORKER_TARGET_ENV=local in .env.local to use the force bypass.",
+            },
+            { status: 400 }
+          );
+        }
+        forceDedup = true;
+      }
+      // body present but neither listingId/listingIds nor force → treat as full run
     } else if (body !== null) {
       return NextResponse.json(
         { error: "Body must be a JSON object" },
@@ -179,7 +206,8 @@ export async function POST(req: NextRequest) {
   const targetEnv = process.env.WORKER_TARGET_ENV ?? "production";
   console.log(
     `[nightly/schedule] target_env=${targetEnv} job_lane=nightly` +
-    (isFiltered ? ` filter=partial listingIds=${filterIds!.join(",")}` : " filter=all")
+    (isFiltered ? ` filter=partial listingIds=${filterIds!.join(",")}` : " filter=all") +
+    (forceDedup ? " force=true (dedup bypassed)" : "")
   );
 
   // ── Fetch listings (all, or filtered subset) ─────────────────────────────
@@ -254,7 +282,7 @@ export async function POST(req: NextRequest) {
 
   // ── Create jobs ───────────────────────────────────────────────────────────
   for (const listing of listings) {
-    if (recentlyScheduled.has(listing.id)) {
+    if (recentlyScheduled.has(listing.id) && !forceDedup) {
       results.push({
         listingId: listing.id,
         listingName: listing.name,
@@ -396,11 +424,13 @@ export async function POST(req: NextRequest) {
 
   console.log(
     `[nightly/schedule] done: filter=${isFiltered ? `partial(${filterIds!.join(",")})` : "all"} ` +
+      `force=${forceDedup} ` +
       `${scheduled} scheduled, ${skipped} skipped of ${results.length} total`
   );
 
   return NextResponse.json({
     filter,
+    force: forceDedup,
     scheduled,
     skipped,
     total: results.length,
