@@ -367,6 +367,27 @@ export function ListingCard({
             <p className="truncate text-base font-semibold tracking-tight text-foreground">
               {cleanTitle(displayTitle)}
             </p>
+            {/* ── Airbnb listing link / setup hint ── */}
+            {isEligible ? (
+              <a
+                href={normalizeAirbnbUrl(attrs.listingUrl!)}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                title="Open on Airbnb"
+                className="ml-auto shrink-0 text-[10px] font-medium text-foreground/30 hover:text-foreground/60 transition-colors"
+              >
+                ↗ Airbnb
+              </a>
+            ) : (
+              <span
+                onClick={(e) => { e.stopPropagation(); setEditOpen(true); setDraftName(displayTitle); }}
+                title="Add your Airbnb listing URL"
+                className="ml-auto shrink-0 cursor-pointer text-[10px] font-medium text-foreground/25 hover:text-foreground/50 transition-colors"
+              >
+                + URL
+              </span>
+            )}
           </div>
           {factsLine && (
             <p className="mt-1.5 truncate pl-3.5 text-sm font-medium text-foreground/35">
@@ -383,22 +404,6 @@ export function ListingCard({
 
         {/* ── Co-Host Feature ── */}
         <CoHostFeature listing={{ id: listing.id, name: listing.name, input_attributes: listing.input_attributes }} />
-
-        {/* ── Nightly tracking nudge ──────────────────────────────────────
-            Only shown when no valid Airbnb listing URL is set.
-            Not a hard error — just an onboarding prompt.
-        ─────────────────────────────────────────────────────────────────── */}
-        {!isEligible && !editOpen && (
-          <div
-            className="mx-4 mb-3 rounded-xl border border-amber-100 bg-amber-50/60 px-3 py-2.5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <p className="text-[11px] font-semibold text-amber-700">Nightly updates not active</p>
-            <p className="mt-0.5 text-[11px] text-amber-600/80">
-              Add your Airbnb listing URL to enable daily market tracking.
-            </p>
-          </div>
-        )}
 
         {/* ── Pricing alerts row ───────────────────────────────────────────
             Visible in normal card view (hidden when edit panel is open,

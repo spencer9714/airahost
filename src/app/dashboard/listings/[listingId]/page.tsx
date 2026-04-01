@@ -265,9 +265,32 @@ export default function ListingHistoryPage() {
         <Link href="/dashboard" className="text-sm text-muted hover:text-foreground">
           ← Dashboard
         </Link>
-        <h1 className="mt-2 text-2xl font-bold tracking-tight">
-          {listing?.name ?? "Listing"}
-        </h1>
+        <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h1 className="text-2xl font-bold tracking-tight">
+            {listing?.name ?? "Listing"}
+          </h1>
+          {(() => {
+            const url = listing?.input_attributes?.listingUrl;
+            const isValid = !!(url?.includes("airbnb.com/rooms/"));
+            if (isValid) {
+              return (
+                <a
+                  href={url!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-medium text-foreground/35 hover:text-foreground/65 transition-colors"
+                >
+                  ↗ View on Airbnb
+                </a>
+              );
+            }
+            return (
+              <span className="text-sm text-foreground/25">
+                No Airbnb URL set
+              </span>
+            );
+          })()}
+        </div>
         {listing?.input_address && (
           <p className="mt-0.5 text-sm text-muted">{listing.input_address}</p>
         )}
