@@ -45,6 +45,7 @@ from worker.scraper.day_query import (
     MAX_SAMPLE_QUERIES,
     PER_DAY_MAX_RETRIES,
     SAMPLE_THRESHOLD,
+    SIMILARITY_FLOOR_FALLBACK,
     compute_sample_dates,
     daterange_nights,
     detect_discount_evidence,
@@ -227,6 +228,9 @@ def _build_daily_transparent_result(
         1 for r in all_day_results
         if "low_comp_confidence" in (r.get("flags") or [])
     )
+    fallback_relaxed_days = sum(
+        1 for r in all_day_results if r.get("selection_mode") == "fallback_relaxed"
+    )
 
     def _date_add(date_str: str, n: int) -> str:
         """Add n days to a YYYY-MM-DD string, return YYYY-MM-DD."""
@@ -307,10 +311,10 @@ def _build_daily_transparent_result(
     for state in comparable_index.values():
         item = dict(state["item"])
         avg_score = state["score_sum"] / max(1, state["count"])
-        # Only surface comps whose average similarity passes the floor.
-        # top_comps already excludes below-floor comps, so this is a safety guard
-        # against boosted display scores that may have been stored in older entries.
-        if avg_score < SIMILARITY_FLOOR:
+        # Surface comps down to the fallback floor — comps used in fallback_relaxed
+        # days have scores between SIMILARITY_FLOOR_FALLBACK and SIMILARITY_FLOOR
+        # and should still appear in the comparable listings display.
+        if avg_score < SIMILARITY_FLOOR_FALLBACK:
             continue
         item["similarity"] = round(avg_score, 3)
         item["usedInPricingDays"] = state["count"]
@@ -390,7 +394,9 @@ def _build_daily_transparent_result(
             "missingDays": missing_days,
             "belowSimilarityFloor": total_below_floor,
             "filterFloor": SIMILARITY_FLOOR,
+            "fallbackFloor": SIMILARITY_FLOOR_FALLBACK,
             "lowCompConfidenceDays": low_comp_confidence_days,
+            "fallbackRelaxedDays": fallback_relaxed_days,
         },
         "priceDistribution": price_dist,
         "recommendedPrice": {
@@ -865,6 +871,8 @@ def run_scrape(
                     "top_comps": dr.top_comps,
                     "comp_prices": dr.comp_prices,
                     "error": dr.error,
+                    "selection_mode": dr.selection_mode,
+                    "pricing_confidence": dr.pricing_confidence,
                 })
 
             # Step 4: Discount evidence (debug only, if time permits)
@@ -1217,6 +1225,8 @@ def run_benchmark_scrape(
                     "top_comps": dr.top_comps,
                     "comp_prices": dr.comp_prices,
                     "error": dr.error,
+                    "selection_mode": dr.selection_mode,
+                    "pricing_confidence": dr.pricing_confidence,
                 })
 
             timings["total_ms"] = round((time.time() - start_time) * 1000)

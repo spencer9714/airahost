@@ -73,6 +73,13 @@ PER_DAY_MAX_RETRIES = 2
 DAY_SCROLL_ROUNDS = int(os.getenv("DAY_QUERY_SCROLL_ROUNDS", "2"))
 DAY_MAX_CARDS = int(os.getenv("DAY_QUERY_MAX_CARDS", "30"))
 
+# Relaxed similarity floor — used when the strict floor yields zero comps for a day.
+# Comps in range [SIMILARITY_FLOOR_FALLBACK, SIMILARITY_FLOOR) are accepted only when
+# the strict pool is empty, and the result is tagged selection_mode="fallback_relaxed"
+# with pricing_confidence="low".  Property-type hard gate and price-sanity outlier
+# rejection are both retained in fallback mode.  Price-band is skipped (sparse pool).
+SIMILARITY_FLOOR_FALLBACK: float = 0.25
+
 
 # ── Data structures ──────────────────────────────────────────────
 
@@ -93,6 +100,8 @@ class DayResult:
     flags: List[str] = field(default_factory=list)   # peak, low_demand, missing_data, interpolated, low_comp_confidence
     is_sampled: bool = True                          # False if interpolated
     is_weekend: bool = False
+    selection_mode: str = "strict"       # "strict" | "fallback_relaxed" | "strict_empty"
+    pricing_confidence: str = "high"     # "high" | "medium" | "low"
     price_distribution: Dict[str, Any] = field(default_factory=dict)
     top_comps: List[Dict[str, Any]] = field(default_factory=list)
     # All priced comps for this day (room_id -> nightly_price).
@@ -352,6 +361,46 @@ def estimate_base_price_for_date(
                 f"accommodates={target.accommodates} baths={target.baths}"
             )
 
+        # ── Graceful fallback: relaxed similarity floor ──────────────────────
+        # When the strict floor (SIMILARITY_FLOOR) leaves zero comps, try a
+        # conservatively lower threshold (SIMILARITY_FLOOR_FALLBACK) rather than
+        # failing the day outright.  The property-type hard gate (enforced inside
+        # filter_similar_candidates) and price-sanity outlier rejection are both
+        # retained.  Price band is skipped in fallback mode to avoid further
+        # shrinking an already sparse pool.
+        #
+        # "strict"          — normal path, used when strict floor has ≥1 comp
+        # "fallback_relaxed"— strict floor empty, fallback floor has ≥1 comp
+        # "strict_empty"    — both floors empty, day will have no price
+        selection_mode = "strict"
+        _using_fallback = False
+        if not above_floor and comps_scored:
+            fallback_pool = [
+                (c, s) for c, s in comps_scored
+                if raw_sim_scores.get(id(c), 0.0) >= SIMILARITY_FLOOR_FALLBACK
+            ]
+            if fallback_pool:
+                sample_scores = [
+                    round(raw_sim_scores.get(id(c), 0.0), 3)
+                    for c, _ in fallback_pool[:5]
+                ]
+                logger.info(
+                    f"[day_query] {checkin_str}: strict floor ({SIMILARITY_FLOOR}) empty — "
+                    f"fallback_relaxed: {len(fallback_pool)} comps survive "
+                    f"floor={SIMILARITY_FLOOR_FALLBACK} "
+                    f"(sample scores: {sample_scores})"
+                )
+                above_floor = fallback_pool
+                selection_mode = "fallback_relaxed"
+                _using_fallback = True
+            else:
+                logger.warning(
+                    f"[day_query] {checkin_str}: fallback floor {SIMILARITY_FLOOR_FALLBACK} also "
+                    f"empty — all {len(comps_scored)} comps below fallback floor; "
+                    f"day will have no price"
+                )
+                selection_mode = "strict_empty"
+
         # ── Layer 1 Price Sanity ──────────────────────────────────
         # Applied after the similarity floor.  Severe price outliers
         # (nd > 4.0) are excluded from pricing entirely; mild outliers
@@ -380,33 +429,44 @@ def estimate_base_price_for_date(
         # sits above the anchor's ±30% band.
         #
         # Anchor priority: primary preferred comp card price → target price → majority band.
+        #
+        # Skipped entirely in fallback_relaxed mode — the pool is already
+        # sparse and we cannot afford to narrow it further.
         price_band_excluded_count = 0
         price_band_anchor: Optional[float] = None
-        if pref_urls:
-            for c in comps:
-                if c.url and any(comp_urls_match(c.url, pu) for pu in pref_urls):
-                    if c.nightly_price and c.nightly_price > 0:
-                        price_band_anchor = float(c.nightly_price)
-                        break
-        if price_band_anchor is None and isinstance(target.nightly_price, (int, float)) and target.nightly_price > 0:
-            price_band_anchor = float(target.nightly_price)
         _band_excluded_ids: set = set()
-        try:
-            pricing_pool, _pb_excluded, _pb_info = apply_price_band_filter(
-                pricing_pool_pre_band, price_band_anchor
-            )
-            price_band_excluded_count = len(_pb_excluded)
-            _band_excluded_ids = {id(c) for c, _ in _pb_excluded}
-            if price_band_excluded_count:
-                logger.info(
-                    f"[day_query] {checkin_str}: price band "
-                    f"({_pb_info['anchor_mode']}) "
-                    f"${_pb_info.get('lower')}-${_pb_info.get('upper')} "
-                    f"excluded={price_band_excluded_count} from pricing"
-                )
-        except Exception as _pb_exc:
-            logger.warning(f"[day_query] Price band filter failed (non-fatal): {_pb_exc}")
+        if _using_fallback:
+            # Fallback mode: retain all price-sanity-accepted comps; no band filter.
             pricing_pool = pricing_pool_pre_band
+            logger.info(
+                f"[day_query] {checkin_str}: price band skipped (fallback_relaxed, "
+                f"pool={len(pricing_pool_pre_band)} comps)"
+            )
+        else:
+            if pref_urls:
+                for c in comps:
+                    if c.url and any(comp_urls_match(c.url, pu) for pu in pref_urls):
+                        if c.nightly_price and c.nightly_price > 0:
+                            price_band_anchor = float(c.nightly_price)
+                            break
+            if price_band_anchor is None and isinstance(target.nightly_price, (int, float)) and target.nightly_price > 0:
+                price_band_anchor = float(target.nightly_price)
+            try:
+                pricing_pool, _pb_excluded, _pb_info = apply_price_band_filter(
+                    pricing_pool_pre_band, price_band_anchor
+                )
+                price_band_excluded_count = len(_pb_excluded)
+                _band_excluded_ids = {id(c) for c, _ in _pb_excluded}
+                if price_band_excluded_count:
+                    logger.info(
+                        f"[day_query] {checkin_str}: price band "
+                        f"({_pb_info['anchor_mode']}) "
+                        f"${_pb_info.get('lower')}-${_pb_info.get('upper')} "
+                        f"excluded={price_band_excluded_count} from pricing"
+                    )
+            except Exception as _pb_exc:
+                logger.warning(f"[day_query] Price band filter failed (non-fatal): {_pb_exc}")
+                pricing_pool = pricing_pool_pre_band
 
         # No new_listing_discount per-day — discount applied at calendar level
         rec_price, rec_debug = recommend_price(
@@ -420,6 +480,15 @@ def estimate_base_price_for_date(
 
         prices = [c.nightly_price for c, _ in pricing_pool if c.nightly_price]
         comps_used = rec_debug.get("picked_n", 0)
+
+        # Pricing confidence: low when using fallback pool, medium when few comps used.
+        if selection_mode == "fallback_relaxed":
+            pricing_confidence = "low"
+        elif comps_used < 3:
+            pricing_confidence = "medium"
+        else:
+            pricing_confidence = "high"
+
         # top_comps uses the full above_floor list for transparency.
         # Comps excluded by price sanity are tagged priceOutlier=True;
         # comps excluded by price band are tagged priceBandExcluded=True.
@@ -435,7 +504,8 @@ def estimate_base_price_for_date(
 
         # Determine flags
         flags: List[str] = []
-        if rec_debug.get("low_comp_confidence", False):
+        # low_comp_confidence: always set for fallback_relaxed; also when pricing engine signals it.
+        if selection_mode == "fallback_relaxed" or rec_debug.get("low_comp_confidence", False):
             flags.append("low_comp_confidence")
         if rec_price is not None and len(prices) >= 3:
             overall_median = statistics.median(prices)
@@ -460,7 +530,9 @@ def estimate_base_price_for_date(
         logger.info(
             f"[day_query] {checkin_str}: comps={comps_collected} filtered={len(filtered_comps)} "
             f"below_floor={below_floor_count} band_excl={price_band_excluded_count} "
-            f"used={comps_used} median=${dist['median']} query_nights={query_nights_used}"
+            f"used={comps_used} median=${dist['median']} "
+            f"mode={selection_mode} confidence={pricing_confidence} "
+            f"query_nights={query_nights_used}"
         )
 
         return DayResult(
@@ -480,6 +552,8 @@ def estimate_base_price_for_date(
             price_distribution=dist,
             top_comps=top_comps,
             comp_prices=all_comp_prices,
+            selection_mode=selection_mode,
+            pricing_confidence=pricing_confidence,
         )
 
     except Exception as exc:
