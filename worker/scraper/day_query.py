@@ -336,6 +336,22 @@ def estimate_base_price_for_date(
         ]
         below_floor_count = len(comps_scored) - len(above_floor)
 
+        if below_floor_count > 0:
+            all_scores = [s for _, s in comps_scored]
+            logger.info(
+                f"[day_query] {checkin_str}: similarity — "
+                f"below_floor={below_floor_count}/{len(comps_scored)} "
+                f"(floor={SIMILARITY_FLOOR}) "
+                f"score_range=[{min(all_scores):.3f}, {max(all_scores):.3f}] "
+                f"score_mean={sum(all_scores)/len(all_scores):.3f}"
+            )
+        if not above_floor:
+            logger.warning(
+                f"[day_query] {checkin_str}: ALL {len(comps_scored)} comps below similarity floor "
+                f"— target: type={target.property_type!r} bedrooms={target.bedrooms} "
+                f"accommodates={target.accommodates} baths={target.baths}"
+            )
+
         # ── Layer 1 Price Sanity ──────────────────────────────────
         # Applied after the similarity floor.  Severe price outliers
         # (nd > 4.0) are excluded from pricing entirely; mild outliers
@@ -443,6 +459,7 @@ def estimate_base_price_for_date(
 
         logger.info(
             f"[day_query] {checkin_str}: comps={comps_collected} filtered={len(filtered_comps)} "
+            f"below_floor={below_floor_count} band_excl={price_band_excluded_count} "
             f"used={comps_used} median=${dist['median']} query_nights={query_nights_used}"
         )
 

@@ -651,6 +651,12 @@ def run_scrape(
             target, warnings = extract_target_spec(page, listing_url)
             extraction_warnings.extend(warnings)
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
+            logger.info(
+                f"[run_scrape] Target spec: type={target.property_type!r} "
+                f"bedrooms={target.bedrooms} accommodates={target.accommodates} "
+                f"baths={target.baths} beds={target.beds} "
+                f"location={target.location!r}"
+            )
 
             # Step 1b: Capture date-aware target price using a SHORT window (non-fatal).
             # Root cause of prior failures: the full 30-day checkout was passed here,

@@ -141,9 +141,18 @@ def parse_money_to_float(text: str) -> Optional[float]:
 
 def normalize_property_type(text: str) -> str:
     t = (text or "").lower()
-    for key, hints in PROPERTY_TYPE_HINTS.items():
-        if any(h in t for h in hints):
-            return key
+    # Check private_room and shared_room first so "Private room in an entire home"
+    # is not misclassified as entire_home.
+    if "private room" in t:
+        return "private_room"
+    if "shared room" in t:
+        return "shared_room"
+    # Match any "Entire [property type]" variant — Airbnb uses many (home, guesthouse,
+    # villa, cottage, cabin, loft, rental unit, condo, townhouse, etc.).
+    # The old allowlist only covered 5 variants, causing all other types to score 0.35
+    # on property-type similarity (below the 0.40 floor) and be silently dropped.
+    if re.search(r"\bentire\b", t):
+        return "entire_home"
     return ""
 
 
