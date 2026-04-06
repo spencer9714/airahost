@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { enrichListingInputAttributes } from "@/lib/normalizedLocation";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
 
@@ -89,10 +90,14 @@ export async function POST(
     typeof reportRow.input_address === "string" && reportRow.input_address.trim()
       ? reportRow.input_address.trim()
       : "Saved listing";
+  const enrichedInputAttributes = enrichListingInputAttributes(
+    (reportRow.input_attributes ?? {}) as Record<string, unknown>,
+    reportRow.input_address ?? defaultName
+  );
 
   // ── Dedup: check for an existing saved listing before inserting ──
   // Priority: Airbnb room ID → normalized URL path → exact address
-  const attrs = (reportRow.input_attributes ?? {}) as Record<string, unknown>;
+  const attrs = enrichedInputAttributes;
   const reportListingUrl =
     (reportRow.input_listing_url as string | null) ||
     (attrs.listingUrl as string | null) ||
@@ -184,7 +189,7 @@ export async function POST(
       user_id: user.id,
       name: defaultName,
       input_address: reportRow.input_address,
-      input_attributes: reportRow.input_attributes,
+      input_attributes: enrichedInputAttributes,
       default_discount_policy: reportRow.discount_policy,
       last_used_at: new Date().toISOString(),
     })

@@ -7,11 +7,14 @@ This key must NEVER be exposed to the frontend.
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from typing import Any, Dict, Optional
 
 from supabase import create_client, Client
+
+logger = logging.getLogger("worker.core.db")
 
 
 def get_client() -> Client:
@@ -119,6 +122,16 @@ def complete_job(
     client.table("pricing_reports").update(update).eq("id", report_id).eq(
         "worker_claim_token", str(worker_token)
     ).execute()
+
+    try:
+        client.rpc(
+            "ingest_market_price_observations",
+            {"p_report_id": report_id},
+        ).execute()
+    except Exception as exc:
+        logger.warning(
+            f"[{report_id}] market observation ingestion failed after report completion: {exc}"
+        )
 
 
 def sync_linked_listing_attributes(

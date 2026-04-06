@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-04-06T14:13:08.418183",
+  "listing_id": "bdef28dc-2134-40b8-875d-350f7c28a0fe",
+  "listing_name": "Airbnb Listing #1596737613274892756 · Entire home",
+  "listing_url": null,
+  "saved_listing_id": "bdef28dc-2134-40b8-875d-350f7c28a0fe",
+  "trained_now": true,
+  "model_mode": "retrain",
+  "smoke_test": true,
+  "n_samples": 5000,
+  "artifacts": {
+    "training_dump_latest": "C:\\airahost\\ml\\reports\\training_data_dump.csv",
+    "training_dump_archive": "C:\\airahost\\ml\\reports\\training_data_dump_bdef28dc-2134-40b8-875d-350f7c28a0fe.csv",
+    "training_matrix_latest": "C:\\airahost\\ml\\reports\\training_matrix.csv",
+    "training_matrix_archive": "C:\\airahost\\ml\\reports\\processed_feature_matrix_bdef28dc-2134-40b8-875d-350f7c28a0fe.csv",
+    "feature_descriptions": "C:\\airahost\\ml\\reports\\feature_descriptions.csv",
+    "feature_importance_csv": "C:\\airahost\\ml\\reports\\feature_importance.csv",
+    "feature_importance_detailed_csv": "C:\\airahost\\ml\\reports\\feature_importance_detailed.csv",
+    "feature_importance_plot": "C:\\airahost\\ml\\reports\\feature_importance.png",
+    "metrics_latest": "C:\\airahost\\ml\\reports\\metrics_latest.csv",
+    "metrics_history": "C:\\airahost\\ml\\reports\\metrics_history.csv",
+    "model": "C:\\airahost\\ml\\reports\\saved_model.json",
+    "model_tree_dump": "C:\\airahost\\ml\\reports\\model_tree_dump.txt",
+    "forecast_input_matrix": "C:\\airahost\\ml\\reports\\prediction_input_matrix_bdef28dc-2134-40b8-875d-350f7c28a0fe.csv",
+    "prediction_explanations": "C:\\airahost\\ml\\reports\\prediction_explanations.csv",
+    "prediction_feature_contributions": "C:\\airahost\\ml\\reports\\prediction_feature_contributions.csv",
+    "predictions_latest": "C:\\airahost\\ml\\reports\\predictions.csv",
+    "predictions_archive": "C:\\airahost\\ml\\reports\\forecast_bdef28dc-2134-40b8-875d-350f7c28a0fe_2026-04-06.csv"
+  },
+  "metrics": {
+    "mae": 19.72373164912575,
+    "mae_std": 1.3543453422870784,
+    "mape": 0.050816222144577074,
+    "q2": 0.9645672036734755,
+    "r2": 0.9930251548972007,
+    "r2_std": 0.008700883298657893
+  }
+}

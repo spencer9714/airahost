@@ -37,6 +37,11 @@ export const listingInputSchema = z.object({
   maxGuests: z.number().int().min(1).max(50),
   sizeSqFt: z.number().int().min(0).max(50000).optional(),
   amenities: z.array(amenityEnum).optional().default([]),
+  city: z.string().min(1).max(120).optional(),
+  state: z.string().min(1).max(120).optional(),
+  postalCode: z.string().min(1).max(20).optional(),
+  country: z.string().min(1).max(120).optional(),
+  countryCode: z.string().min(2).max(2).optional(),
 });
 
 // ── Date Input ──────────────────────────────────────────────────
@@ -160,6 +165,13 @@ export interface CalendarDay {
 export interface TargetSpec {
   title: string;
   location: string;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
+  countryCode?: string | null;
+  lat?: number | null;
+  lng?: number | null;
   propertyType: string;
   accommodates: number | null;
   bedrooms: number | null;
@@ -471,7 +483,11 @@ export interface SavedListing {
   userId: string;
   name: string;
   inputAddress: string;
-  inputAttributes: ListingInput & { preferredComps?: PreferredComps | null };
+  inputAttributes: ListingInput & {
+    preferredComps?: PreferredComps | null;
+    postalCodePrefix?: string;
+    locationSource?: string;
+  };
   defaultDiscountPolicy: DiscountPolicy | null;
   defaultDateMode: DateMode;
   defaultStartDate: string | null;

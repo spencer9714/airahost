@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
-from datetime import date, timedelta, datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -24,10 +25,30 @@ from ml.model import (
 )
 from ml.supabase_client import get_client
 
-DEFAULT_SAVED_LISTING_ID = os.getenv(
-    "ML_DEFAULT_SAVED_LISTING_ID",
-    "bdef28dc-2134-40b8-875d-350f7c28a0fe",
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+REPORTS_DIR = PROJECT_ROOT / "ml" / "reports"
+FALLBACK_SAVED_LISTING_ID = "bdef28dc-2134-40b8-875d-350f7c28a0fe"
+
+
+def configure_console_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def resolve_repo_path(path_value: str) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
+
+
+def get_default_saved_listing_id() -> str:
+    return os.getenv("ML_DEFAULT_SAVED_LISTING_ID", FALLBACK_SAVED_LISTING_ID)
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         "--saved-listing-id",
         help="UUID of a saved listing in Supabase. If omitted, uses ML_DEFAULT_SAVED_LISTING_ID or the built-in default.",
     )
-    parser.add_argument("--output", default="ml/reports/predictions.csv", help="CSV output path")
+    parser.add_argument("--output", default=str(REPORTS_DIR / "predictions.csv"), help="CSV output path")
     parser.add_argument("--horizon", type=int, default=30, help="Forecast horizon in days")
     parser.add_argument("--start-date", help="Forecast start date (YYYY-MM-DD). Defaults to today.")
     parser.add_argument("--limit", type=int, default=5000, help="Max training rows to load from Supabase")
@@ -118,8 +139,10 @@ def print_text_report(forecast_df: pd.DataFrame) -> None:
 
 
 def main() -> None:
+    configure_console_encoding()
     args = parse_args()
     client = get_client()
+    default_saved_listing_id = get_default_saved_listing_id()
 
     saved_listing = None
     if args.listing_url:
@@ -133,12 +156,12 @@ def main() -> None:
             raise ValueError(f"Cannot find saved listing with id: {args.saved_listing_id}")
 
     if not saved_listing:
-        if DEFAULT_SAVED_LISTING_ID:
-            print(f"Using default saved listing id: {DEFAULT_SAVED_LISTING_ID}")
-            saved_listing = fetch_saved_listing_by_id(client, DEFAULT_SAVED_LISTING_ID)
+        if default_saved_listing_id:
+            print(f"Using default saved listing id: {default_saved_listing_id}")
+            saved_listing = fetch_saved_listing_by_id(client, default_saved_listing_id)
             if not saved_listing:
                 raise ValueError(
-                    f"Default saved listing id {DEFAULT_SAVED_LISTING_ID} was not found in Supabase."
+                    f"Default saved listing id {default_saved_listing_id} was not found in Supabase."
                 )
 
     if not saved_listing:
@@ -162,7 +185,7 @@ def main() -> None:
 
     if args.dump_training_csv:
         training_matrix_df = build_feature_matrix_df(training_df)
-        training_csv_path = Path(args.dump_training_csv)
+        training_csv_path = resolve_repo_path(args.dump_training_csv)
         training_csv_path.parent.mkdir(parents=True, exist_ok=True)
         training_matrix_df.to_csv(training_csv_path, index=False)
         print(f"Wrote training feature matrix to {training_csv_path.resolve()}")
@@ -170,13 +193,13 @@ def main() -> None:
     if args.dump_feature_csv:
         training_matrix_df = build_feature_matrix_df(training_df)
         feature_description_df = build_feature_description_df(list(training_matrix_df.columns))
-        feature_csv_path = Path(args.dump_feature_csv)
+        feature_csv_path = resolve_repo_path(args.dump_feature_csv)
         feature_csv_path.parent.mkdir(parents=True, exist_ok=True)
         feature_description_df.to_csv(feature_csv_path, index=False)
         print(f"Wrote feature description CSV to {feature_csv_path.resolve()}")
 
     start_train = time.time()
-    model, feature_columns, importances, mae = train_model(training_df)
+    model, feature_columns, importances, metrics = train_model(training_df)
     train_duration = time.time() - start_train
 
     print(f"Trained XGBoost model on {len(training_df)} comparable rows.")
@@ -184,11 +207,16 @@ def main() -> None:
     if args.dump_metrics_csv:
         metrics_df = pd.DataFrame([{
             "timestamp": datetime.now().isoformat(),
-            "mae": mae,
+            "mae": round(metrics["mae"], 4),
+            "mae_std": round(metrics.get("mae_std", 0.0), 4),
+            "mape": round(metrics["mape"], 6),
+            "q2": round(metrics["q2"], 6),
+            "r2": round(metrics["r2"], 6),
+            "r2_std": round(metrics.get("r2_std", 0.0), 6),
             "training_time_seconds": round(train_duration, 4),
             "n_samples": len(training_df)
         }])
-        metrics_path = Path(args.dump_metrics_csv)
+        metrics_path = resolve_repo_path(args.dump_metrics_csv)
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         metrics_df.to_csv(metrics_path, index=False)
         print(f"Wrote training metrics to {metrics_path.resolve()}")
@@ -196,13 +224,13 @@ def main() -> None:
     if args.dump_importance_csv:
         importance_df = importances.reset_index()
         importance_df.columns = ["feature", "importance"]
-        importance_path = Path(args.dump_importance_csv)
+        importance_path = resolve_repo_path(args.dump_importance_csv)
         importance_path.parent.mkdir(parents=True, exist_ok=True)
         importance_df.to_csv(importance_path, index=False)
         print(f"Wrote feature importance CSV to {importance_path.resolve()}")
 
     if args.save_model:
-        model_path = Path(args.save_model)
+        model_path = resolve_repo_path(args.save_model)
         model_path.parent.mkdir(parents=True, exist_ok=True)
         model.save_model(str(model_path))
         print(f"Saved trained model to {model_path.resolve()}")
@@ -226,7 +254,7 @@ def main() -> None:
 
     forecast_df = build_forecast_df(predictions_data, start) # 傳遞新的資料結構
 
-    out_path = Path(args.output)
+    out_path = resolve_repo_path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     forecast_df.to_csv(out_path, index=False)
 

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { updateListingSchema } from "@/lib/schemas";
+import { enrichListingInputAttributes } from "@/lib/normalizedLocation";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
 
@@ -150,11 +151,20 @@ export async function PATCH(
     }
 
     const updates: Record<string, unknown> = {};
+    const currentAttrs = ((currentListing?.input_attributes ?? {}) as Record<string, unknown>);
+    let nextInputAddress =
+      parsed.data.inputAddress ?? currentListing?.input_address ?? "";
+    let nextInputAttributes: Record<string, unknown> =
+      parsed.data.inputAttributes !== undefined
+        ? (parsed.data.inputAttributes as Record<string, unknown>)
+        : { ...currentAttrs };
+    let inputAttributesDirty = parsed.data.inputAttributes !== undefined;
+
     if (parsed.data.name !== undefined) updates.name = parsed.data.name;
-    if (parsed.data.inputAddress !== undefined)
+    if (parsed.data.inputAddress !== undefined) {
       updates.input_address = parsed.data.inputAddress;
-    if (parsed.data.inputAttributes !== undefined)
-      updates.input_attributes = parsed.data.inputAttributes;
+      nextInputAddress = parsed.data.inputAddress;
+    }
     if (parsed.data.defaultDiscountPolicy !== undefined)
       updates.default_discount_policy = parsed.data.defaultDiscountPolicy;
     if (parsed.data.defaultDateMode !== undefined)
@@ -166,22 +176,19 @@ export async function PATCH(
     if (parsed.data.minimumBookingNights !== undefined)
       updates.minimum_booking_nights = parsed.data.minimumBookingNights;
 
-    // preferredComps and listingUrl are stored inside input_attributes as sub-fields
-    const currentAttrs = ((currentListing?.input_attributes ?? {}) as Record<string, unknown>);
-
     // Track whether the URL change forces alerts off (so the caller's pricingAlertsEnabled
     // field cannot override a URL-driven force-disable below).
     let urlForceDisableAlerts = false;
 
     if (parsed.data.listingUrl !== undefined) {
-      const baseAttrs = (updates.input_attributes as Record<string, unknown> | undefined) ?? currentAttrs;
       const incomingUrl = parsed.data.listingUrl;
 
       if (incomingUrl === null || incomingUrl === "") {
         // ── URL cleared ────────────────────────────────────────────────────
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { listingUrl: _removed, ...rest } = baseAttrs;
-        updates.input_attributes = rest;
+        const { listingUrl: _removed, ...rest } = nextInputAttributes;
+        nextInputAttributes = rest;
+        inputAttributesDirty = true;
         // Reset validation state — no URL to validate against.
         updates.listing_url_validation_status = null;
         updates.listing_url_validated_at = null;
@@ -189,7 +196,8 @@ export async function PATCH(
         urlForceDisableAlerts = true;
       } else if (!incomingUrl.includes("airbnb.com/rooms/")) {
         // ── URL present but not a valid Airbnb room URL ───────────────────
-        updates.input_attributes = { ...baseAttrs, listingUrl: incomingUrl };
+        nextInputAttributes = { ...nextInputAttributes, listingUrl: incomingUrl };
+        inputAttributesDirty = true;
         updates.listing_url_validation_status = "invalid";
         updates.listing_url_validated_at = null;
         // Alerts require a usable URL; force-disable.
@@ -199,22 +207,25 @@ export async function PATCH(
         // Reset to null (unknown) — the worker will write "valid" on first
         // successful capture from this URL.  Do not carry over a "valid"
         // status from a different previous URL.
-        updates.input_attributes = { ...baseAttrs, listingUrl: incomingUrl };
+        nextInputAttributes = { ...nextInputAttributes, listingUrl: incomingUrl };
+        inputAttributesDirty = true;
         updates.listing_url_validation_status = null;
         updates.listing_url_validated_at = null;
       }
     }
 
     if (parsed.data.preferredComps !== undefined) {
-      // Apply on top of any input_attributes update already staged (e.g. from listingUrl above)
-      const baseAttrs = (updates.input_attributes as Record<string, unknown> | undefined) ?? currentAttrs;
       if (parsed.data.preferredComps === null || parsed.data.preferredComps.length === 0) {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { preferredComps: _removed, ...rest } = baseAttrs;
-        updates.input_attributes = rest;
+        const { preferredComps: _removed, ...rest } = nextInputAttributes;
+        nextInputAttributes = rest;
       } else {
-        updates.input_attributes = { ...baseAttrs, preferredComps: parsed.data.preferredComps };
+        nextInputAttributes = {
+          ...nextInputAttributes,
+          preferredComps: parsed.data.preferredComps,
+        };
       }
+      inputAttributesDirty = true;
     }
 
     if (urlForceDisableAlerts) {
@@ -224,7 +235,7 @@ export async function PATCH(
     } else {
       // Server-side guard: enabling pricing alerts requires a valid Airbnb listing URL.
       if (parsed.data.pricingAlertsEnabled === true) {
-        const effectiveAttrs = (updates.input_attributes as Record<string, unknown> | undefined) ?? currentAttrs;
+        const effectiveAttrs = inputAttributesDirty ? nextInputAttributes : currentAttrs;
         const effectiveUrl = effectiveAttrs.listingUrl as string | undefined | null;
         if (!effectiveUrl || !effectiveUrl.includes("airbnb.com/rooms/")) {
           return NextResponse.json(
@@ -235,6 +246,13 @@ export async function PATCH(
       }
       if (parsed.data.pricingAlertsEnabled !== undefined)
         updates.pricing_alerts_enabled = parsed.data.pricingAlertsEnabled;
+    }
+
+    if (inputAttributesDirty || parsed.data.inputAddress !== undefined) {
+      updates.input_attributes = enrichListingInputAttributes(
+        nextInputAttributes,
+        nextInputAddress
+      );
     }
 
     const { data: listing, error } = await supabase
@@ -286,10 +304,7 @@ export async function PATCH(
 
           for (const row of reportRows ?? []) {
             const attrs = ((row.input_attributes as Record<string, unknown> | null) ?? {});
-            const nextAttrs: Record<string, unknown> = {
-              ...attrs,
-              address: nextName,
-            };
+            const nextAttrs = enrichListingInputAttributes(attrs, nextName);
             await admin
               .from("pricing_reports")
               .update({ input_attributes: nextAttrs })

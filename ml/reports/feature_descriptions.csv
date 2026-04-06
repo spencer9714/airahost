@@ -1,0 +1,127 @@
+feature,description
+bedrooms,Number of bedrooms in the comparable listing.
+baths,Number of bathrooms in the comparable listing.
+accommodates,Maximum guest capacity of the comparable listing.
+beds,Number of beds in the comparable listing.
+similarity_score,Similarity score between the comparable listing and the target listing.
+pool_score,Ranking score within the comparable pool.
+effective_rank_score,Effective rank score after similarity and pool ranking.
+price_reliability_score,Estimated reliability of the competitor price data.
+rating,Guest rating of the comparable listing.
+reviews,Number of reviews for the comparable listing.
+tenure_runs,Number of times this comparable has been evaluated in the pool.
+is_weekend,"Binary flag (1 for Fri/Sat, 0 otherwise) to capture weekend pricing premiums."
+is_holiday,"Binary flag (1 for holidays, 0 otherwise) to capture holiday/festival pricing premiums."
+days_until_stay,Number of days between when the price was observed and the stay date.
+days_since_first_seen,Age of this comparable entry in the database when the price was observed.
+holiday_streak_length,Length of the contiguous holiday run that includes this stay date.
+is_long_weekend,Binary flag indicating a stay date that falls in a long-weekend window.
+distance_to_target_km,Distance between this comparable and its target listing in kilometers.
+lat,Feature generated from input data; either a numeric field or a one-hot encoded category.
+lng,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_wifi,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_kitchen,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_washer,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_dryer,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_ac,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_heating,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_pool,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_hot_tub,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_free_parking,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_ev_charger,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_gym,Feature generated from input data; either a numeric field or a one-hot encoded category.
+has_bbq,Feature generated from input data; either a numeric field or a one-hot encoded category.
+property_type_entire_home,One-hot encoded property_type category 'entire_home'.
+property_type_private_room,One-hot encoded property_type category 'private_room'.
+location_country_code_unknown,One-hot encoded location_country_code category 'unknown'.
+location_state_unknown,One-hot encoded location_state category 'unknown'.
+location_city_Alki,One-hot encoded location_city category 'Alki'.
+location_city_Beacon Hill,One-hot encoded location_city category 'Beacon Hill'.
+location_city_Belltown,One-hot encoded location_city category 'Belltown'.
+location_city_Belmont Shore,One-hot encoded location_city category 'Belmont Shore'.
+location_city_Bothell,One-hot encoded location_city category 'Bothell'.
+location_city_Burien,One-hot encoded location_city category 'Burien'.
+location_city_Capitol Hill,One-hot encoded location_city category 'Capitol Hill'.
+location_city_Daly City,One-hot encoded location_city category 'Daly City'.
+location_city_Doral,One-hot encoded location_city category 'Doral'.
+location_city_Downtown Long Beach,One-hot encoded location_city category 'Downtown Long Beach'.
+location_city_Downtown Seattle,One-hot encoded location_city category 'Downtown Seattle'.
+location_city_East Palo Alto,One-hot encoded location_city category 'East Palo Alto'.
+location_city_Edmonds,One-hot encoded location_city category 'Edmonds'.
+location_city_Emerald Hills,One-hot encoded location_city category 'Emerald Hills'.
+location_city_Exeter,One-hot encoded location_city category 'Exeter'.
+location_city_Foster City,One-hot encoded location_city category 'Foster City'.
+location_city_Fremont,One-hot encoded location_city category 'Fremont'.
+location_city_Hallandale Beach City Center,One-hot encoded location_city category 'Hallandale Beach City Center'.
+location_city_Hanford,One-hot encoded location_city category 'Hanford'.
+location_city_Judkins Park,One-hot encoded location_city category 'Judkins Park'.
+location_city_Kenmore,One-hot encoded location_city category 'Kenmore'.
+location_city_Kingston,One-hot encoded location_city category 'Kingston'.
+location_city_Lake Forest Park,One-hot encoded location_city category 'Lake Forest Park'.
+location_city_Long Beach,One-hot encoded location_city category 'Long Beach'.
+location_city_Lynnwood,One-hot encoded location_city category 'Lynnwood'.
+location_city_Menlo Park,One-hot encoded location_city category 'Menlo Park'.
+location_city_Miami,One-hot encoded location_city category 'Miami'.
+location_city_Mountain View,One-hot encoded location_city category 'Mountain View'.
+location_city_North Miami Beach,One-hot encoded location_city category 'North Miami Beach'.
+location_city_Palo Alto,One-hot encoded location_city category 'Palo Alto'.
+location_city_Pike-Market,One-hot encoded location_city category 'Pike-Market'.
+location_city_Porterville,One-hot encoded location_city category 'Porterville'.
+location_city_Queen Anne,One-hot encoded location_city category 'Queen Anne'.
+location_city_Redwood City,One-hot encoded location_city category 'Redwood City'.
+location_city_Renton,One-hot encoded location_city category 'Renton'.
+location_city_Sammamish,One-hot encoded location_city category 'Sammamish'.
+location_city_San Bruno,One-hot encoded location_city category 'San Bruno'.
+location_city_San Carlos,One-hot encoded location_city category 'San Carlos'.
+location_city_San Francisco,One-hot encoded location_city category 'San Francisco'.
+location_city_San Jose,One-hot encoded location_city category 'San Jose'.
+location_city_San Mateo,One-hot encoded location_city category 'San Mateo'.
+location_city_Santa Clara,One-hot encoded location_city category 'Santa Clara'.
+location_city_Seal Beach,One-hot encoded location_city category 'Seal Beach'.
+location_city_Seattle,One-hot encoded location_city category 'Seattle'.
+location_city_Selma,One-hot encoded location_city category 'Selma'.
+location_city_Shoreline,One-hot encoded location_city category 'Shoreline'.
+location_city_Snohomish,One-hot encoded location_city category 'Snohomish'.
+location_city_South Lake Tahoe,One-hot encoded location_city category 'South Lake Tahoe'.
+location_city_Springville,One-hot encoded location_city category 'Springville'.
+location_city_Stateline,One-hot encoded location_city category 'Stateline'.
+location_city_Sunnyvale,One-hot encoded location_city category 'Sunnyvale'.
+location_city_Three Rivers,One-hot encoded location_city category 'Three Rivers'.
+location_city_Town Center Mountlake Terrace,One-hot encoded location_city category 'Town Center Mountlake Terrace'.
+location_city_Tulare,One-hot encoded location_city category 'Tulare'.
+location_city_Visalia,One-hot encoded location_city category 'Visalia'.
+location_city_West Seattle,One-hot encoded location_city category 'West Seattle'.
+location_city_Woodinville,One-hot encoded location_city category 'Woodinville'.
+location_city_Zephyr Cove,One-hot encoded location_city category 'Zephyr Cove'.
+location_postal_prefix_unknown,One-hot encoded location_postal_prefix category 'unknown'.
+geo_bucket_0.00_0.00,One-hot encoded geo_bucket category '0.00_0.00'.
+month_apr,One-hot encoded month category 'apr'.
+month_mar,One-hot encoded month category 'mar'.
+day_of_week_fri,One-hot encoded day_of_week category 'fri'.
+day_of_week_mon,One-hot encoded day_of_week category 'mon'.
+day_of_week_sat,One-hot encoded day_of_week category 'sat'.
+day_of_week_sun,One-hot encoded day_of_week category 'sun'.
+day_of_week_thu,One-hot encoded day_of_week category 'thu'.
+day_of_week_tue,One-hot encoded day_of_week category 'tue'.
+day_of_week_wed,One-hot encoded day_of_week category 'wed'.
+day_of_month_bucket_month_end,One-hot encoded day_of_month_bucket category 'month_end'.
+day_of_month_bucket_week_1,One-hot encoded day_of_month_bucket category 'week_1'.
+day_of_month_bucket_week_2,One-hot encoded day_of_month_bucket category 'week_2'.
+day_of_month_bucket_week_3,One-hot encoded day_of_month_bucket category 'week_3'.
+day_of_month_bucket_week_4,One-hot encoded day_of_month_bucket category 'week_4'.
+lead_time_bucket_days_15_30,One-hot encoded lead_time_bucket category 'days_15_30'.
+lead_time_bucket_days_1_3,One-hot encoded lead_time_bucket category 'days_1_3'.
+lead_time_bucket_days_31_plus,One-hot encoded lead_time_bucket category 'days_31_plus'.
+lead_time_bucket_days_4_7,One-hot encoded lead_time_bucket category 'days_4_7'.
+lead_time_bucket_days_8_14,One-hot encoded lead_time_bucket category 'days_8_14'.
+lead_time_bucket_same_day,One-hot encoded lead_time_bucket category 'same_day'.
+holiday_window_type_regular,One-hot encoded holiday_window_type category 'regular'.
+debug_price_date,Debug-only raw field kept for inspection; not used by model training.
+debug_observed_at_date,Debug-only raw field kept for inspection; not used by model training.
+debug_first_seen_date,Debug-only raw field kept for inspection; not used by model training.
+debug_source_type,Debug-only raw field kept for inspection; not used by model training.
+debug_source_report_id,Debug-only raw field kept for inspection; not used by model training.
+debug_source_listing_id,Debug-only raw field kept for inspection; not used by model training.
+debug_source_comp_id,Debug-only raw field kept for inspection; not used by model training.
+debug_airbnb_listing_id,Debug-only raw field kept for inspection; not used by model training.
+last_nightly_price,Target value for supervised training: competitor nightly price.

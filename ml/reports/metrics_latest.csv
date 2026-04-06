@@ -1,0 +1,2 @@
+timestamp,listing_id,model_mode,trained_now,n_samples,mae,mae_std,mape,q2,r2,r2_std
+2026-04-06T14:13:08.064424,bdef28dc-2134-40b8-875d-350f7c28a0fe,retrain,True,5000,19.7237,1.3543,0.050816,0.964567,0.993025,0.008701

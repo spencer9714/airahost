@@ -4,6 +4,7 @@ import { generateShareId } from "@/lib/shareId";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
 import { computeCacheKey } from "@/lib/cacheKey";
+import { enrichListingInputAttributes } from "@/lib/normalizedLocation";
 
 // ── Simple in-memory IP rate limiter ──────────────────────────
 const rateMap = new Map<string, { count: number; resetAt: number }>();
@@ -102,10 +103,18 @@ export async function POST(req: NextRequest) {
       // Carry preferred comps from the saved listing's stored attributes
       const savedPreferredComps = (attrs.preferredComps as PreferredComps | undefined) ?? null;
       const admin = getSupabaseAdmin();
+      const finalizedInputAttributes = enrichListingInputAttributes(
+        {
+          ...(listing.input_attributes as Record<string, unknown>),
+          inputMode,
+          ...(savedPreferredComps?.length ? { preferredComps: savedPreferredComps } : {}),
+        },
+        address
+      );
 
       const cacheKey = computeCacheKey(
         address,
-        listing.input_attributes as Record<string, unknown>,
+        finalizedInputAttributes,
         dateRange.startDate,
         dateRange.endDate,
         discountPolicy as Record<string, unknown>,
@@ -128,11 +137,7 @@ export async function POST(req: NextRequest) {
         input_address: address,
         target_env: targetEnv,
         job_lane: "interactive",
-        input_attributes: {
-          ...listing.input_attributes,
-          inputMode,
-          ...(savedPreferredComps?.length ? { preferredComps: savedPreferredComps } : {}),
-        },
+        input_attributes: finalizedInputAttributes,
         input_date_start: dateRange.startDate,
         input_date_end: dateRange.endDate,
         discount_policy: discountPolicy,
@@ -153,7 +158,7 @@ export async function POST(req: NextRequest) {
             mode: inputMode,
             listing_url: listingUrl || null,
             listing_address: address,
-            listing_attributes: listing.input_attributes,
+            listing_attributes: finalizedInputAttributes,
             date_start: dateRange.startDate,
             date_end: dateRange.endDate,
             discount_policy: discountPolicy,
@@ -250,18 +255,31 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseAdmin();
 
-    const enrichedInputAttributes = {
-      ...listing,
-      inputMode,
-      listingUrl: listingUrl || null,
-      preferredComps: preferredComps ?? null,
-      lastMinuteStrategy: lastMinuteStrategy ?? {
-        mode: "auto",
-        aggressiveness: 50,
-        floor: 0.65,
-        cap: 1.05,
-      },
+    const ingestMarketPriceObservations = async (reportId: string) => {
+      try {
+        await supabase.rpc("ingest_market_price_observations", {
+          p_report_id: reportId,
+        });
+      } catch (err) {
+        console.error("Market observation ingestion error:", err);
+      }
     };
+
+    const enrichedInputAttributes = enrichListingInputAttributes(
+      {
+        ...listing,
+        inputMode,
+        listingUrl: listingUrl || null,
+        preferredComps: preferredComps ?? null,
+        lastMinuteStrategy: lastMinuteStrategy ?? {
+          mode: "auto",
+          aggressiveness: 50,
+          floor: 0.65,
+          cap: 1.05,
+        },
+      },
+      listing.address
+    );
 
     // Compute cache key using the exact attributes written to the report
     const cacheKey = computeCacheKey(
@@ -439,6 +457,10 @@ export async function POST(req: NextRequest) {
           .update({ last_used_at: new Date().toISOString() })
           .eq("id", existingListingId);
 
+        if (isCacheHit) {
+          await ingestMarketPriceObservations(reportId);
+        }
+
         return NextResponse.json({
           id: reportId,
           shareId: report.share_id,
@@ -469,6 +491,10 @@ export async function POST(req: NextRequest) {
           trigger: "manual",
         });
       }
+    }
+
+    if (isCacheHit) {
+      await ingestMarketPriceObservations(reportId);
     }
 
     return NextResponse.json({

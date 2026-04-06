@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createListingSchema } from "@/lib/schemas";
+import { enrichListingInputAttributes } from "@/lib/normalizedLocation";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
 
@@ -287,6 +288,10 @@ export async function POST(req: NextRequest) {
 
     const { name, inputAddress, inputAttributes, defaultDiscountPolicy } =
       parsed.data;
+    const enrichedInputAttributes = enrichListingInputAttributes(
+      inputAttributes as Record<string, unknown>,
+      inputAddress
+    );
 
     const { data: listing, error } = await supabase
       .from("saved_listings")
@@ -294,7 +299,7 @@ export async function POST(req: NextRequest) {
         user_id: user.id,
         name,
         input_address: inputAddress,
-        input_attributes: inputAttributes,
+        input_attributes: enrichedInputAttributes,
         default_discount_policy: defaultDiscountPolicy ?? null,
       })
       .select()

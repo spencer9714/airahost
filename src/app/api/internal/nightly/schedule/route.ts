@@ -33,6 +33,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { generateShareId } from "@/lib/shareId";
 import { computeCacheKey } from "@/lib/cacheKey";
+import { enrichListingInputAttributes } from "@/lib/normalizedLocation";
 
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
@@ -330,11 +331,14 @@ export async function POST(req: NextRequest) {
     const discountPolicy = (listing.default_discount_policy ?? {}) as Record<string, unknown>;
 
     // Build full input_attributes (same shape as manual runs)
-    const inputAttributes: Record<string, unknown> = {
-      ...attrs,
-      inputMode,
-      listingUrl: listingUrl ?? null,
-    };
+    const inputAttributes = enrichListingInputAttributes(
+      {
+        ...attrs,
+        inputMode,
+        listingUrl: listingUrl ?? null,
+      },
+      address
+    );
 
     const cacheKey = computeCacheKey(
       address,

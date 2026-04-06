@@ -1,0 +1,118 @@
+feature,importance
+bedrooms,0.2550565302371979
+location_city_Seattle,0.10336171090602875
+location_city_Exeter,0.0593518428504467
+location_city_Three Rivers,0.05103606358170509
+effective_rank_score,0.03889431059360504
+location_city_Selma,0.0379069559276104
+location_city_Tulare,0.033618781715631485
+location_city_Porterville,0.031081197783350945
+location_city_Foster City,0.030698122456669807
+location_city_Redwood City,0.027596525847911835
+location_city_Menlo Park,0.02754313498735428
+property_type_entire_home,0.02694009244441986
+pool_score,0.02031523361802101
+accommodates,0.017678873613476753
+location_city_Town Center Mountlake Terrace,0.016324449330568314
+location_city_South Lake Tahoe,0.012493343092501163
+location_city_Queen Anne,0.012397353537380695
+similarity_score,0.011901252903044224
+location_city_Edmonds,0.010990217328071594
+location_city_San Jose,0.009001647122204304
+location_city_Springville,0.00850309431552887
+reviews,0.008098858408629894
+location_city_Shoreline,0.008063925430178642
+baths,0.0077904085628688335
+is_weekend,0.00745408283546567
+lead_time_bucket_days_15_30,0.007436067331582308
+location_city_Visalia,0.007356530521064997
+rating,0.007219696417450905
+days_since_first_seen,0.006789883598685265
+location_city_Kenmore,0.006425336003303528
+location_city_Palo Alto,0.005632816813886166
+location_city_Lynnwood,0.005394577514380217
+location_city_San Francisco,0.005336429923772812
+location_city_Long Beach,0.005214597564190626
+location_city_Burien,0.004414699971675873
+price_reliability_score,0.004299805033951998
+location_city_Renton,0.003736130427569151
+tenure_runs,0.003549525747075677
+location_city_San Mateo,0.003063313430175185
+location_city_San Carlos,0.0030004065483808517
+location_city_Miami,0.0029993297066539526
+location_city_Hanford,0.0029753504786640406
+location_city_Fremont,0.0024896967224776745
+location_city_Mountain View,0.0024162146728485823
+days_until_stay,0.002266181632876396
+day_of_month_bucket_week_4,0.002087857574224472
+day_of_week_mon,0.0017150584608316422
+day_of_month_bucket_month_end,0.0016736910911276937
+day_of_week_tue,0.001606590230949223
+location_city_Stateline,0.0013239930849522352
+location_city_Alki,0.0012301614042371511
+location_city_Sunnyvale,0.0011754387523978949
+day_of_week_thu,0.00116245960816741
+location_city_Lake Forest Park,0.0011611508671194315
+month_apr,0.001149789895862341
+day_of_month_bucket_week_3,0.0011463294504210353
+property_type_private_room,0.0011060930555686355
+location_city_Downtown Seattle,0.0009349022875539958
+lead_time_bucket_days_4_7,0.0009215326281264424
+day_of_month_bucket_week_2,0.0009180287015624344
+lead_time_bucket_days_8_14,0.0009156731539405882
+location_city_Judkins Park,0.0008765483507886529
+day_of_week_wed,0.0008364474051631987
+location_city_Belltown,0.0008111537317745388
+location_city_Daly City,0.0008027750300243497
+day_of_week_fri,0.0007304683676920831
+location_city_East Palo Alto,0.0007125678239390254
+location_city_Bothell,0.0006890511140227318
+lead_time_bucket_days_1_3,0.0006696767522953451
+location_city_Belmont Shore,0.0006564946961589158
+location_city_Pike-Market,0.0006427481421269476
+location_city_Emerald Hills,0.0006325304857455194
+day_of_week_sun,0.0006275955238379538
+day_of_month_bucket_week_1,0.0005794076132588089
+location_city_Sammamish,0.0005003567785024643
+lead_time_bucket_same_day,0.00044701251317746937
+day_of_week_sat,0.00040489088860340416
+location_city_Downtown Long Beach,0.00039945743628777564
+location_city_Seal Beach,0.0003735392529051751
+location_city_Woodinville,0.00035582439159043133
+location_city_Beacon Hill,0.0003372097562532872
+month_mar,0.0002981178113259375
+location_city_Kingston,0.00026134660583920777
+location_city_Santa Clara,0.0002541651192586869
+location_city_West Seattle,0.0002513705985620618
+location_city_San Bruno,0.0001916976470965892
+location_city_North Miami Beach,0.00012662693916354328
+location_city_Capitol Hill,9.876547119347379e-05
+lead_time_bucket_days_31_plus,8.878228982212022e-05
+beds,0.0
+is_holiday,0.0
+holiday_streak_length,0.0
+is_long_weekend,0.0
+distance_to_target_km,0.0
+lat,0.0
+lng,0.0
+has_wifi,0.0
+has_kitchen,0.0
+has_washer,0.0
+has_dryer,0.0
+has_ac,0.0
+has_heating,0.0
+has_pool,0.0
+has_hot_tub,0.0
+has_free_parking,0.0
+has_ev_charger,0.0
+has_gym,0.0
+has_bbq,0.0
+location_country_code_unknown,0.0
+location_state_unknown,0.0
+location_city_Doral,0.0
+location_city_Hallandale Beach City Center,0.0
+location_city_Snohomish,0.0
+location_city_Zephyr Cove,0.0
+location_postal_prefix_unknown,0.0
+geo_bucket_0.00_0.00,0.0
+holiday_window_type_regular,0.0

@@ -5,4 +5,6 @@ __all__ = [
     "data",
     "model",
     "run_forecast",
+    "backtest",
+    "compare_predictions",
 ]

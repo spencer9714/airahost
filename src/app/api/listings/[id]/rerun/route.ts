@@ -4,6 +4,7 @@ import { generateShareId } from "@/lib/shareId";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { getSupabaseServer } from "@/lib/supabaseServer";
 import { computeCacheKey } from "@/lib/cacheKey";
+import { enrichListingInputAttributes } from "@/lib/normalizedLocation";
 
 export async function POST(
   req: NextRequest,
@@ -68,11 +69,14 @@ export async function POST(
     const address = listing.input_address;
 
     // Merged attributes — mirrors what will be written to report.input_attributes
-    const mergedAttributes = {
-      ...(attributes as Record<string, unknown>),
-      inputMode,
-      ...(preferredComps?.length ? { preferredComps } : {}),
-    };
+    const mergedAttributes = enrichListingInputAttributes(
+      {
+        ...(attributes as Record<string, unknown>),
+        inputMode,
+        ...(preferredComps?.length ? { preferredComps } : {}),
+      },
+      address
+    );
 
     // Use admin client for cache + report creation (bypasses RLS for pricing_cache)
     const admin = getSupabaseAdmin();
@@ -145,11 +149,7 @@ export async function POST(
       input_address: address,
       target_env: targetEnv,
       job_lane: "interactive",
-      input_attributes: {
-        ...attributes,
-        inputMode,
-        ...(preferredComps?.length ? { preferredComps } : {}),
-      },
+      input_attributes: mergedAttributes,
       input_date_start: dates.startDate,
       input_date_end: dates.endDate,
       discount_policy: discountPolicy,
@@ -166,13 +166,13 @@ export async function POST(
         input_mode: inputMode,
         listing_id: id,
         report_input: {
-          mode: inputMode,
-          listing_url: listingUrl || null,
-          listing_address: address,
-          listing_attributes: attributes,
-          date_start: dates.startDate,
-          date_end: dates.endDate,
-          discount_policy: discountPolicy,
+            mode: inputMode,
+            listing_url: listingUrl || null,
+            listing_address: address,
+            listing_attributes: mergedAttributes,
+            date_start: dates.startDate,
+            date_end: dates.endDate,
+            discount_policy: discountPolicy,
         },
         created_at: new Date().toISOString(),
       },

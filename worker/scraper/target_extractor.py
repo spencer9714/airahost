@@ -30,6 +30,11 @@ class ListingSpec:
     url: str
     title: str = ""
     location: str = ""
+    city: str = ""
+    state: str = ""
+    postal_code: str = ""
+    country: str = ""
+    country_code: str = ""
     accommodates: Optional[int] = None
     bedrooms: Optional[int] = None
     beds: Optional[int] = None
@@ -109,6 +114,41 @@ def to_float(x: str) -> Optional[float]:
         return float(x)
     except Exception:
         return None
+
+
+COUNTRY_NAME_TO_CODE = {
+    "united states": "US",
+    "united states of america": "US",
+    "usa": "US",
+    "us": "US",
+    "taiwan": "TW",
+    "tw": "TW",
+}
+
+
+def normalize_country_code(value: Any) -> str:
+    text = clean(str(value or ""))
+    if not text:
+        return ""
+
+    upper = text.upper()
+    if len(upper) == 2 and upper.isalpha():
+        return upper
+
+    return COUNTRY_NAME_TO_CODE.get(text.casefold(), "")
+
+
+def derive_location_parts(location: str) -> Tuple[str, str, str]:
+    parts = [part.strip() for part in clean(location).split(",") if part.strip()]
+    if len(parts) >= 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        if re.fullmatch(r"[A-Za-z]{2,3}", parts[1]):
+            return parts[0], parts[1].upper(), ""
+        return parts[0], "", parts[1]
+    if len(parts) == 1:
+        return parts[0], "", ""
+    return "", "", ""
 
 
 def extract_first_int(text: str, patterns: list) -> Optional[int]:
@@ -255,6 +295,11 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
 
     title = ""
     location = ""
+    city = ""
+    state = ""
+    postal_code = ""
+    country = ""
+    country_code = ""
     accommodates = None
     bedrooms = None
     beds = None
@@ -483,9 +528,19 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
                         # Build location from most specific to least
                         locality = str(addr.get("addressLocality") or "").strip()
                         region = str(addr.get("addressRegion") or "").strip()
-                        country = str(addr.get("addressCountry") or "").strip()
+                        postal = str(addr.get("postalCode") or "").strip()
+                        country_name = str(addr.get("addressCountry") or "").strip()
+                        if locality:
+                            city = locality
+                        if region:
+                            state = region
+                        if postal:
+                            postal_code = postal
+                        if country_name:
+                            country = country_name
+                            country_code = country_code or normalize_country_code(country_name)
                         # Prefer "City, State" over broader heuristic matches
-                        ld_parts = [p for p in [locality, region, country] if p]
+                        ld_parts = [p for p in [locality, region, country_name] if p]
                         if ld_parts:
                             ld_location = ", ".join(ld_parts)
                             if not location or len(locality) > 0:
@@ -523,12 +578,24 @@ def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]
                             pass
                     break
 
+    if location and (not city or not country):
+        derived_city, derived_state, derived_country = derive_location_parts(location)
+        city = city or derived_city
+        state = state or derived_state
+        country = country or derived_country
+        country_code = country_code or normalize_country_code(country)
+
     amenities = extract_amenities(body_text)
 
     spec = ListingSpec(
         url=listing_url,
         title=title,
         location=location,
+        city=city,
+        state=state,
+        postal_code=postal_code,
+        country=country,
+        country_code=country_code,
         accommodates=accommodates,
         bedrooms=bedrooms,
         beds=beds,

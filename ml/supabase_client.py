@@ -13,7 +13,9 @@ def load_environment() -> None:
     """Load environment variables from project root, worker folder, and ml folder."""
     load_dotenv(ROOT / ".env", override=False)
     load_dotenv(ROOT / "worker" / ".env", override=False)
-    load_dotenv(ROOT / "ml" / ".env", override=False)
+    # Let ML-local overrides win for ML-specific workflows such as default listing
+    # ids and backtest configuration.
+    load_dotenv(ROOT / "ml" / ".env", override=True)
 
 
 def get_client() -> Client:

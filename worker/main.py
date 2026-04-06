@@ -149,6 +149,59 @@ def _get_listing_url(job: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _clean_location_value(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _build_postal_prefix(postal_code: Optional[str]) -> Optional[str]:
+    if not postal_code:
+        return None
+    cleaned = "".join(ch for ch in postal_code.upper() if ch.isalnum())
+    prefix = cleaned[:3]
+    return prefix if len(prefix) >= 3 else None
+
+
+def _merge_location_fields_into_attributes(
+    current_attributes: Dict[str, Any],
+    location_fields: Dict[str, Any],
+    *,
+    source: Optional[str] = None,
+) -> Dict[str, Any]:
+    merged = dict(current_attributes or {})
+
+    city = _clean_location_value(location_fields.get("city"))
+    state = _clean_location_value(location_fields.get("state"))
+    postal_code = _clean_location_value(
+        location_fields.get("postalCode") or location_fields.get("postal_code")
+    )
+    country = _clean_location_value(location_fields.get("country"))
+    country_code = _clean_location_value(
+        location_fields.get("countryCode") or location_fields.get("country_code")
+    )
+
+    if city:
+        merged["city"] = city
+    if state:
+        merged["state"] = state
+    if postal_code:
+        merged["postalCode"] = postal_code.upper()
+        postal_prefix = _build_postal_prefix(postal_code)
+        if postal_prefix:
+            merged["postalCodePrefix"] = postal_prefix
+    if country:
+        merged["country"] = country
+    if country_code:
+        merged["countryCode"] = country_code.upper()
+
+    if source and any([city, state, postal_code, country, country_code]):
+        merged["locationSource"] = source
+
+    return merged
+
+
 def _merge_extracted_specs_into_attributes(
     current_attributes: Dict[str, Any],
     transparent_result: Dict[str, Any],
@@ -175,7 +228,11 @@ def _merge_extracted_specs_into_attributes(
     if isinstance(specs.get("beds"), int) and specs["beds"] > 0:
         merged["beds"] = specs["beds"]
 
-    return merged
+    return _merge_location_fields_into_attributes(
+        merged,
+        specs,
+        source="listing_page",
+    )
 
 
 def _should_bypass_precache_for_url_mode(
@@ -756,10 +813,16 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     )
                 else:
                     # Coords not yet stored — geocode the input address
-                    from worker.core.geocoding import geocode_address
-                    _gc = geocode_address(address)
+                    from worker.core.geocode_details import geocode_address_details
+                    _gc = geocode_address_details(address)
                     if _gc:
-                        _job_target_lat, _job_target_lng = _gc
+                        _job_target_lat = float(_gc["lat"])
+                        _job_target_lng = float(_gc["lng"])
+                        finalized_input_attributes = _merge_location_fields_into_attributes(
+                            finalized_input_attributes,
+                            _gc,
+                            source="geocoded",
+                        )
                         _geocoded_now = True
                         logger.info(
                             f"[{report_id}] Geocoded target: "
@@ -1139,7 +1202,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     f"[{report_id}] Alert evaluation failed (non-fatal): {_alert_exc}"
                 )
 
-        if listing_url:
+        if job.get("listing_id"):
             try:
                 db_helpers.sync_linked_listing_attributes(
                     client, report_id, finalized_input_attributes

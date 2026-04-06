@@ -7,7 +7,11 @@
     "dev:webpack": "next dev --webpack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "ml:batch": "run_ml_batch.cmd",
+    "ml:backtest": "run_ml_backtest.cmd",
+    "ml:backtest:time": "run_ml_backtest_time.cmd",
+    "ml:compare": "run_ml_compare_dates.cmd"
   },
   "dependencies": {
     "@next/third-parties": "^16.1.6",

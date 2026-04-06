@@ -219,6 +219,8 @@ export default function ToolPage() {
             maxGuests,
             sizeSqFt: sizeSqFt || undefined,
             amenities,
+            city: city.trim() || undefined,
+            postalCode: zip.trim() || undefined,
           },
           dates: { startDate, endDate },
           discountPolicy: {
