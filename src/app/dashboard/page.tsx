@@ -743,13 +743,68 @@ export default function DashboardPage() {
                 {activeCalendar.length > 0 && (
                   <PricingHeatmap
                     calendar={activeCalendar}
-                    selectable={activeAutoApplyConfigured && activeAutoApplyVerified}
+                    selectable={activeAutoApplyConfigured && activeAutoApplyCohostStatus !== "not_started"}
                     onApplyDates={(dates) => {
                       setApplyDates(dates);
                       setApplyOpen(true);
                     }}
                   />
                 )}
+
+                {/* ── 5. Co-host section ── */}
+                {(() => {
+                  const listingUrl =
+                    activeListing.input_attributes.listingUrl ??
+                    activeListing.input_attributes.listing_url ??
+                    null;
+                  const airbnbId = extractAirbnbListingId(listingUrl) ?? null;
+                  const cohostManageUrl = airbnbId
+                    ? `https://www.airbnb.com/hosting/listings/editor/${airbnbId}/details/co-hosts`
+                    : "https://www.airbnb.com/hosting/listings";
+                  const cohostInviteUrl = airbnbId
+                    ? `https://www.airbnb.com/hosting/listings/editor/${airbnbId}/details/co-hosts/invite`
+                    : "https://www.airbnb.com/hosting/listings";
+                  const hasCohost = activeAutoApplyCohostStatus !== "not_started";
+
+                  return (
+                    <div className="overflow-hidden rounded-2xl border border-gray-200 bg-gray-50">
+                      <div className="flex items-center justify-between gap-4 px-5 py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-gray-200">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="text-foreground/60" aria-hidden="true">
+                              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                              <circle cx="9" cy="7" r="4" />
+                              <line x1="19" y1="8" x2="19" y2="14" />
+                              <line x1="22" y1="11" x2="16" y2="11" />
+                            </svg>
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium text-foreground/70">
+                              {hasCohost ? "Airahost co-host" : "Add Airahost as co-host"}
+                            </p>
+                            <p className="text-xs text-foreground/40">
+                              {hasCohost
+                                ? activeAutoApplyVerified
+                                  ? "Access verified"
+                                  : activeAutoApplyVerifying
+                                  ? "Verifying access…"
+                                  : "Pending verification"
+                                : "Required to apply prices automatically"}
+                            </p>
+                          </div>
+                        </div>
+                        <a
+                          href={hasCohost ? cohostManageUrl : cohostInviteUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="shrink-0 rounded-xl border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-foreground/60 transition-colors hover:border-gray-300 hover:text-foreground/80"
+                        >
+                          {hasCohost ? "Manage" : "Add in Airbnb →"}
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Manual apply portal */}
                 {applyOpen && activeListing && activeAutoApplySettings && (
