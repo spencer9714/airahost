@@ -743,35 +743,11 @@ export default function DashboardPage() {
                 {activeCalendar.length > 0 && (
                   <PricingHeatmap
                     calendar={activeCalendar}
-                    selectable={activeAutoApplyConfigured}
-                    applyGated={!activeAutoApplyVerified}
-                    cohostVerifying={activeAutoApplyVerifying}
+                    selectable={activeAutoApplyConfigured && activeAutoApplyVerified}
                     onApplyDates={(dates) => {
                       setApplyDates(dates);
                       setApplyOpen(true);
                     }}
-                    onSetupCohost={() => {
-                      const rawUrl =
-                        activeListing.input_attributes.listingUrl ??
-                        activeListing.input_attributes.listing_url ??
-                        null;
-                      const airbnbId = extractAirbnbListingId(rawUrl) ?? null;
-                      const url = airbnbId
-                        ? `https://www.airbnb.com/hosting/listings/editor/${airbnbId}/details/co-hosts/invite`
-                        : "https://www.airbnb.com/hosting/listings";
-                      window.open(url, "_blank", "noopener,noreferrer");
-                    }}
-                    onManageCohost={activeAutoApplyVerified ? () => {
-                      const rawUrl =
-                        activeListing.input_attributes.listingUrl ??
-                        activeListing.input_attributes.listing_url ??
-                        null;
-                      const airbnbId = extractAirbnbListingId(rawUrl) ?? null;
-                      const url = airbnbId
-                        ? `https://www.airbnb.com/hosting/listings/editor/${airbnbId}/details/co-hosts`
-                        : "https://www.airbnb.com/hosting/listings";
-                      window.open(url, "_blank", "noopener,noreferrer");
-                    } : undefined}
                   />
                 )}
 

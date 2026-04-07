@@ -377,6 +377,9 @@ export default function ResultsPage({
   const [saveLoading, setSaveLoading] = useState(false);
   const [saveError, setSaveError] = useState("");
 
+  // Auto-Apply status for this listing (null = loading, false = not configured)
+  const [autoApplyConfigured, setAutoApplyConfigured] = useState<boolean | null>(null);
+
   const fetchReport = useCallback(async () => {
     try {
       const res = await fetch(`/api/r/${shareId}`);
@@ -488,6 +491,28 @@ export default function ResultsPage({
       cancelled = true;
     };
   }, [report?.id, isSignedIn]);
+
+  // Fetch Auto-Apply settings for this listing when signed in
+  useEffect(() => {
+    let cancelled = false;
+    async function checkAutoApply() {
+      const listingId = (report as (typeof report & { listingId?: string | null }))?.listingId;
+      if (!listingId || isSignedIn !== true) {
+        setAutoApplyConfigured(false);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/listings/${listingId}`, { cache: "no-store" });
+        if (!res.ok) { if (!cancelled) setAutoApplyConfigured(false); return; }
+        const data = await res.json();
+        if (!cancelled) setAutoApplyConfigured(!!data?.auto_apply_last_updated_at);
+      } catch {
+        if (!cancelled) setAutoApplyConfigured(false);
+      }
+    }
+    checkAutoApply();
+    return () => { cancelled = true; };
+  }, [(report as (typeof report & { listingId?: string | null }))?.listingId, isSignedIn]);
 
 
   // Queued / Running state
@@ -729,19 +754,43 @@ export default function ResultsPage({
 
       {/* 30-Day Pricing Plan */}
       {(report.resultCalendar ?? []).length > 0 && (
-        <div className="mb-6">
+        <div className="mb-6 space-y-3">
           <PricingHeatmap
             calendar={report.resultCalendar ?? []}
-            selectable={isSignedIn === true}
-            applyGated={true}
-            onSetupCohost={() => {
-              const airbnbId = extractAirbnbListingId(report.inputAttributes?.listingUrl ?? null);
-              const url = airbnbId
-                ? `https://www.airbnb.com/hosting/listings/editor/${airbnbId}/details/co-hosts/invite`
-                : "https://www.airbnb.com/hosting/listings";
-              window.open(url, "_blank", "noopener,noreferrer");
+            selectable={isSignedIn === true && autoApplyConfigured === true}
+            onApplyDates={() => {
+              window.location.href = "/dashboard";
             }}
           />
+
+          {/* Auto-Apply CTA — only when signed in but not configured */}
+          {isSignedIn === true && autoApplyConfigured === false && (
+            <div className="overflow-hidden rounded-2xl border border-gray-200 bg-gray-50">
+              <div className="flex items-start gap-4 px-5 py-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-gray-200">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="text-foreground/60" aria-hidden="true">
+                    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+                    <polyline points="13 2 13 9 20 9" />
+                  </svg>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-foreground/80">Set up Auto-Apply to use this calendar</p>
+                  <p className="mt-0.5 text-xs leading-snug text-foreground/45">
+                    Configure Auto-Apply in your dashboard to select nights and apply pricing recommendations directly to Airbnb.
+                  </p>
+                  <a
+                    href="/dashboard"
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80"
+                  >
+                    Go to dashboard
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M5 12h14M12 5l7 7-7 7" />
+                    </svg>
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

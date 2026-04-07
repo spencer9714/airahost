@@ -5,35 +5,15 @@ import type { CalendarDay } from "@/lib/schemas";
 
 interface Props {
   calendar: CalendarDay[];
+  /** When true, dates are selectable and an apply footer is shown. */
   selectable?: boolean;
-  /**
-   * true  = configured but co-host not yet verified (show "Add co-host" banner)
-   * false = verified (calendar is fully interactive)
-   */
-  applyGated?: boolean;
-  /**
-   * true = co-host invite was sent and we are waiting for Airbnb to confirm.
-   * When true the banner changes from "Add" to "Verifying..." instead of
-   * prompting the user to do something they've already done.
-   */
-  cohostVerifying?: boolean;
   onApplyDates?: (selectedDates: string[]) => void;
-  onSetupCohost?: () => void;
-  onManageCohost?: () => void;
 }
 
 const TODAY = new Date().toISOString().split("T")[0];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-export function PricingHeatmap({
-  calendar,
-  selectable = false,
-  applyGated = false,
-  cohostVerifying = false,
-  onApplyDates,
-  onSetupCohost,
-  onManageCohost,
-}: Props) {
+export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: Props) {
   const days = calendar;
 
   const [selectedDates, setSelectedDates] = useState<Set<string>>(
@@ -44,12 +24,10 @@ export function PricingHeatmap({
   if (days.length === 0) return null;
 
   const displayPrices = days.map((d) => d.recommendedDailyPrice ?? d.basePrice);
-
   const visibleDays = view === "7" ? days.slice(0, 7) : days;
   const selectedCount = selectedDates.size;
   const totalCount = days.length;
 
-  // Offset so the first date lands on the correct weekday column
   const startOffset = view === "30"
     ? new Date(visibleDays[0].date + "T00:00:00").getDay()
     : 0;
@@ -110,7 +88,6 @@ export function PricingHeatmap({
 
       {/* ── Calendar grid ── */}
       <div className="grid grid-cols-7 gap-1.5 px-4 pb-4">
-        {/* Empty offset cells */}
         {Array.from({ length: startOffset }).map((_, i) => (
           <div key={`empty-${i}`} />
         ))}
@@ -142,9 +119,7 @@ export function PricingHeatmap({
             <div className={`rounded-2xl p-2.5 transition-colors ${tileCls} ${selectable && !isPast ? "cursor-pointer hover:border-gray-400/50" : ""}`}>
               {dateNumEl}
               {!isPast && (
-                <p className="mt-3 text-sm font-medium text-foreground/70">
-                  ${price}
-                </p>
+                <p className="mt-3 text-sm font-medium text-foreground/70">${price}</p>
               )}
             </div>
           );
@@ -156,84 +131,18 @@ export function PricingHeatmap({
               </button>
             );
           }
-
           return <div key={day.date}>{cell}</div>;
         })}
       </div>
 
-      {/* ── Co-host gating banner ── */}
-      {applyGated && (
-        <div className="mx-4 mb-2 overflow-hidden rounded-2xl border border-gray-200 bg-gray-50">
-          <div className="flex items-start gap-4 px-5 py-4">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-gray-200">
-              {cohostVerifying ? (
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="text-blue-400" aria-hidden="true">
-                  <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />
-                  <path d="M12 6v6l4 2" />
-                </svg>
-              ) : (
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" className="text-foreground/60" aria-hidden="true">
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                  <circle cx="9" cy="7" r="4" />
-                  <line x1="19" y1="8" x2="19" y2="14" />
-                  <line x1="22" y1="11" x2="16" y2="11" />
-                </svg>
-              )}
-            </div>
-            <div className="min-w-0 flex-1">
-              {cohostVerifying ? (
-                <>
-                  <p className="text-sm font-semibold text-foreground/80">Verifying co-host access</p>
-                  <p className="mt-0.5 text-xs leading-snug text-foreground/45">
-                    We&apos;re confirming your co-host status with Airbnb. This usually takes a few minutes.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="text-sm font-semibold text-foreground/80">Add Airahost as co-host</p>
-                  <p className="mt-0.5 text-xs leading-snug text-foreground/45">
-                    Grant co-host access in Airbnb so we can apply your pricing recommendations automatically.
-                  </p>
-                  {onSetupCohost && (
-                    <button
-                      type="button"
-                      onClick={onSetupCohost}
-                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80"
-                    >
-                      Set up in Airbnb
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M5 12h14M12 5l7 7-7 7" />
-                      </svg>
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Footer ── */}
-      {(selectable && !applyGated) && (
+      {/* ── Apply footer ── */}
+      {selectable && (
         <div className="border-t border-gray-100 px-6 py-4">
           <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <p className="text-xs text-foreground/35">
-                {selectedCount === totalCount
-                  ? `All ${totalCount} nights`
-                  : `${selectedCount} of ${totalCount} nights`}
-                {" selected"}
-              </p>
-              {onManageCohost && (
-                <button
-                  type="button"
-                  onClick={onManageCohost}
-                  className="text-[11px] text-foreground/30 underline-offset-2 transition-colors hover:text-foreground/55"
-                >
-                  Manage co-host
-                </button>
-              )}
-            </div>
+            <p className="text-xs text-foreground/35">
+              {selectedCount === totalCount ? `All ${totalCount} nights` : `${selectedCount} of ${totalCount} nights`}
+              {" selected"}
+            </p>
             <button
               type="button"
               disabled={selectedCount === 0}

@@ -29,6 +29,7 @@ export async function GET(
   const summary = data.result_summary;
   return NextResponse.json({
     id: data.id,
+    listingId: data.listing_id ?? null,
     shareId: data.share_id,
     status: data.status,
     coreVersion: data.core_version,
