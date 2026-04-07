@@ -204,6 +204,12 @@ export function generatePricingReport(
       date: d.toISOString().split("T")[0],
       dayOfWeek: dayNames[dow],
       isWeekend,
+      // Canonical recommendation field — set equal to basePrice for demo data.
+      // Demo reports do not distinguish market vs recommendation; UI consumers
+      // that read recommendedDailyPrice ?? basePrice get the same value either way.
+      recommendedDailyPrice: basePrice,
+      // baseDailyPrice = raw market median (same as basePrice in demo, no scrape).
+      baseDailyPrice: basePrice,
       basePrice,
       refundablePrice,
       nonRefundablePrice,
@@ -247,14 +253,18 @@ export function generatePricingReport(
   // Keep this rand() call so the seed sequence stays stable for all inputs.
   void rand();
 
-  // Recommended price: 3–8% above median, with weekday/weekend awareness.
+  // Canonical recommendation contract: nightly must equal calendar[0].recommendedDailyPrice.
+  // calendar[0].recommendedDailyPrice was set to basePrice (demand-adjusted, weekend-boosted)
+  // earlier in the loop — that is the correct day-0 value to pin here.
+  // The old recNightly (3–8% above median) is preserved as windowMedian for secondary context.
   const recNightly = Math.round(median * (1.03 + rand() * 0.05));
   const recommendedPrice: RecommendedPrice = {
-    nightly: recNightly,
+    nightly: calendar[0]?.recommendedDailyPrice ?? recNightly,
     weekdayEstimate: Math.round(weekdayAvg * (1.02 + rand() * 0.04)),
     weekendEstimate: Math.round(weekendAvg * (1.03 + rand() * 0.05)),
     discountApplied: 0,
-    notes: "Based on comparable listings in your area, adjusted for property type and local demand patterns.",
+    notes: "Demo data: nightly equals day-0 recommendedDailyPrice per canonical contract.",
+    windowMedian: recNightly,
   };
 
   // Price distribution from sorted comp prices (quartiles).

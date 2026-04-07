@@ -30,13 +30,17 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 import statistics
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from worker.core.comp_utils import (
+    build_comp_prices_dict,
+    compute_price_distribution,
+    to_comparable_payload,
+)
 from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM, apply_geo_filter
 from worker.core.price_band import apply_price_band_filter
 from worker.core.price_sanity import apply_price_sanity, build_price_sanity_weights
@@ -47,9 +51,9 @@ from worker.core.similarity import (
     filter_similar_candidates,
     similarity_score,
 )
+from worker.scraper.comp_collection import collect_search_comps
 from worker.scraper.comparable_collector import (
     build_search_url,
-    extract_comp_coords,
     parse_card_to_spec,
     scroll_and_collect,
     wait_for_cards,
@@ -57,7 +61,6 @@ from worker.scraper.comparable_collector import (
 from worker.scraper.target_extractor import ListingSpec
 
 logger = logging.getLogger("worker.scraper.day_query")
-ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
 
 # Boost applied to the display similarity of the pinned comp in top_comps list
 _PINNED_DISPLAY_MULTIPLIER: float = 2.0
@@ -162,110 +165,24 @@ def estimate_base_price_for_date(
     Execute a 1-night Airbnb search for date_i -> date_i+1.
     Collect cards, filter by similarity to target, compute price distribution.
     """
-    def _safe_num(v: Any, fallback: Optional[float]) -> float:
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(fallback, (int, float)):
-            return float(fallback)
-        return 0.0
-
-    def _to_comparable_payload(spec: ListingSpec, score: float) -> Dict[str, Any]:
-        room_match = ROOM_ID_RE.search(spec.url or "")
-        comp_id = room_match.group(1) if room_match else (spec.url or f"comp-{int(time.time() * 1000)}")
-        payload: Dict[str, Any] = {
-            "id": comp_id,
-            "title": spec.title or "Comparable listing",
-            "propertyType": spec.property_type or target.property_type or "entire_home",
-            "accommodates": int(spec.accommodates) if isinstance(spec.accommodates, (int, float)) else None,
-            "bedrooms": int(spec.bedrooms) if isinstance(spec.bedrooms, (int, float)) else None,
-            "baths": round(float(spec.baths), 1) if isinstance(spec.baths, (int, float)) else None,
-            "nightlyPrice": round(_safe_num(spec.nightly_price, None), 2),
-            "currency": spec.currency or "USD",
-            "similarity": round(float(score), 3),
-            "rating": round(float(spec.rating), 2) if isinstance(spec.rating, (int, float)) else None,
-            "reviews": int(spec.reviews) if isinstance(spec.reviews, (int, float)) else None,
-            "location": spec.location or None,
-            "url": spec.url or None,
-        }
-        # scrape_nights > 1 means this listing's price was a trip total that was
-        # divided per-night (e.g. "for 2 nights" on a 2-night minimum listing).
-        if spec.scrape_nights > 1:
-            payload["queryNights"] = spec.scrape_nights
-        # Include distance from target when available (from geo filter)
-        if spec.distance_to_target_km is not None:
-            payload["distanceKm"] = round(spec.distance_to_target_km, 2)
-        # Include approximate coordinates when available
-        if spec.lat is not None and spec.lng is not None:
-            payload["lat"] = round(spec.lat, 6)
-            payload["lng"] = round(spec.lng, 6)
-        return payload
-
     checkin_str = date_i.isoformat()
     is_weekend = date_i.weekday() >= 4  # Fri=4, Sat=5
 
     try:
-        raw_cards: List[Dict[str, Any]] = []
-        comps: List[ListingSpec] = []
-        priced: List[ListingSpec] = []
-        query_nights_used = 1
-
-        for query_nights in (2, 1):
-            checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
-            search_url = build_search_url(
-                base_origin, target.location, checkin_str, checkout_str, adults,
-            )
-            logger.info(f"[day_query] {checkin_str}: {query_nights}-night search (primary=2)")
-
-            page.goto(search_url, wait_until="domcontentloaded", timeout=PER_DAY_TIMEOUT_S * 1000)
-            wait_for_cards(page)
-
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-
-            raw_cards = scroll_and_collect(
-                page,
-                max_rounds=max_scroll_rounds,
-                max_cards=max_cards,
-                pause_ms=600,
-                rate_limit_seconds=rate_limit_seconds,
-                stay_nights=query_nights,
-            )
-
-            # Best-effort: extract approximate coordinates from page state.
-            # Returns {} if page has no embedded coord data or parse fails.
-            try:
-                coord_map = extract_comp_coords(page)
-            except Exception:
-                coord_map = {}
-
-            parsed_comps = [parse_card_to_spec(c) for c in raw_cards]
-
-            # Assign coordinates to specs where available
-            if coord_map:
-                for spec in parsed_comps:
-                    room_m = ROOM_ID_RE.search(spec.url or "")
-                    if room_m:
-                        pair = coord_map.get(room_m.group(1))
-                        if pair:
-                            spec.lat, spec.lng = pair[0], pair[1]
-
-            comps = [
-                c for c in parsed_comps
-                if c.url and not (target.url and comp_urls_match(c.url, target.url))
-            ]
-            self_excluded = len(parsed_comps) - len(comps)
-            priced = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
-            logger.info(
-                f"[day_query] {checkin_str}: query_nights={query_nights} raw_cards={len(raw_cards)} "
-                f"parsed={len(parsed_comps)} self_excluded={self_excluded} priced={len(priced)}"
-            )
-            if priced:
-                query_nights_used = query_nights
-                break
-
-        comps = priced
+        # 2-night-primary / 1-night-fallback search; coord extraction included.
+        comps, query_nights_used = collect_search_comps(
+            page,
+            target.location,
+            base_origin,
+            date_i,
+            adults,
+            max_scroll_rounds=max_scroll_rounds,
+            max_cards=max_cards,
+            rate_limit_seconds=rate_limit_seconds,
+            timeout_ms=PER_DAY_TIMEOUT_S * 1000,
+            exclude_url=target.url,
+            log_prefix="day_query",
+        )
 
         # ── Phase 3A: Geographic distance filter ──────────────────
         # Applied before similarity scoring.  Requires both the target
@@ -284,12 +201,7 @@ def estimate_base_price_for_date(
 
         # Build full comp_prices map (all priced comps, not just top_k).
         # This populates priceByDate for every comp in comparable listings.
-        all_comp_prices: Dict[str, float] = {}
-        for c in comps:
-            room_match = ROOM_ID_RE.search(c.url or "")
-            cid = room_match.group(1) if room_match else (c.url or "")
-            if cid and c.nightly_price:
-                all_comp_prices[cid] = round(float(c.nightly_price), 2)
+        all_comp_prices = build_comp_prices_dict(comps)
 
         if comps_collected == 0:
             return DayResult(
@@ -495,7 +407,7 @@ def estimate_base_price_for_date(
         top_comps_scored = above_floor[: min(max(3, top_k), len(above_floor))]
         top_comps = [
             {
-                **_to_comparable_payload(c, s),
+                **to_comparable_payload(c, s, target=target, include_geo=True),
                 **({"priceOutlier": True} if id(c) in excluded_ids else {}),
                 **({"priceBandExcluded": True} if id(c) in _band_excluded_ids else {}),
             }
@@ -515,17 +427,7 @@ def estimate_base_price_for_date(
                 flags.append("low_demand")
 
         # Price distribution
-        dist: Dict[str, Any] = {
-            "min": round(min(prices), 2) if prices else None,
-            "max": round(max(prices), 2) if prices else None,
-            "median": round(statistics.median(prices), 2) if prices else None,
-            "p25": None,
-            "p75": None,
-        }
-        if len(prices) >= 4:
-            q = statistics.quantiles(prices, n=4)
-            dist["p25"] = round(q[0], 2)
-            dist["p75"] = round(q[2], 2)
+        dist = compute_price_distribution(prices)
 
         logger.info(
             f"[day_query] {checkin_str}: comps={comps_collected} filtered={len(filtered_comps)} "

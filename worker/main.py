@@ -39,6 +39,10 @@ from worker.core.discounts import (
     build_stay_length_averages,
 )
 from worker.core.dynamic_pricing import compute_dynamic_pricing_adjustment
+from worker.core.report_policy import (
+    resolve_execution_policy,
+    NIGHTLY_POLICIES,
+)
 # mock_core removed — scrape failures now mark jobs as error
 
 # ---------------------------------------------------------------------------
@@ -149,59 +153,6 @@ def _get_listing_url(job: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _clean_location_value(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    text = value.strip()
-    return text or None
-
-
-def _build_postal_prefix(postal_code: Optional[str]) -> Optional[str]:
-    if not postal_code:
-        return None
-    cleaned = "".join(ch for ch in postal_code.upper() if ch.isalnum())
-    prefix = cleaned[:3]
-    return prefix if len(prefix) >= 3 else None
-
-
-def _merge_location_fields_into_attributes(
-    current_attributes: Dict[str, Any],
-    location_fields: Dict[str, Any],
-    *,
-    source: Optional[str] = None,
-) -> Dict[str, Any]:
-    merged = dict(current_attributes or {})
-
-    city = _clean_location_value(location_fields.get("city"))
-    state = _clean_location_value(location_fields.get("state"))
-    postal_code = _clean_location_value(
-        location_fields.get("postalCode") or location_fields.get("postal_code")
-    )
-    country = _clean_location_value(location_fields.get("country"))
-    country_code = _clean_location_value(
-        location_fields.get("countryCode") or location_fields.get("country_code")
-    )
-
-    if city:
-        merged["city"] = city
-    if state:
-        merged["state"] = state
-    if postal_code:
-        merged["postalCode"] = postal_code.upper()
-        postal_prefix = _build_postal_prefix(postal_code)
-        if postal_prefix:
-            merged["postalCodePrefix"] = postal_prefix
-    if country:
-        merged["country"] = country
-    if country_code:
-        merged["countryCode"] = country_code.upper()
-
-    if source and any([city, state, postal_code, country, country_code]):
-        merged["locationSource"] = source
-
-    return merged
-
-
 def _merge_extracted_specs_into_attributes(
     current_attributes: Dict[str, Any],
     transparent_result: Dict[str, Any],
@@ -228,11 +179,7 @@ def _merge_extracted_specs_into_attributes(
     if isinstance(specs.get("beds"), int) and specs["beds"] > 0:
         merged["beds"] = specs["beds"]
 
-    return _merge_location_fields_into_attributes(
-        merged,
-        specs,
-        source="listing_page",
-    )
+    return merged
 
 
 def _should_bypass_precache_for_url_mode(
@@ -372,39 +319,84 @@ def _build_scrape_calendar(
             effective_refundable = None
             effective_non_refundable = None
 
+        # ── Canonical daily recommendation field ─────────────────────────
+        # The single user-facing recommended listing price for this date.
+        # Derived as: market median × demand adjustment (no time/last-minute
+        # discount applied — that is an internal strategy, not the host's
+        # recommended list price).
+        #
+        # demandAdjustment range: 0.90 (low-demand) → 1.05 (peak/weekend)
+        # — weekends +8%, peak/event +15%, low-demand −15%, tight spread slight boost
+        # This makes the recommendation genuinely distinct from the raw market
+        # reference (baseDailyPrice) and day-variation-aware.
+        _demand_adj = (dynamic.get("dynamicAdjustment") or {}).get("demandAdjustment", 1.0)
+        _rec_base = base_daily_price if base_daily_price is not None else overall_median
+        _recommended_daily = round(_rec_base * _demand_adj)
+
         entry: Dict[str, Any] = {
             "date": ds,
             "dayOfWeek": DAY_NAMES[dow],
             "isWeekend": is_weekend,
-            # Legacy keys retained.
-            "basePrice": legacy_base_price,
-            "refundablePrice": legacy_refundable,
-            "nonRefundablePrice": legacy_non_refundable,
-            # Unified dynamic-adjustment fields.
+            "flags": flags,
+
+            # ── CANONICAL USER-FACING RECOMMENDATION ───────────────────────
+            # Primary price for all dashboard/report/alert surfaces.
+            # = baseDailyPrice × demandAdjustment (no time/last-minute discount).
+            "recommendedDailyPrice": _recommended_daily,
+
+            # ── MARKET REFERENCE ───────────────────────────────────────────
+            # Raw per-day market median.  Use for market-line in charts and
+            # transparency displays.  NOT the canonical recommendation.
             "baseDailyPrice": base_daily_price,
+
+            # ── INTERNAL ADJUSTMENT PIPELINE ──────────────────────────────
+            # These fields are internal pipeline stages and transparency data.
+            # Do NOT surface them as "recommended price" in new UI work.
             "dynamicAdjustment": dynamic.get("dynamicAdjustment"),
+            # timeMultiplier alias — last-minute discount factor; excluded from recommendation
             "lastMinuteMultiplier": (dynamic.get("dynamicAdjustment") or {}).get(
                 "timeMultiplier"
             ),
+            # baseDailyPrice × finalMultiplier (time + demand combined) — includes LM discount
             "priceAfterTimeAdjustment": price_after_time_adjustment,
+            # Full discount stack applied on top of priceAfterTimeAdjustment — internal only
             "effectiveDailyPriceRefundable": effective_refundable,
             "effectiveDailyPriceNonRefundable": effective_non_refundable,
-            "flags": flags,
+
+            # ── LEGACY COMPATIBILITY ───────────────────────────────────────
+            # Retained so old UI readers do not break.  New code must use
+            # recommendedDailyPrice instead of these fields.
+            "basePrice": legacy_base_price,           # = priceAfterTimeAdjustment or overallMedian
+            "refundablePrice": legacy_refundable,     # basePrice with discount stack
+            "nonRefundablePrice": legacy_non_refundable,  # refundablePrice + non-refundable
         }
         calendar.append(entry)
 
-    # Summary
+    # ── Summary stats ─────────────────────────────────────────────────────────
+    # Market proxy statistics derived from the legacy basePrice field
+    # (= priceAfterTimeAdjustment, or overallMedian for missing days).
+    # These are backward-compatible market reference metrics, not guaranteed to be
+    # raw unadjusted per-day market medians — near-term dates may reflect time/demand
+    # multipliers from the dynamic pricing pipeline.
+    # These stats (nightlyMin/Median/Max, weekdayAvg, weekendAvg, revenue estimates)
+    # are market proxy / reference values — NOT the canonical recommendation.
+    # The canonical recommendation is pinned separately below as
+    # summary["recommendedPrice"]["nightly"] = calendar[0]["recommendedDailyPrice"].
     base_prices = [d["basePrice"] for d in calendar]
     sorted_p = sorted(base_prices)
-    median = sorted_p[len(sorted_p) // 2]
+    median = sorted_p[len(sorted_p) // 2]  # market median reference (nightlyMedian)
     min_p = sorted_p[0]
     max_p = sorted_p[-1]
 
     # Weekday/weekend averages: use actual market comparable medians from the
     # transparent result when available.  These represent what comparable
-    # listings charge on those days — not the user's own adjusted prices.
+    # listings charge on those days — not the user's recommended prices.
+    # NOTE: rec here is the pre-pin engine recommendation (transparent_result["nightly"]),
+    # used only for insightHeadline generation.  After the canonical pin block below,
+    # summary["recommendedPrice"]["nightly"] will be replaced with day-0
+    # recommendedDailyPrice (which may differ from rec).
     rec_price_info = (transparent_result or {}).get("recommendedPrice") or {}
-    rec = rec_price_info.get("nightly")
+    rec = rec_price_info.get("nightly")   # engine's pre-pin recommendation (for headline only)
     market_weekday = rec_price_info.get("weekdayEstimate")
     market_weekend = rec_price_info.get("weekendEstimate")
 
@@ -480,12 +472,14 @@ def _build_scrape_calendar(
 
 def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     """
-    Process a single pricing report job (live_analysis only).
+    Dispatcher: resolves execution policy and routes to the correct pipeline.
 
-    forecast_snapshot jobs are no longer executed; any stale queued
-    forecast_snapshot rows will be failed immediately if encountered.
+    forecast_snapshot jobs are rejected immediately (deprecated).
+    All live_analysis jobs are routed to run_nightly_job() or
+    run_interactive_job() based on the resolved execution_policy.
     """
     report_id = job["id"]
+    job_lane = job.get("job_lane", "interactive")
 
     # Safeguard: forecast_snapshot jobs must never be executed.
     # The creation API routes now return 410 Gone, so no new ones should arrive.
@@ -508,6 +502,59 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         )
         return
 
+    policy = resolve_execution_policy(job)
+    is_nightly = policy in NIGHTLY_POLICIES
+    pipeline = "nightly" if is_nightly else "interactive"
+
+    logger.info(
+        f"[{report_id}] dispatch: job_lane={job_lane} "
+        f"execution_policy={policy} pipeline={pipeline}"
+    )
+
+    if is_nightly:
+        run_nightly_job(job, worker_token)
+    else:
+        run_interactive_job(job, worker_token)
+
+
+def run_nightly_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
+    """
+    Nightly pipeline entry point (execution_policy=nightly_board_refresh).
+
+    Delegates to _execute_analysis() with is_nightly=True.
+    This function is an explicit hook for nightly-only pre/post logic in
+    future phases (e.g., routing nightly_alert_training_refresh separately).
+    """
+    _execute_analysis(job, worker_token, is_nightly=True)
+
+
+def run_interactive_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
+    """
+    Interactive pipeline entry point (execution_policy=interactive_live_report).
+
+    Delegates to _execute_analysis() with is_nightly=False.
+    Interactive reports use snapshot semantics — inputs are not reloaded
+    from saved_listings at execution time.
+    """
+    _execute_analysis(job, worker_token, is_nightly=False)
+
+
+def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightly: bool) -> None:
+    """
+    Shared analysis engine for both nightly and interactive pipelines.
+
+    Manages heartbeat, cache lookup, scrape execution (Mode A/B/C),
+    result completion, alert evaluation (nightly only), geocoding,
+    pool seeding, and cache writes.
+
+    is_nightly controls:
+      - Whether saved_listing inputs are live-reloaded before execution
+      - Whether the cache key is recomputed after reload (nightly) or
+        kept from the queued snapshot (interactive)
+      - Whether refreshed inputs are written back to the report row
+      - Whether alert evaluation runs after completion
+    """
+    report_id = job["id"]
     client = db_helpers.get_client()
     start_time = time.time()
 
@@ -552,9 +599,9 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         # any benchmark / comp / setting changes the host makes after queuing
         # are still reflected in tonight's report.
         #
-        # Manual and rerun jobs keep snapshot semantics — their input_attributes
+        # Interactive jobs keep snapshot semantics — their input_attributes
         # represent the user's deliberate choices at the moment they clicked Run.
-        if job.get("job_lane") == "nightly" and job.get("listing_id"):
+        if is_nightly and job.get("listing_id"):
             try:
                 _reload_row = (
                     client.table("saved_listings")
@@ -640,9 +687,9 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         # or explicit force_rerun jobs submitted from the dashboard).
         # For nightly jobs the queued cache_key was computed from the snapshot
         # at queue time — after live-reload, execution inputs may differ so we
-        # must recompute from the actual values used.  Manual/rerun jobs keep
+        # must recompute from the actual values used.  Interactive jobs keep
         # the original key (snapshot semantics, no reload).
-        if job.get("job_lane") == "nightly":
+        if is_nightly:
             cache_key = compute_cache_key(
                 address, attributes, start_date, end_date, discount_policy, listing_url, input_mode
             )
@@ -722,7 +769,6 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             else:
                 summary["livePriceStatus"] = "no_listing_url"
                 summary["livePriceStatusReason"] = "No Airbnb listing URL configured for this property"
-            _is_nightly = job.get("job_lane") == "nightly"
             db_helpers.complete_job(
                 client, report_id, worker_token,
                 summary=summary,
@@ -738,30 +784,51 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 input_attributes=finalized_input_attributes,
                 # For nightly jobs: write all refreshed execution inputs back to the
                 # report row so it fully reflects actual inputs, not queued snapshot.
-                input_address=address if _is_nightly else None,
+                input_address=address if is_nightly else None,
                 # write_input_listing_url=True allows explicit NULL-clear when no URL.
-                input_listing_url=listing_url if _is_nightly else None,
-                write_input_listing_url=_is_nightly,
-                discount_policy=discount_policy if _is_nightly else None,
+                input_listing_url=listing_url if is_nightly else None,
+                write_input_listing_url=is_nightly,
+                discount_policy=discount_policy if is_nightly else None,
                 # Sync the recomputed execution cache key to the report row.
-                cache_key=cache_key if _is_nightly else None,
+                cache_key=cache_key if is_nightly else None,
             )
 
             # ── Alert evaluation — nightly only (cache-hit path) ─────────────
             # Must run AFTER complete_job() so the report is already marked ready.
             # Non-fatal: alert failures never affect the job outcome.
-            if _is_nightly and job.get("listing_id"):
+            if is_nightly and job.get("listing_id"):
                 try:
                     from worker.alerts import run_alert_evaluation
                     run_alert_evaluation(
                         job, summary, client,
                         listing_url=listing_url,
+                        calendar=calendar,
                         cdp_url=CDP_URL,
                         cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                     )
                 except Exception as _alert_exc:
                     logger.warning(
                         f"[{report_id}] Alert evaluation failed (non-fatal, cache-hit): {_alert_exc}"
+                    )
+
+            # ── Observation write — nightly only (cache-hit path) ─────────────
+            # Writes normalized per-date observations to the Phase-5A tables
+            # after the pricing_reports row is already marked ready.
+            # Non-fatal: observation failures never affect the job outcome.
+            if is_nightly and job.get("listing_id"):
+                try:
+                    from worker.core.observations import write_nightly_observations
+                    write_nightly_observations(
+                        client,
+                        saved_listing_id=job["listing_id"],
+                        pricing_report_id=report_id,
+                        captured_at=datetime.utcnow(),
+                        summary=summary,
+                        calendar=calendar,
+                    )
+                except Exception as _obs_exc:
+                    logger.warning(
+                        f"[{report_id}] Observation write failed (non-fatal, cache-hit): {_obs_exc}"
                     )
             return
 
@@ -813,16 +880,10 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     )
                 else:
                     # Coords not yet stored — geocode the input address
-                    from worker.core.geocode_details import geocode_address_details
-                    _gc = geocode_address_details(address)
+                    from worker.core.geocoding import geocode_address
+                    _gc = geocode_address(address)
                     if _gc:
-                        _job_target_lat = float(_gc["lat"])
-                        _job_target_lng = float(_gc["lng"])
-                        finalized_input_attributes = _merge_location_fields_into_attributes(
-                            finalized_input_attributes,
-                            _gc,
-                            source="geocoded",
-                        )
+                        _job_target_lat, _job_target_lng = _gc
                         _geocoded_now = True
                         logger.info(
                             f"[{report_id}] Geocoded target: "
@@ -867,7 +928,111 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         # Without this, a failed-but-attempted benchmark run would lose all transparency.
         _saved_benchmark_info: Optional[Dict[str, Any]] = None
 
-        if primary_benchmark_url and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
+        # ── Nightly crawl plans ───────────────────────────────────────────────
+        # Build tiered date-selection plans for nightly jobs before entering the
+        # Mode C/A/B selection.  Interactive jobs leave both plans as None so all
+        # three scrape functions keep their existing interactive behavior unchanged.
+        #
+        # Two plans are built:
+        #   _nightly_plan           — standard plan for Mode A/B (criteria/URL)
+        #   _nightly_plan_benchmark — tighter plan for Mode C (benchmark), keeping
+        #                             benchmark volume at parity with the pre-Phase-3
+        #                             BENCHMARK_MAX_SAMPLE_QUERIES=10 path.
+        _nightly_plan = None
+        _nightly_plan_benchmark = None
+        if is_nightly:
+            try:
+                from datetime import date as _date
+                from worker.core.nightly_strategy import build_nightly_crawl_plan
+                _d_start = _date.fromisoformat(start_date)
+                _d_end = _date.fromisoformat(end_date)
+                _total_nights = max(1, (_d_end - _d_start).days)
+                _nightly_plan = build_nightly_crawl_plan(_total_nights, mode="standard")
+                _nightly_plan_benchmark = build_nightly_crawl_plan(_total_nights, mode="benchmark")
+                logger.info(
+                    f"[{report_id}] Nightly crawl plan (standard): "
+                    f"observe={len(_nightly_plan.observe_indices)} "
+                    f"infer={len(_nightly_plan.infer_indices)} "
+                    f"of {_total_nights} nights | "
+                    f"scroll_rounds={_nightly_plan.scroll_rounds} "
+                    f"max_cards={_nightly_plan.max_cards} "
+                    f"early_stop={_nightly_plan.early_stop_threshold}"
+                )
+                logger.info(
+                    f"[{report_id}] Nightly crawl plan (benchmark): "
+                    f"observe={len(_nightly_plan_benchmark.observe_indices)} "
+                    f"of {_total_nights} nights | "
+                    f"scroll_rounds={_nightly_plan_benchmark.scroll_rounds} "
+                    f"max_cards={_nightly_plan_benchmark.max_cards}"
+                )
+            except Exception as _plan_exc:
+                logger.warning(
+                    f"[{report_id}] Failed to build nightly crawl plan (non-fatal, "
+                    f"falling back to interactive sampling): {_plan_exc}"
+                )
+                _nightly_plan = None
+                _nightly_plan_benchmark = None
+
+        # ── Phase 6A: Observation-first reuse (interactive, criteria modes) ─────
+        # Before live-scraping, attempt to assemble the report from stored
+        # nightly observations.  Only applies when:
+        #   - this is NOT a nightly job (is_nightly=False)
+        #   - the job has a saved listing_id  (listing shorthand / rerun flows)
+        #   - input_mode is criteria-based   (url mode must scrape for specs)
+        # Fails non-fatally: any exception falls back to the live scrape path.
+        _obs_reuse_succeeded = False
+        _obs_assessment = None
+        if (
+            not is_nightly
+            and job.get("listing_id")
+            and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip")
+        ):
+            try:
+                from worker.core.observation_reuse import (
+                    assess_observation_coverage,
+                    REUSE_ELIGIBLE_MODES,
+                )
+                _obs_assessment = assess_observation_coverage(
+                    client,
+                    saved_listing_id=job["listing_id"],
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                logger.info(
+                    f"[{report_id}] Observation reuse: "
+                    f"eligible={_obs_assessment.eligible}  "
+                    f"dates={len(_obs_assessment.dates_requested)}  "
+                    f"reason={_obs_assessment.reason!r}"
+                )
+                if _obs_assessment.eligible:
+                    _progress(15, "assembling", "Assembling report from stored market observations...")
+                    _reu_result = _build_scrape_calendar(
+                        _obs_assessment.assembled_rows,
+                        start_date, end_date, discount_policy,
+                        None,  # transparent_result — not available from observations
+                    )
+                    if _reu_result[0] is not None and _reu_result[1] is not None:
+                        summary, calendar = _reu_result
+                        core_version = WORKER_VERSION + "+obs_reuse"
+                        transparent_result = None
+                        _obs_reuse_succeeded = True
+                        logger.info(
+                            f"[{report_id}] Observation reuse succeeded: "
+                            f"{len(_obs_assessment.dates_reusable)} dates served from "
+                            f"stored observations (live scrape skipped)"
+                        )
+                    else:
+                        logger.warning(
+                            f"[{report_id}] Observation reuse calendar build returned no "
+                            f"valid prices — falling back to live scrape"
+                        )
+            except Exception as _reu_exc:
+                logger.warning(
+                    f"[{report_id}] Observation reuse check failed (non-fatal, "
+                    f"falling back to live scrape): {_reu_exc}"
+                )
+
+        if not _obs_reuse_succeeded and primary_benchmark_url and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
             # Mode C: Benchmark-first — use pinned comp as primary anchor.
             # Only for criteria modes; URL mode already has its own listing to scrape.
             logger.info(
@@ -889,10 +1054,12 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                     secondary_benchmark_urls=secondary_benchmark_urls or None,
                     user_attributes=attributes,
+                    fallback_address=address,
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
                     progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
+                    nightly_plan=_nightly_plan_benchmark,
                 )
 
                 # Save benchmark transparency now — before any fallback overwrites transparent_result.
@@ -925,7 +1092,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 transparent_result = None
 
-        if not _mode_c_succeeded and listing_url:
+        if not _obs_reuse_succeeded and not _mode_c_succeeded and listing_url:
             # Mode A: URL scrape — user provided a listing URL
             logger.info(f"[{report_id}] Mode A (URL scrape): {listing_url}")
             _progress(10, "extracting_target", "Extracting listing details...")
@@ -947,6 +1114,14 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
                     progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
+                    nightly_plan=_nightly_plan,
+                    # Backfill any target spec fields Airbnb failed to return
+                    # (bedrooms, baths, accommodates, propertyType) from the
+                    # saved listing inputs so comparable matching stays effective.
+                    fallback_attributes=attributes,
+                    # Last-resort location fallback when both page extraction and
+                    # title-based heuristics fail to yield a search location.
+                    fallback_address=address,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -986,7 +1161,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 return
 
-        elif not _mode_c_succeeded and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
+        elif not _obs_reuse_succeeded and not _mode_c_succeeded and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
             # Mode B: Criteria search — find best matching listing, then scrape comps
             logger.info(f"[{report_id}] Mode B (criteria search, mode={input_mode}): {address}")
             _progress(10, "searching_comps", "Searching for comparable listings...")
@@ -1009,6 +1184,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
                     progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
+                    nightly_plan=_nightly_plan,
                 )
 
                 valid_prices = [r["median_price"] for r in daily_results if r.get("median_price")]
@@ -1045,7 +1221,7 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                 )
                 return
 
-        elif not _mode_c_succeeded:
+        elif not _obs_reuse_succeeded and not _mode_c_succeeded:
             # No listing URL and no criteria — cannot proceed
             _fail(
                 "Please provide either a listing URL or search criteria.",
@@ -1067,6 +1243,18 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             "total_ms": total_ms,
         })
 
+        # Promote nightly crawl debug from timings into the top-level debug dict
+        # so it is visible in result_core_debug without digging into timingsMs.
+        if _nightly_plan is not None:
+            _ncd = (debug.get("timingsMs") or {}).get("nightly_crawl_debug")
+            if _ncd:
+                debug["nightly_crawl"] = _ncd
+
+        # Phase 6A: merge observation reuse metadata into debug so the reuse
+        # decision is fully inspectable without reading the observation tables.
+        if _obs_assessment is not None:
+            debug.update(_obs_assessment.to_debug_dict())
+
         # Enrich summary with transparency fields
         if transparent_result:
             summary["targetSpec"] = transparent_result.get("targetSpec")
@@ -1080,6 +1268,35 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             bm_info = transparent_result.get("benchmarkInfo") or _saved_benchmark_info
             if bm_info:
                 summary["benchmarkInfo"] = bm_info
+
+        # ── Canonical pricing contract: pin recommendedPrice.nightly ─────────
+        # summary.recommendedPrice.nightly must equal the calendar's canonical
+        # daily recommendation for the report start date (day 0).
+        # This unifies dashboard, report, chart, and alert pricing surfaces so
+        # they all display the same "Recommended Price" number.
+        #
+        # The pricing-engine similarity-weighted recommendation (if present) is
+        # preserved as recommendedPrice.windowMedian for secondary context only.
+        if calendar:
+            _day0_rec = calendar[0].get("recommendedDailyPrice")
+            if _day0_rec is not None:
+                _existing_rec = summary.get("recommendedPrice") or {}
+                _rec_dict = dict(_existing_rec) if isinstance(_existing_rec, dict) else {}
+                # Archive pricing-engine nightly as windowMedian before overwriting
+                _engine_nightly = _rec_dict.get("nightly")
+                if _engine_nightly is not None:
+                    _rec_dict.setdefault("windowMedian", _engine_nightly)
+                # Pin nightly to the canonical day-0 demand-adjusted recommendation.
+                # This value = day-0 baseDailyPrice × demandAdjustment (no time/LM discount).
+                _rec_dict["nightly"] = _day0_rec
+                _rec_dict.setdefault("weekdayEstimate", None)
+                _rec_dict.setdefault("weekendEstimate", None)
+                _rec_dict.setdefault("discountApplied", 0)
+                _rec_dict.setdefault(
+                    "notes",
+                    "Market-based recommended daily price for report start date",
+                )
+                summary["recommendedPrice"] = _rec_dict
 
         # ── Live price capture (target listing) ──────────────────────────────
         # Attempt to read the host's current listed nightly price from Airbnb
@@ -1166,7 +1383,6 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
         _progress(90, "saving_results", "Saving results...")
 
         # Write results
-        _is_nightly = job.get("job_lane") == "nightly"
         db_helpers.complete_job(
             client, report_id, worker_token,
             summary=summary,
@@ -1176,24 +1392,25 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
             input_attributes=finalized_input_attributes,
             # For nightly jobs: write all refreshed execution inputs back to the
             # report row so it fully reflects actual inputs, not queued snapshot.
-            input_address=address if _is_nightly else None,
+            input_address=address if is_nightly else None,
             # write_input_listing_url=True allows explicit NULL-clear when no URL.
-            input_listing_url=listing_url if _is_nightly else None,
-            write_input_listing_url=_is_nightly,
-            discount_policy=discount_policy if _is_nightly else None,
+            input_listing_url=listing_url if is_nightly else None,
+            write_input_listing_url=is_nightly,
+            discount_policy=discount_policy if is_nightly else None,
             # Sync the recomputed execution cache key to the report row.
-            cache_key=cache_key if _is_nightly else None,
+            cache_key=cache_key if is_nightly else None,
         )
 
         # ── Alert evaluation — nightly only (fresh-scrape path) ──────────────
         # Must run AFTER complete_job() so the report is already marked ready.
         # Non-fatal: alert failures never affect the job outcome.
-        if _is_nightly and job.get("listing_id"):
+        if is_nightly and job.get("listing_id"):
             try:
                 from worker.alerts import run_alert_evaluation
                 run_alert_evaluation(
                     job, summary, client,
                     listing_url=listing_url,
+                    calendar=calendar,
                     cdp_url=CDP_URL,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                 )
@@ -1202,7 +1419,27 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
                     f"[{report_id}] Alert evaluation failed (non-fatal): {_alert_exc}"
                 )
 
-        if job.get("listing_id"):
+        # ── Observation write — nightly only (fresh-scrape path) ──────────────
+        # Writes normalized per-date observations to the Phase-5A tables
+        # after the pricing_reports row is already marked ready.
+        # Non-fatal: observation failures never affect the job outcome.
+        if is_nightly and job.get("listing_id"):
+            try:
+                from worker.core.observations import write_nightly_observations
+                write_nightly_observations(
+                    client,
+                    saved_listing_id=job["listing_id"],
+                    pricing_report_id=report_id,
+                    captured_at=datetime.utcnow(),
+                    summary=summary,
+                    calendar=calendar,
+                )
+            except Exception as _obs_exc:
+                logger.warning(
+                    f"[{report_id}] Observation write failed (non-fatal): {_obs_exc}"
+                )
+
+        if listing_url:
             try:
                 db_helpers.sync_linked_listing_attributes(
                     client, report_id, finalized_input_attributes

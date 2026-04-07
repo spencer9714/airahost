@@ -9,13 +9,11 @@ AiraHost ML 批次處理與開發參考程式
 4. 產出未來 30 天的報價建議報表。
 """
 
-import argparse
-import json
 import os
+import argparse
 import sys
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 # 確保專案根目錄在 Python 路徑中，以便直接執行此腳本時能找到 'ml' 套件
 if __name__ == "__main__" and __package__ is None:
@@ -28,152 +26,28 @@ from datetime import date, datetime, timedelta
 from xgboost import XGBRegressor
 from ml.supabase_client import get_client
 from ml.data import (
-    fetch_saved_listing_by_url, 
-    fetch_training_dataset, 
+    fetch_saved_listing_by_url,
+    fetch_training_dataset,
     extract_listing_features,
     fetch_latest_report_details,
     TARGET_COLUMN_NAME,
     fetch_saved_listing_by_id,
-    build_temporal_feature_values
+    _compute_date_features,
+    _HOLIDAYS_AVAILABLE,
+    _HOLIDAY_COUNTRY,
 )
 from ml.model import (
-    train_model, 
+    train_model,
+    forecast_prices,
     build_default_numeric_features,
     build_feature_matrix_df,
-    build_feature_description_df,
-    build_target_row, # 導入目標列建構器
+    build_target_row,
     AMENITIES_LIST,
-    build_feature_importance_report,
-    build_prediction_explanation_frames,
-    write_model_tree_dump,
+    _apply_forecast_guardrail,
 )
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REPORTS_DIR = PROJECT_ROOT / "ml" / "reports"
-FALLBACK_SAVED_LISTING_ID = "bdef28dc-2134-40b8-875d-350f7c28a0fe"
-MANIFEST_FILENAME = "batch_pipeline_result.json"
-
-
-def _display_path(path: Path) -> str:
-    try:
-        return str(path.relative_to(PROJECT_ROOT))
-    except ValueError:
-        return str(path)
-
-
-def _report_path(filename: str) -> Path:
-    return REPORTS_DIR / filename
-
-
-def get_default_saved_listing_id() -> str:
-    return os.getenv("ML_DEFAULT_SAVED_LISTING_ID", FALLBACK_SAVED_LISTING_ID)
-
-
-def _resolve_saved_listing(
-    client,
-    *,
-    listing_url: Optional[str] = None,
-    saved_listing_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    listing = None
-
-    if listing_url:
-        listing = fetch_saved_listing_by_url(client, listing_url)
-        if not listing:
-            raise ValueError(f"Cannot find saved listing with URL: {listing_url}")
-
-    if saved_listing_id:
-        listing = fetch_saved_listing_by_id(client, saved_listing_id)
-        if not listing:
-            raise ValueError(f"Cannot find saved listing with id: {saved_listing_id}")
-
-    if not listing:
-        default_saved_listing_id = get_default_saved_listing_id()
-        print(f"狀態: 未指定 listing，使用預設 saved listing id: {default_saved_listing_id}")
-        listing = fetch_saved_listing_by_id(client, default_saved_listing_id)
-        if not listing:
-            raise ValueError(
-                f"Default saved listing id {default_saved_listing_id} was not found in Supabase."
-            )
-
-    return listing
-
-
-def _write_metrics_snapshot(
-    path: Path,
-    *,
-    listing_id: str,
-    model_mode: str,
-    trained_now: bool,
-    metrics: Optional[Dict[str, Any]],
-    n_samples: int,
-) -> None:
-    row: Dict[str, Any] = {
-        "timestamp": datetime.now().isoformat(),
-        "listing_id": listing_id,
-        "model_mode": model_mode,
-        "trained_now": trained_now,
-        "n_samples": n_samples,
-    }
-    if metrics:
-        row.update({
-            "mae": round(metrics["mae"], 4),
-            "mae_std": round(metrics.get("mae_std", 0.0), 4),
-            "mape": round(metrics["mape"], 6),
-            "q2": round(metrics["q2"], 6),
-            "r2": round(metrics["r2"], 6),
-            "r2_std": round(metrics.get("r2_std", 0.0), 6),
-        })
-    pd.DataFrame([row]).to_csv(path, index=False)
-    print(f"狀態: 最新訓練摘要已存至 {_display_path(path)}")
-
-
-def _validate_batch_outputs(artifacts: Dict[str, str]) -> None:
-    predictions_path = Path(artifacts["predictions_latest"])
-    training_matrix_path = Path(artifacts["training_matrix_latest"])
-    metrics_path = Path(artifacts["metrics_latest"])
-
-    for path in [predictions_path, training_matrix_path, metrics_path]:
-        if not path.exists():
-            raise RuntimeError(f"Expected artifact was not created: {path}")
-
-    predictions_df = pd.read_csv(predictions_path)
-    expected_prediction_columns = {"date", "predicted_price", "is_weekend", "is_holiday"}
-    if not expected_prediction_columns.issubset(predictions_df.columns):
-        raise RuntimeError("predictions.csv is missing expected forecast columns.")
-    if predictions_df.empty:
-        raise RuntimeError("predictions.csv is empty.")
-
-    training_df = pd.read_csv(training_matrix_path)
-    expected_training_columns = {
-        "debug_source_type",
-        "debug_price_date",
-        "debug_observed_at_date",
-        TARGET_COLUMN_NAME,
-    }
-    if not expected_training_columns.issubset(training_df.columns):
-        raise RuntimeError("training_matrix.csv is missing expected debug columns.")
-    if training_df.empty:
-        raise RuntimeError("training_matrix.csv is empty.")
-
-    metrics_df = pd.read_csv(metrics_path)
-    if metrics_df.empty:
-        raise RuntimeError("metrics_latest.csv is empty.")
-
-
-def configure_console_encoding() -> None:
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if callable(reconfigure):
-            try:
-                reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
-
 
 def plot_feature_importance(importances: pd.Series):
     """將特徵重要性繪製成圖表並儲存，便於開發者確認模型邏輯。"""
-    output_path = _report_path("feature_importance.png")
     try:
         plt.figure(figsize=(10, 8))
         importances.sort_values().plot(kind='barh', color='skyblue')
@@ -181,15 +55,15 @@ def plot_feature_importance(importances: pd.Series):
         plt.xlabel('Importance Score')
         plt.grid(axis='x', linestyle='--', alpha=0.7)
         plt.tight_layout()
-        plt.savefig(output_path)
-        print(f"狀態: 特徵重要性圖表已儲存至 {_display_path(output_path)}")
+        plt.savefig('ml/reports/feature_importance.png')
+        print("狀態: 特徵重要性圖表已儲存至 ml/reports/feature_importance.png")
     except Exception as e:
         print(f"警告: 繪製圖表時發生錯誤: {e}")
 
 import statistics # 導入 statistics 模組用於平均值計算
 def update_metrics_history(listing_id: str, metrics: dict, n_samples: int):
     """將訓練指標記錄到 CSV 中，以便長期追蹤模型表現。"""
-    metrics_path = _report_path("metrics_history.csv")
+    metrics_path = "ml/reports/metrics_history.csv"
     new_entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "listing_id": listing_id,
@@ -199,52 +73,32 @@ def update_metrics_history(listing_id: str, metrics: dict, n_samples: int):
         "r2": round(metrics["r2"], 4),
         "q2": round(metrics["q2"], 4),
         "r2_std": round(metrics.get("r2_std", 0), 4),
-        "n_samples": n_samples
+        "cv_strategy": metrics.get("cv_strategy", "unknown"),
+        "cv_time_safe": metrics.get("cv_time_safe", True),
+        "n_samples": n_samples,
     }
     
     df = pd.DataFrame([new_entry])
     # 如果檔案不存在則寫入標題，否則直接附加在後方
-    if not metrics_path.exists():
+    if not os.path.exists(metrics_path):
         df.to_csv(metrics_path, index=False)
     else:
         df.to_csv(metrics_path, mode='a', header=False, index=False)
-    print(f"狀態: 訓練指標已更新至 {_display_path(metrics_path)}")
+    print(f"狀態: 訓練指標已更新至 {metrics_path}")
 
-def execute_batch_workflow(
-    *,
-    listing_url: Optional[str] = None,
-    saved_listing_id: Optional[str] = None,
-    force_train: bool = True,
-    smoke_test: bool = False,
-) -> Dict[str, Any]:
-    listing_url = saved_listing_id or listing_url or get_default_saved_listing_id()
+def execute_batch_workflow(listing_url: str, force_train: bool = False):
     print(f"--- 啟動 AiraHost ML 批次流程: {listing_url} ---")
     
     # 0. 確保報告資料夾存在
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    Path("ml/reports").mkdir(parents=True, exist_ok=True)
 
     # 1. 環境初始化
     client = get_client()
-    model_file = _report_path("saved_model.json")
-    latest_training_dump_path = _report_path("training_data_dump.csv")
-    training_matrix_latest_path = _report_path("training_matrix.csv")
-    feature_descriptions_path = _report_path("feature_descriptions.csv")
-    feature_importance_csv_path = _report_path("feature_importance.csv")
-    feature_importance_detail_path = _report_path("feature_importance_detailed.csv")
-    metrics_latest_path = _report_path("metrics_latest.csv")
-    predictions_latest_path = _report_path("predictions.csv")
-    prediction_summary_path = _report_path("prediction_explanations.csv")
-    prediction_contribs_path = _report_path("prediction_feature_contributions.csv")
-    model_tree_dump_path = _report_path("model_tree_dump.txt")
-    manifest_path = _report_path(MANIFEST_FILENAME)
+    model_file = "ml/reports/saved_model.json"
 
     # 2. 資料獲取
     # 取得房源本身的物理特徵 (如臥室數量、床位等)
-    listing = _resolve_saved_listing(
-        client,
-        listing_url=listing_url if listing_url and listing_url.startswith("http") else None,
-        saved_listing_id=saved_listing_id or (listing_url if listing_url and not listing_url.startswith("http") else None),
-    )
+    listing = fetch_saved_listing_by_url(client, listing_url)
     if not listing:
         print(f"錯誤: 在 saved_listings 表中找不到 URL: {listing_url}")
         return
@@ -312,24 +166,45 @@ def execute_batch_workflow(
     else:
         print("資料庫中沒有找到今日的前端報表 (pricing_reports)。")
 
-    print(f"\nML 訓練資料集 (training_df) 數據:")
-    print(f"  ML 訓練樣本總數: {len(training_df)}")
+    print(f"\n--- ML Training Data Diagnostics ---")
+    print(f"  Total rows     : {len(training_df)}")
+    print(f"  Holiday support: {'on (' + str(_HOLIDAY_COUNTRY) + ')' if _HOLIDAYS_AVAILABLE else 'off (fallback — pip install holidays)'}")
+
     if "airbnb_listing_id" in training_df.columns:
-        print(f"  ML 訓練集唯一競爭者數量: {training_df['airbnb_listing_id'].nunique()}")
-    
+        print(f"  Unique comps   : {training_df['airbnb_listing_id'].nunique()}")
+
+    # Source balance
+    if "row_source" in training_df.columns:
+        for src, grp in training_df.groupby("row_source", sort=True):
+            print(f"  Source '{src}': {len(grp)} rows")
+    else:
+        print("  Source field not present (row_source missing).")
+
+    # Date coverage
+    if "price_date" in training_df.columns and not training_df.empty:
+        n_unique = training_df["price_date"].nunique()
+        print(f"  Date coverage  : {n_unique} unique dates  ({training_df['price_date'].min()} → {training_df['price_date'].max()})")
+
+    # Observation recency
+    if "observation_date" in training_df.columns and not training_df.empty:
+        today_d = date.today()
+        obs_series = pd.to_datetime(training_df["observation_date"], errors="coerce").dt.date
+        days_old = obs_series.apply(
+            lambda d: (today_d - d).days if isinstance(d, date) else 0
+        ).fillna(0)
+        print(f"  Obs recency    : mean={days_old.mean():.1f}d  oldest={int(days_old.max())}d")
+
     if not training_df.empty and "is_weekend" in training_df.columns and TARGET_COLUMN_NAME in training_df.columns:
         weekday_avg_ml = training_df[training_df["is_weekend"] == 0][TARGET_COLUMN_NAME].mean()
         weekend_avg_ml = training_df[training_df["is_weekend"] == 1][TARGET_COLUMN_NAME].mean()
         if pd.notna(weekday_avg_ml):
-            print(f"  ML 訓練集平日平均價格: ${weekday_avg_ml:.2f}")
+            print(f"  Weekday avg    : ${weekday_avg_ml:.2f}")
         if pd.notna(weekend_avg_ml):
-            print(f"  ML 訓練集週末平均價格: ${weekend_avg_ml:.2f}")
-    else:
-        print(f"  ML 訓練資料中缺少必要欄位 ('is_weekend' 或 '{TARGET_COLUMN_NAME}') 或資料為空，無法進行平日/週末統計。")
+            print(f"  Weekend avg    : ${weekend_avg_ml:.2f}")
     print("--------------------------------------------------")
 
     # 如果有新鮮報表且不強制訓練，則跳過訓練和預測
-    if False and is_report_fresh and not force_train:
+    if is_report_fresh and not force_train:
         print(f"狀態: 房源 ID {listing['id']} 已有今日報表存在，且未強制訓練，跳過 ML 預測。")
         return # 直接結束流程
 
@@ -363,105 +238,73 @@ def execute_batch_workflow(
     print(f"狀態: 已載入 {len(training_df)} 筆訓練樣本 (含歷史價格波動)。")
     
     # 輸出訓練集 CSV 供你檢查，這會包含所有從資料庫讀到的欄位
-    raw_data_path = _report_path(f"training_data_dump_{listing['id']}.csv")
+    raw_data_path = f"ml/reports/training_data_dump_{listing['id']}.csv"
     training_df.to_csv(raw_data_path, index=False)
-    training_df.to_csv(latest_training_dump_path, index=False)
-    print(f"狀態: 原始訓練資料已匯出至 {_display_path(raw_data_path)}，請開啟此檔案檢查欄位與價格是否正確。")
+    print(f"狀態: 原始訓練資料已匯出至 {raw_data_path}，請開啟此檔案檢查欄位與價格是否正確。")
 
     # 輸出特徵工程後的矩陣 (X + y)，這包含 One-hot 編碼與設施展開後的最終訓練資料樣子
     processed_matrix_df = build_feature_matrix_df(training_df)
-    processed_path = _report_path(f"processed_feature_matrix_{listing['id']}.csv")
+    processed_path = f"ml/reports/processed_feature_matrix_{listing['id']}.csv"
     processed_matrix_df.to_csv(processed_path, index=False)
-    processed_matrix_df.to_csv(training_matrix_latest_path, index=False)
-    build_feature_description_df(list(processed_matrix_df.columns)).to_csv(feature_descriptions_path, index=False)
-    print(f"狀態: 特徵工程後的訓練矩陣已匯出至 {_display_path(processed_path)}。")
-
-    # 診斷：檢查訓練集是否包含週末資料並與前端報表對比
-    if not training_df.empty and "is_weekend" in training_df.columns:
-        # 確保 TARGET_COLUMN_NAME 在 training_df 中
-        if "last_nightly_price" in training_df.columns:
-            weekday_avg_ml = training_df[training_df["is_weekend"] == 0]["last_nightly_price"].mean()
-            weekend_avg_ml = training_df[training_df["is_weekend"] == 1]["last_nightly_price"].mean()
-            
-            print(f"\n--- ML 訓練資料集統計 ---")
-            print(f"訓練樣本總數: {len(training_df)}")
-            if pd.notna(weekday_avg_ml):
-                print(f"訓練集平日平均價格: ${weekday_avg_ml:.2f}")
-            if pd.notna(weekend_avg_ml):
-                print(f"訓練集週末平均價格: ${weekend_avg_ml:.2f}")
-            print(f"--------------------------------------------------")
-        else:
-            print("警告: 訓練資料中缺少 'last_nightly_price' 欄位，無法進行平日/週末統計。")
-    else:
-        print("警告: 訓練資料中沒有 'is_weekend' 欄位，或資料為空。無法進行平日/週末統計。")
+    print(f"狀態: 特徵工程後的訓練矩陣已匯出至 {processed_path}。")
 
     # 3. 模型處理邏輯
     # 判斷是否需要重新訓練，或是直接從硬碟載入已訓練好的 JSON 模型
-    trained_now = False
-    model_mode = "retrain"
-    metrics = None
-    if force_train or not model_file.exists():
+    if force_train or not os.path.exists(model_file):
         print("狀態: 重新訓練模式 - 正在從資料庫學習市場規律...")
         model, feature_columns, importances, metrics = train_model(training_df)
-        trained_now = True
         plot_feature_importance(importances)
         update_metrics_history(listing["id"], metrics, len(training_df))
-        
-        # 存下交叉驗證詳細細節
-        cv_path = _report_path(f"cv_details_{listing['id']}_{today_iso}.csv")
-        pd.DataFrame(metrics["fold_details"]).to_csv(cv_path, index=False)
-        print(f"狀態: 交叉驗證詳細數據已存至 {_display_path(cv_path)}")
 
-        model.save_model(str(model_file))
-        print(f"訓練完成! 模型已存至 {_display_path(model_file)}")
+        # Post-training diagnostics
+        print(f"\n--- Model Training Summary ---")
+        print(f"  Validation : {metrics.get('cv_strategy', 'unknown')}")
+        if not metrics.get("cv_time_safe", True):
+            print("  Warning    : degraded validation — Q2/MAE may be overoptimistic.")
+        hs = metrics.get("holiday_support", {})
+        print(f"  Holidays   : {'on (' + str(hs.get('country')) + ')' if hs.get('available') else 'off (fallback)'}")
+        ws = metrics.get("weight_stats", {})
+        if "by_source" in ws:
+            for src, info in sorted(ws["by_source"].items()):
+                print(f"  Weight [{src}]: n={info['n']}  mean={info['mean_weight']:.3f}  max={info['max_weight']:.3f}")
+        dc = metrics.get("date_coverage", {})
+        if "min_date" in dc:
+            print(f"  Dates      : {dc['unique_dates']} unique  ({dc['min_date']} → {dc['max_date']})")
+        print("--------------------------------------------------")
+
+        # 存下交叉驗證詳細細節
+        cv_path = f"ml/reports/cv_details_{listing['id']}_{today_iso}.csv"
+        pd.DataFrame(metrics["fold_details"]).to_csv(cv_path, index=False)
+        print(f"狀態: 交叉驗證詳細數據已存至 {cv_path}")
+
+        model.save_model(model_file)
+        print(f"訓練完成! 模型已存至 {model_file}")
     else:
-        model_mode = "reuse_model"
-        print(f"狀態: 直接預測模式 - 正在載入現有模型: {_display_path(model_file)}")
+        print(f"狀態: 直接預測模式 - 正在載入現有模型: {model_file}")
         # 即使是載入模型，我們仍需透過 build_feature_matrix_df 獲取特徵欄位清單(含 One-hot 欄位)
         matrix = build_feature_matrix_df(training_df)
-        feature_columns = [
-            c for c in matrix.columns
-            if c != "last_nightly_price" and not c.startswith("debug_")
-        ]
+        feature_columns = [c for c in matrix.columns if c != "last_nightly_price"]
         
         model = XGBRegressor()
         try:
-            model.load_model(str(model_file))
+            model.load_model(model_file)
             # 檢查模型特徵數量是否匹配
             if len(model.feature_names_in_) != len(feature_columns):
                 raise ValueError("模型特徵數量不匹配")
-            print(f"狀態: 直接預測模式 - 成功載入現有模型: {_display_path(model_file)}")
+            print(f"狀態: 直接預測模式 - 成功載入現有模型: {model_file}")
         except Exception as e:
             print(f"警告: 現有模型與當前特徵不相符 ({e})。正在強制重新訓練...")
             model, feature_columns, importances, metrics = train_model(training_df)
-            trained_now = True
-            model_mode = "retrain_after_mismatch"
             plot_feature_importance(importances)
             update_metrics_history(listing["id"], metrics, len(training_df))
             
             # 存下交叉驗證詳細細節
-            cv_path = _report_path(f"cv_details_{listing['id']}_{today_iso}.csv")
+            cv_path = f"ml/reports/cv_details_{listing['id']}_{today_iso}.csv"
             pd.DataFrame(metrics["fold_details"]).to_csv(cv_path, index=False)
-            print(f"狀態: 交叉驗證詳細數據已存至 {_display_path(cv_path)}")
+            print(f"狀態: 交叉驗證詳細數據已存至 {cv_path}")
 
-            model.save_model(str(model_file))
+            model.save_model(model_file)
             print(f"重新訓練完成! 模型已更新。")
-
-    if not trained_now:
-        importances = pd.Series(model.feature_importances_, index=feature_columns).sort_values(ascending=False)
-
-    feature_importance_df = build_feature_importance_report(model, feature_columns)
-    feature_importance_df.to_csv(feature_importance_detail_path, index=False)
-    feature_importance_df.loc[:, ["feature", "importance"]].to_csv(feature_importance_csv_path, index=False)
-    write_model_tree_dump(model, model_tree_dump_path)
-    _write_metrics_snapshot(
-        metrics_latest_path,
-        listing_id=listing["id"],
-        model_mode=model_mode,
-        trained_now=trained_now,
-        metrics=metrics,
-        n_samples=len(training_df),
-    )
 
     # 4. 預測準備
     # 注入目標房源的精確位置與設施，讓模型知道是在「哪個地區」預測
@@ -485,20 +328,12 @@ def execute_batch_workflow(
     # 治本：改為先建構 30 筆 X 資料樣子，存成 CSV 供你檢查
     forecast_rows_x = []
     start_dt = date.today()
-    country_code = target_listing_features.get("country_code")
     for i in range(30):
         current_date = start_dt + timedelta(days=i)
         day_features = target_listing_features.copy()
-        day_features.update(
-            build_temporal_feature_values(
-                price_date=current_date,
-                observed_at_date=start_dt,
-                first_seen_date=start_dt,
-                country_code=country_code,
-            )
-        )
-        
-        # 轉換為模型認識的特徵矩陣樣子
+        date_feats = _compute_date_features(current_date, start_dt)
+        day_features.update(date_feats)
+
         row_df = build_target_row(day_features, feature_columns)
         row_df["date"] = current_date.isoformat()
         forecast_rows_x.append(row_df)
@@ -506,24 +341,21 @@ def execute_batch_workflow(
     # 合併為預測矩陣
     X_forecast_all = pd.concat(forecast_rows_x, ignore_index=True)
     
-    # 執行預測並將結果 y 填回矩陣中
-    # 治本修正：將預測出的對數值還原為原始美金金額
-    preds_y = np.expm1(model.predict(X_forecast_all.drop(columns=["date"])))
-    X_forecast_all["predicted_price"] = preds_y
-
-    explanation_summary_df, explanation_contribs_df = build_prediction_explanation_frames(
-        model,
-        X_forecast_all.drop(columns=["date", "predicted_price"]),
-        metadata=X_forecast_all[["date", "predicted_price"]],
-        top_n=5,
-    )
-    explanation_summary_df.to_csv(prediction_summary_path, index=False)
-    explanation_contribs_df.to_csv(prediction_contribs_path, index=False)
+    # 執行預測並套用 guardrail (cap ±30% day-to-day swings)
+    preds_y_raw = np.expm1(model.predict(X_forecast_all.drop(columns=["date"])))
+    preds_y_bounded = _apply_forecast_guardrail(preds_y_raw.tolist())
+    guardrail_flags = [abs(b - r) > 0.01 for b, r in zip(preds_y_bounded, preds_y_raw)]
+    X_forecast_all["predicted_price_raw"] = preds_y_raw
+    X_forecast_all["predicted_price"] = preds_y_bounded
+    X_forecast_all["guardrail_applied"] = guardrail_flags
+    n_guardrailed = sum(guardrail_flags)
+    if n_guardrailed:
+        print(f"[ML] Forecast guardrail clipped {n_guardrailed}/30 day(s) (±30% window median cap).")
 
     # 存下用來預測的 X 和 吐出的 Y，讓你檢查模型是怎麼算的
-    forecast_input_path = _report_path(f"prediction_input_matrix_{listing['id']}.csv")
+    forecast_input_path = f"ml/reports/prediction_input_matrix_{listing['id']}.csv"
     X_forecast_all.to_csv(forecast_input_path, index=False)
-    print(f"狀態: 預測專用的 30 天特徵矩陣(X+Y)已匯出至 {_display_path(forecast_input_path)}")
+    print(f"狀態: 預測專用的 30 天特徵矩陣(X+Y)已匯出至 {forecast_input_path}")
 
     # 轉換格式供報表產出使用
     forecast_data = X_forecast_all.to_dict(orient="records")
@@ -534,72 +366,18 @@ def execute_batch_workflow(
     
     # 檔名包含房源 ID 與日期，避免多次執行時被覆蓋
     today_str = date.today().isoformat()
-    output_path = _report_path(f"forecast_{listing['id']}_{today_str}.csv")
+    output_path = f"ml/reports/forecast_{listing['id']}_{today_str}.csv"
     report_df.to_csv(output_path, index=False)
-    report_df.to_csv(predictions_latest_path, index=False)
-
-    artifacts = {
-        "training_dump_latest": str(latest_training_dump_path),
-        "training_dump_archive": str(raw_data_path),
-        "training_matrix_latest": str(training_matrix_latest_path),
-        "training_matrix_archive": str(processed_path),
-        "feature_descriptions": str(feature_descriptions_path),
-        "feature_importance_csv": str(feature_importance_csv_path),
-        "feature_importance_detailed_csv": str(feature_importance_detail_path),
-        "feature_importance_plot": str(_report_path("feature_importance.png")),
-        "metrics_latest": str(metrics_latest_path),
-        "metrics_history": str(_report_path("metrics_history.csv")),
-        "model": str(model_file),
-        "model_tree_dump": str(model_tree_dump_path),
-        "forecast_input_matrix": str(forecast_input_path),
-        "prediction_explanations": str(prediction_summary_path),
-        "prediction_feature_contributions": str(prediction_contribs_path),
-        "predictions_latest": str(predictions_latest_path),
-        "predictions_archive": str(output_path),
-    }
-
-    if smoke_test:
-        _validate_batch_outputs(artifacts)
-        print("狀態: smoke test 通過，主要輸出檔案與欄位皆已確認。")
-
-    result_manifest: Dict[str, Any] = {
-        "timestamp": datetime.now().isoformat(),
-        "listing_id": listing["id"],
-        "listing_name": listing.get("name"),
-        "listing_url": listing_url if listing_url and listing_url.startswith("http") else None,
-        "saved_listing_id": saved_listing_id or listing["id"],
-        "trained_now": trained_now,
-        "model_mode": model_mode,
-        "smoke_test": smoke_test,
-        "n_samples": len(training_df),
-        "artifacts": artifacts,
-    }
-    if metrics:
-        result_manifest["metrics"] = {
-            "mae": metrics["mae"],
-            "mae_std": metrics.get("mae_std"),
-            "mape": metrics["mape"],
-            "q2": metrics["q2"],
-            "r2": metrics["r2"],
-            "r2_std": metrics.get("r2_std"),
-        }
-    manifest_path.write_text(
-        json.dumps(result_manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     
-    print(f"\n批次處理成功! 建議報表已存至: {_display_path(output_path)}")
+    print(f"\n批次處理成功! 建議報表已存至: {output_path}")
     print("前五日預覽:")
     print(report_df.head())
-    print(f"最新批次輸出摘要: {_display_path(manifest_path)}")
-    return result_manifest
 
 if __name__ == "__main__":
-    configure_console_encoding()
     parser = argparse.ArgumentParser(description="AiraHost ML 批次處理工具")
     parser.add_argument(
         "--listing-url", 
-        default=None,
+        default="https://www.airbnb.com/rooms/1623403688220154475",
         help="要預測的 Airbnb 房源 URL"
     )
     parser.add_argument(
@@ -607,29 +385,7 @@ if __name__ == "__main__":
         action="store_true", 
         help="強制重新訓練模型，即使已有存檔"
     )
-    parser.add_argument(
-        "--saved-listing-id",
-        default=None,
-        help="saved_listings çš„ UUID"
-    )
-    parser.add_argument(
-        "--reuse-model",
-        dest="retrain",
-        action="store_false",
-        help="å¦‚æžœå·²æœ‰ saved_model.jsonï¼Œç›´æŽ¥è¼‰å…¥æ¨¡åž‹ä¾†é æ¸¬"
-    )
-    parser.add_argument(
-        "--smoke-test",
-        action="store_true",
-        help="åŸ·è¡Œå®Œæ•´æ‰¹æ¬¡æµç¨‹å¾Œï¼Œé¡å¤–æª¢æŸ¥è¼¸å‡ºæª”æ¡ˆèˆ‡æ ¸å¿ƒæ¬„ä½"
-    )
-    parser.set_defaults(retrain=True)
     args = parser.parse_args()
     
-    execute_batch_workflow(
-        listing_url=args.listing_url,
-        saved_listing_id=args.saved_listing_id,
-        force_train=args.retrain,
-        smoke_test=args.smoke_test,
-    )
-    print(f"\n[提示] 如需查看特徵權重排名，請檢查 {_display_path(_report_path('feature_importance.png'))}")
+    execute_batch_workflow(args.listing_url, force_train=args.retrain)
+    print("\n[提示] 如需查看特徵權重排名，請檢查 ml/reports/feature_importance.png")

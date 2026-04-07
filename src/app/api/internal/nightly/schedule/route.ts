@@ -33,7 +33,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import { generateShareId } from "@/lib/shareId";
 import { computeCacheKey } from "@/lib/cacheKey";
-import { enrichListingInputAttributes } from "@/lib/normalizedLocation";
+import { executionPolicyMeta } from "@/lib/reportPolicy";
 
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
@@ -331,14 +331,11 @@ export async function POST(req: NextRequest) {
     const discountPolicy = (listing.default_discount_policy ?? {}) as Record<string, unknown>;
 
     // Build full input_attributes (same shape as manual runs)
-    const inputAttributes = enrichListingInputAttributes(
-      {
-        ...attrs,
-        inputMode,
-        listingUrl: listingUrl ?? null,
-      },
-      address
-    );
+    const inputAttributes: Record<string, unknown> = {
+      ...attrs,
+      inputMode,
+      listingUrl: listingUrl ?? null,
+    };
 
     const cacheKey = computeCacheKey(
       address,
@@ -376,6 +373,7 @@ export async function POST(req: NextRequest) {
       market_captured_at: null,
       error_message: null,
       result_core_debug: {
+        ...executionPolicyMeta("nightly_board_refresh"),
         // Force fresh scrape — nightly reports must always have current market data.
         force_rerun: true,
         cache_hit: false,

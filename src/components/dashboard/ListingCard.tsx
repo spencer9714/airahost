@@ -2,7 +2,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
 import { computeFreshness, resolveMarketCapturedAt } from "@/lib/freshness";
-import { CoHostFeature } from "./CoHostFeature";
+import { AutoApplyFeature } from "./AutoApplyFeature";
 import { AlertSetupModal } from "./AlertSetupModal";
 
 type LatestReport = {
@@ -56,6 +56,22 @@ type ListingData = {
   // Alert v2 fields (migration 015)
   minimum_booking_nights?: number;
   listing_url_validation_status?: string | null;
+  // Auto-Apply settings (migration 017)
+  auto_apply_enabled?: boolean;
+  auto_apply_window_end_days?: number;
+  auto_apply_scope?: "actionable" | "all_sellable";
+  auto_apply_min_price_floor?: number | null;
+  auto_apply_min_notice_days?: number;
+  auto_apply_max_increase_pct?: number | null;
+  auto_apply_max_decrease_pct?: number | null;
+  auto_apply_skip_unavailable?: boolean;
+  auto_apply_last_updated_at?: string | null;
+  // Co-host verification model (migration 020)
+  auto_apply_cohost_status?: string;
+  auto_apply_cohost_confirmed_at?: string | null;
+  auto_apply_cohost_verified_at?: string | null;
+  auto_apply_cohost_verification_error?: string | null;
+  auto_apply_cohost_verification_method?: string | null;
 };
 
 interface AlertSettings {
@@ -76,6 +92,21 @@ interface Props {
     preferredComps: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null
   ) => Promise<void>;
   onSaveAlertSettings: (listingId: string, settings: AlertSettings) => Promise<void>;
+  onSaveAutoApply: (
+    listingId: string,
+    patch: Partial<{
+      autoApplyEnabled: boolean;
+      autoApplyCohostInviteOpened: boolean;
+      autoApplyWindowEndDays: number;
+      autoApplyScope: "actionable" | "all_sellable";
+      autoApplyMinPriceFloor: number | null;
+      autoApplyMinNoticeDays: number;
+      autoApplyMaxIncreasePct: number | null;
+      autoApplyMaxDecreasePct: number | null;
+      autoApplySkipUnavailable: boolean;
+    }>
+  ) => Promise<void>;
+  onTriggerCohostVerification: (listingId: string) => Promise<void>;
 }
 
 const PROPERTY_TYPE_SHORT: Record<string, string> = {
@@ -107,6 +138,8 @@ export function ListingCard({
   onRename,
   onSavePreferredComps,
   onSaveAlertSettings,
+  onSaveAutoApply,
+  onTriggerCohostVerification,
 }: Props) {
   const [editOpen, setEditOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
@@ -358,113 +391,122 @@ export function ListingCard({
         )}
 
         {/* ── Selectable body ── */}
-        <div className="cursor-pointer px-5 pb-3 pt-5" onClick={onSelect}>
+        <div
+          className={`cursor-pointer px-4 transition-all ${
+            isActive || editOpen ? "pb-2.5 pt-4" : "py-3"
+          }`}
+          onClick={onSelect}
+        >
           <div className="flex min-w-0 items-center gap-2">
             <span
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`}
               title={activeJob ? activeJob.status : latest ? "ready" : "no report"}
             />
-            <p className="truncate text-base font-semibold tracking-tight text-foreground">
+            <p className={`truncate font-semibold tracking-tight ${isActive ? "text-base text-foreground" : "text-sm text-foreground/80"}`}>
               {cleanTitle(displayTitle)}
             </p>
           </div>
           {factsLine && (
-            <p className="mt-1.5 truncate pl-3.5 text-sm font-medium text-foreground/35">
+            <p className="mt-1 truncate pl-3.5 text-xs text-foreground/35">
               {factsLine}
             </p>
           )}
-          {/* Alert-sent note — only shown when an alert fired today */}
-          {alertBodyNote && (
-            <p className="mt-1 truncate pl-3.5 text-[11px] text-foreground/35">
+          {alertBodyNote && isActive && (
+            <p className="mt-0.5 truncate pl-3.5 text-[11px] text-foreground/35">
               {alertBodyNote}
             </p>
           )}
         </div>
 
-        {/* ── Co-Host Feature ── */}
-        <CoHostFeature listing={{ id: listing.id, name: listing.name, input_attributes: listing.input_attributes }} />
+        {/* Controls — only rendered for the active listing (or when edit panel is open) */}
+        {(isActive || editOpen) && (
+          <>
+            {/* ── Auto-Apply ── */}
+            <AutoApplyFeature
+              listing={listing}
+              calendar={listing.latestReport?.result_calendar ?? []}
+              onSaveAutoApply={onSaveAutoApply}
+              onTriggerCohostVerification={onTriggerCohostVerification}
+            />
 
-        {/* ── Pricing alerts row ───────────────────────────────────────────
-            Visible in normal card view (hidden when edit panel is open,
-            since the panel already has alert settings).
-            Clicking the toggle enables/disables directly when eligible,
-            or opens the setup modal when configuration is missing.
-        ─────────────────────────────────────────────────────────────────── */}
-        {!editOpen && (
-          <div
-            className={`flex items-center justify-between px-5 py-3 transition-colors ${
-              alertsEnabled
-                ? "border-t border-gray-100/80"
-                : "border-t border-accent/10 bg-accent/5"
-            }`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex min-w-0 items-center gap-2">
-              <span className={`text-sm font-semibold ${alertsEnabled ? "text-foreground/50" : "text-accent"}`}>
-                {alertsEnabled ? "Pricing alerts" : "Enable pricing alerts"}
-              </span>
-              <span
-                className={`text-[11px] ${
+            {/* ── Pricing alerts row ── */}
+            {!editOpen && (
+              <div
+                className={`flex items-center justify-between px-4 py-2 transition-colors ${
                   alertsEnabled
-                    ? alertRowStatus === "Unavailable last check"
-                      ? "text-amber-500/70"
-                      : "text-emerald-600/60"
-                    : "text-accent/50"
+                    ? "border-t border-gray-100/80"
+                    : "border-t border-accent/10 bg-accent/5"
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={`text-sm font-medium ${alertsEnabled ? "text-foreground/50" : "text-accent"}`}>
+                    {alertsEnabled ? "Pricing alerts" : "Enable alerts"}
+                  </span>
+                  <span
+                    className={`text-[11px] ${
+                      alertsEnabled
+                        ? alertRowStatus === "Unavailable last check"
+                          ? "text-amber-500/70"
+                          : "text-emerald-600/60"
+                        : "text-accent/50"
+                    }`}
+                  >
+                    {alertsEnabled ? alertRowStatus : !isEligible ? "Needs setup" : "Off"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={alertsEnabled}
+                  aria-label={
+                    alertsEnabled
+                      ? "Disable pricing alerts"
+                      : isEligible
+                      ? "Enable pricing alerts"
+                      : "Set up pricing alerts"
+                  }
+                  disabled={alertsTogglingDirect}
+                  onClick={() => void handleAlertToggle()}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none disabled:opacity-50 ${
+                    alertsEnabled ? "bg-emerald-500" : "bg-accent"
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+                      alertsEnabled ? "translate-x-4" : "translate-x-1"
+                    }`}
+                  />
+                </button>
+              </div>
+            )}
+
+            {/* ── Footer: Edit/Close ── */}
+            <div className="flex items-center justify-end border-t border-gray-100/80 px-4 py-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setEditOpen((v) => {
+                    const next = !v;
+                    if (next) {
+                      setDraftName(displayTitle);
+                      setExpandedBenchmarkIdx(null);
+                      setSaveMessage(null);
+                    }
+                    return next;
+                  });
+                }}
+                className={`text-xs font-medium transition-colors ${
+                  editOpen
+                    ? "text-foreground/65"
+                    : "text-foreground/40 hover:text-foreground/70"
                 }`}
               >
-                {alertsEnabled ? alertRowStatus : !isEligible ? "Needs setup" : "Off"}
-              </span>
+                {editOpen ? "Close" : "Edit"}
+              </button>
             </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={alertsEnabled}
-              aria-label={
-                alertsEnabled
-                  ? "Disable pricing alerts"
-                  : isEligible
-                  ? "Enable pricing alerts"
-                  : "Set up pricing alerts"
-              }
-              disabled={alertsTogglingDirect}
-              onClick={() => void handleAlertToggle()}
-              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none disabled:opacity-50 ${
-                alertsEnabled ? "bg-emerald-500" : "bg-accent"
-              }`}
-            >
-              <span
-                className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
-                  alertsEnabled ? "translate-x-4" : "translate-x-1"
-                }`}
-              />
-            </button>
-          </div>
+          </>
         )}
-
-        {/* ── Footer: Edit/Close ── */}
-        <div className="flex items-center justify-end border-t border-gray-100/80 px-5 py-3">
-          <button
-            type="button"
-            onClick={() => {
-              setEditOpen((v) => {
-                const next = !v;
-                if (next) {
-                  setDraftName(displayTitle);
-                  setExpandedBenchmarkIdx(null);
-                  setSaveMessage(null);
-                }
-                return next;
-              });
-            }}
-            className={`text-sm font-medium transition-colors ${
-              editOpen
-                ? "text-foreground/65"
-                : "text-foreground/45 hover:text-foreground/70"
-            }`}
-          >
-            {editOpen ? "Close" : "Edit"}
-          </button>
-        </div>
 
         {/* ── Edit panel ───────────────────────────────────────────────
             Two sections: Property (read-only) + Name + Benchmarks.

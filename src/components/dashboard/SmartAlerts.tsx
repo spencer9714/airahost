@@ -185,45 +185,37 @@ export function SmartAlerts({
 }) {
   const alerts = deriveAlerts(summary, compsSummary, priceDistribution, observedListingPrice);
 
-  return (
-    <div className="rounded-2xl border border-border bg-white p-5 sm:p-6">
-      <p className="mb-4 text-xs font-semibold uppercase tracking-widest text-foreground/35">
-        Alerts
-      </p>
+  if (alerts.length === 0) {
+    return (
+      <div className="flex items-center gap-2 px-1 text-xs text-foreground/35">
+        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[10px] font-bold text-emerald-600">✓</span>
+        Pricing looks good — no alerts.
+      </div>
+    );
+  }
 
-      {alerts.length === 0 ? (
-        <div className="flex items-center gap-3 rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3">
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-xs font-bold text-white">
-            ✓
-          </span>
-          <p className="text-sm font-medium text-emerald-900">
-            No alerts — your pricing looks good!
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {alerts.map((alert) => {
-            const s = SEVERITY_STYLES[alert.severity];
-            return (
-              <div
-                key={alert.id}
-                className={`flex items-start gap-3 rounded-xl border px-4 py-3.5 ${s.card}`}
-              >
-                <span
-                  className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${s.icon}`}
-                  aria-hidden="true"
-                >
-                  {s.iconSymbol}
-                </span>
-                <div>
-                  <p className={`text-sm font-semibold ${s.title}`}>{alert.title}</p>
-                  <p className="mt-0.5 text-sm text-foreground/60">{alert.description}</p>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+  return (
+    <div className="space-y-2">
+      {alerts.map((alert) => {
+        const s = SEVERITY_STYLES[alert.severity];
+        return (
+          <div
+            key={alert.id}
+            className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${s.card}`}
+          >
+            <span
+              className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${s.icon}`}
+              aria-hidden="true"
+            >
+              {s.iconSymbol}
+            </span>
+            <div>
+              <p className={`text-sm font-semibold ${s.title}`}>{alert.title}</p>
+              <p className="mt-0.5 text-xs text-foreground/55">{alert.description}</p>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

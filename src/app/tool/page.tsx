@@ -4,16 +4,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
-import { SegmentedControl } from "@/components/ui/SegmentedControl";
-import { SliderField } from "@/components/ui/SliderField";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import { isValidAirbnbRoomUrl } from "@/lib/benchmarkUrl";
 import type {
   PropertyType,
   Amenity,
-  DiscountStackingMode,
   InputMode,
-  LastMinuteStrategyMode,
 } from "@/lib/schemas";
 
 const PROPERTY_TYPES: { value: PropertyType; label: string }[] = [
@@ -122,19 +118,6 @@ export default function ToolPage() {
   const [startDate, setStartDate] = useState(defaults.startDate);
   const [endDate, setEndDate] = useState(defaults.endDate);
 
-  // Step 3 — Revenue Strategy
-  const [weeklyDiscount, setWeeklyDiscount] = useState(10);
-  const [monthlyDiscount, setMonthlyDiscount] = useState(20);
-  const [refundable, setRefundable] = useState(true);
-  const [nonRefundableDiscount, setNonRefundableDiscount] = useState(10);
-  const [showAdvanced3, setShowAdvanced3] = useState(false);
-  const [stackingMode, setStackingMode] =
-    useState<DiscountStackingMode>("compound");
-  const [maxTotalDiscount, setMaxTotalDiscount] = useState(40);
-  const [lastMinuteMode, setLastMinuteMode] =
-    useState<LastMinuteStrategyMode>("auto");
-  const [lastMinuteAggressiveness, setLastMinuteAggressiveness] = useState(50);
-  const [lastMinuteFloor, setLastMinuteFloor] = useState(0.65);
 
   // Benchmark listing (formerly preferred comparables)
   const [preferredCompsList, setPreferredCompsList] = useState<
@@ -224,17 +207,17 @@ export default function ToolPage() {
           },
           dates: { startDate, endDate },
           discountPolicy: {
-            weeklyDiscountPct: weeklyDiscount,
-            monthlyDiscountPct: monthlyDiscount,
-            refundable,
-            nonRefundableDiscountPct: nonRefundableDiscount,
-            stackingMode,
-            maxTotalDiscountPct: maxTotalDiscount,
+            weeklyDiscountPct: 0,
+            monthlyDiscountPct: 0,
+            refundable: true,
+            nonRefundableDiscountPct: 0,
+            stackingMode: "compound",
+            maxTotalDiscountPct: 0,
           },
           lastMinuteStrategy: {
-            mode: lastMinuteMode,
-            aggressiveness: lastMinuteAggressiveness,
-            floor: lastMinuteFloor,
+            mode: "auto",
+            aggressiveness: 50,
+            floor: 0.65,
             cap: 1.05,
           },
           listingUrl: inputMode === "url" ? listingUrl : undefined,
@@ -579,192 +562,11 @@ export default function ToolPage() {
               onClick={() => step > 2 && setStep(3)}
             >
               <StepBadge n={3} active={step === 3} done={false} />
-              <span className="text-lg font-semibold">Revenue strategy</span>
+              <span className="text-lg font-semibold">Benchmark listing</span>
             </button>
 
             {step === 3 && (
               <div className="space-y-5">
-                <Field label={`Weekly discount: ${weeklyDiscount}%`}>
-                  <input
-                    type="range"
-                    min={0}
-                    max={50}
-                    value={weeklyDiscount}
-                    onChange={(e) => setWeeklyDiscount(Number(e.target.value))}
-                    className="w-full accent-accent"
-                  />
-                </Field>
-                <Field label={`Monthly discount: ${monthlyDiscount}%`}>
-                  <input
-                    type="range"
-                    min={0}
-                    max={70}
-                    value={monthlyDiscount}
-                    onChange={(e) => setMonthlyDiscount(Number(e.target.value))}
-                    className="w-full accent-accent"
-                  />
-                </Field>
-
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">
-                    Refundable cancellation
-                  </span>
-                  <button
-                    onClick={() => setRefundable(!refundable)}
-                    className={`relative h-7 w-12 rounded-full transition-colors ${
-                      refundable ? "bg-accent" : "bg-gray-300"
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform ${
-                        refundable ? "left-[22px]" : "left-0.5"
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                {!refundable && (
-                  <Field
-                    label={`Non-refundable discount: ${nonRefundableDiscount}%`}
-                  >
-                    <input
-                      type="range"
-                      min={0}
-                      max={30}
-                      value={nonRefundableDiscount}
-                      onChange={(e) =>
-                        setNonRefundableDiscount(Number(e.target.value))
-                      }
-                      className="w-full accent-accent"
-                    />
-                  </Field>
-                )}
-
-                <button
-                  className="text-sm text-muted underline"
-                  onClick={() => setShowAdvanced3(!showAdvanced3)}
-                >
-                  {showAdvanced3 ? "Hide" : "Show"} advanced options
-                </button>
-
-                {showAdvanced3 && (
-                  <div className="space-y-4 rounded-xl bg-gray-50 p-4">
-                    <div className="border-t border-border/70 pt-4">
-                      <div className="space-y-4 rounded-xl border border-border bg-white p-5">
-                        <div>
-                          <p className="text-base font-semibold text-foreground">
-                            Advanced pricing strategy
-                          </p>
-                          <p className="mt-1 text-sm text-muted-foreground">
-                            Automatically adjust prices as dates approach if nights remain unbooked.
-                          </p>
-                        </div>
-
-                        <Field label="Discount stacking mode">
-                          <div className="flex flex-wrap gap-2">
-                            {(
-                              [
-                                {
-                                  value: "compound" as const,
-                                  label: "Compound",
-                                  desc: "Discounts multiply",
-                                },
-                                {
-                                  value: "best_only" as const,
-                                  label: "Best only",
-                                  desc: "Largest wins",
-                                },
-                                {
-                                  value: "additive" as const,
-                                  label: "Additive",
-                                  desc: "Discounts add up",
-                                },
-                              ] as const
-                            ).map((m) => (
-                              <button
-                                key={m.value}
-                                onClick={() => setStackingMode(m.value)}
-                                className={`rounded-xl border px-4 py-2 text-sm transition-all ${
-                                  stackingMode === m.value
-                                    ? "border-accent bg-accent/5 text-accent"
-                                    : "border-border hover:border-foreground/30"
-                                }`}
-                              >
-                                <span className="font-medium">{m.label}</span>
-                                <span className="ml-1 text-xs text-muted-foreground">
-                                  ({m.desc})
-                                </span>
-                              </button>
-                            ))}
-                          </div>
-                        </Field>
-
-                        <Field label={`Max total discount cap: ${maxTotalDiscount}%`}>
-                          <input
-                            type="range"
-                            min={0}
-                            max={80}
-                            value={maxTotalDiscount}
-                            onChange={(e) =>
-                              setMaxTotalDiscount(Number(e.target.value))
-                            }
-                            className="w-full accent-accent"
-                          />
-                        </Field>
-
-                        <div className="border-t border-border/70 pt-4">
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-sm font-semibold text-foreground">
-                              Last-minute pricing strategy
-                            </p>
-                            <SegmentedControl
-                              value={lastMinuteMode}
-                              onChange={setLastMinuteMode}
-                              options={[
-                                { label: "Auto (Recommended)", value: "auto" },
-                                { label: "Customize", value: "manual" },
-                              ]}
-                            />
-                          </div>
-
-                          <div
-                            className={`overflow-hidden transition-all duration-300 ease-out ${
-                              lastMinuteMode === "manual"
-                                ? "max-h-96 opacity-100"
-                                : "max-h-0 opacity-0"
-                            }`}
-                          >
-                            <div className="space-y-4 pt-4">
-                              <SliderField
-                                label="Discount aggressiveness"
-                                value={lastMinuteAggressiveness}
-                                min={0}
-                                max={100}
-                                step={1}
-                                displayValue={`${lastMinuteAggressiveness}`}
-                                helperText="Higher = larger last-minute discounts if dates remain unbooked"
-                                onChange={setLastMinuteAggressiveness}
-                              />
-                              <SliderField
-                                label="Minimum price floor"
-                                value={lastMinuteFloor}
-                                min={0.65}
-                                max={0.9}
-                                step={0.01}
-                                displayValue={lastMinuteFloor.toFixed(2)}
-                                helperText="Never discount below this level"
-                                onChange={(v) =>
-                                  setLastMinuteFloor(Number(v.toFixed(2)))
-                                }
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
                 {/* Benchmark listing */}
                 <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4">
                   <div className="mb-1 flex items-center gap-2">
@@ -1023,26 +825,6 @@ export default function ToolPage() {
                 <SummaryRow
                   label="Dates"
                   value={dateRange > 0 ? `${dateRange} nights` : "—"}
-                />
-                <SummaryRow
-                  label="Weekly discount"
-                  value={`${weeklyDiscount}%`}
-                />
-                <SummaryRow
-                  label="Monthly discount"
-                  value={`${monthlyDiscount}%`}
-                />
-                <SummaryRow
-                  label="Cancellation"
-                  value={refundable ? "Refundable" : "Non-refundable"}
-                />
-                <SummaryRow
-                  label="Last-minute strategy"
-                  value={
-                    lastMinuteMode === "auto"
-                      ? "Auto (recommended)"
-                      : `Custom (Agg ${lastMinuteAggressiveness}, Floor ${lastMinuteFloor.toFixed(2)})`
-                  }
                 />
                 <SummaryRow
                   label="Benchmark"

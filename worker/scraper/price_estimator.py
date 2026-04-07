@@ -199,6 +199,8 @@ def _build_daily_transparent_result(
     discount_evidence: Optional[Dict[str, Any]] = None,
     benchmark_info: Optional[Dict[str, Any]] = None,
     target_price_confidence: Optional[str] = None,
+    spec_backfill: Optional[Dict[str, Any]] = None,
+    spec_extraction_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -387,6 +389,14 @@ def _build_daily_transparent_result(
             "nightlyPrice": target.nightly_price,
             "currency": target.currency or "USD",
             "priceConfidence": target_price_confidence,
+            # Indicates whether spec fields were backfilled from saved attributes.
+            # "live" = fully extracted; "mixed" = some fields from fallback; "partial" = still incomplete
+            "specSource": (
+                "live" if not spec_backfill or not spec_backfill.get("fields_filled")
+                else ("partial" if spec_backfill.get("is_partial") else "mixed")
+            ),
+            "specFieldsBackfilled": (spec_backfill or {}).get("fields_filled") or [],
+            "specFieldsMissing": (spec_backfill or {}).get("fields_still_missing") or [],
         },
         "queryCriteria": query_criteria,
         "compsSummary": {
@@ -421,6 +431,8 @@ def _build_daily_transparent_result(
             "timingsMs": timings_ms,
             "pipelineVersion": "day-by-day-v1",
             "discountEvidence": discount_evidence,
+            "specBackfill": spec_backfill,
+            "specExtractionMeta": spec_extraction_meta,
             "dayQueryStats": {
                 "totalNights": len(all_day_results),
                 "sampled": sampled_days,
@@ -574,6 +586,105 @@ def _build_url_mode_benchmark_info(
 
 
 # ---------------------------------------------------------------------------
+# Target spec fallback
+# ---------------------------------------------------------------------------
+
+
+def _is_spec_degraded(target: ListingSpec) -> bool:
+    """
+    Heuristic: return True when the Airbnb page appears to have returned a
+    degraded / stale render that is missing most structural fields.
+
+    Two conditions trigger degraded detection:
+      - Location is empty AND at least one of (bedrooms, accommodates, baths) is None, OR
+      - Three or more of the five key fields are None / empty.
+
+    These patterns typically indicate a bot-challenge page, a redirect, or a
+    cached page fragment rather than real listing content.
+    """
+    missing_location = not bool(target.location and target.location.strip())
+    missing_count = sum([
+        missing_location,
+        target.bedrooms is None,
+        target.accommodates is None,
+        target.baths is None,
+        not bool(target.property_type and target.property_type.strip()),
+    ])
+    if missing_location and missing_count >= 2:
+        return True
+    if missing_count >= 3:
+        return True
+    return False
+
+
+def _backfill_target_spec(
+    target: ListingSpec,
+    attrs: Dict[str, Any],
+) -> tuple:
+    """
+    Fill missing target spec fields from saved listing input attributes.
+
+    Called after extract_target_spec() when key fields are absent (None / "").
+    Only fills fields that are missing — never overwrites a live-extracted value.
+
+    Returns (updated_target, debug_meta) where debug_meta is a dict with:
+      "fields_filled"       — list of field names backfilled from attrs
+      "fields_still_missing"— list of key fields still None/empty after backfill
+      "source"              — "saved_attributes" | "none"
+      "is_partial"          — True if any key field remains missing after backfill
+    """
+    fields_filled: list = []
+
+    if not target.property_type:
+        v = attrs.get("propertyType")
+        if v and isinstance(v, str):
+            target.property_type = v
+            fields_filled.append("property_type")
+
+    if target.accommodates is None:
+        v = attrs.get("maxGuests")
+        if isinstance(v, int) and v > 0:
+            target.accommodates = v
+            fields_filled.append("accommodates")
+
+    if target.bedrooms is None:
+        v = attrs.get("bedrooms")
+        if isinstance(v, int) and v >= 0:
+            target.bedrooms = v
+            fields_filled.append("bedrooms")
+
+    if target.baths is None:
+        v = attrs.get("bathrooms")
+        if isinstance(v, (int, float)) and v > 0:
+            target.baths = float(v)
+            fields_filled.append("baths")
+
+    # beds is not a standard user-input field but include for completeness
+    if target.beds is None:
+        v = attrs.get("beds")
+        if isinstance(v, int) and v > 0:
+            target.beds = v
+            fields_filled.append("beds")
+
+    fields_still_missing: list = []
+    if not target.property_type:
+        fields_still_missing.append("property_type")
+    if target.accommodates is None:
+        fields_still_missing.append("accommodates")
+    if target.bedrooms is None:
+        fields_still_missing.append("bedrooms")
+    if target.baths is None:
+        fields_still_missing.append("baths")
+
+    return target, {
+        "fields_filled": fields_filled,
+        "fields_still_missing": fields_still_missing,
+        "source": "saved_attributes" if fields_filled else "none",
+        "is_partial": bool(fields_still_missing),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main scrape pipeline — day-by-day (connects to local Chrome via CDP)
 # ---------------------------------------------------------------------------
 
@@ -595,6 +706,9 @@ def run_scrape(
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    nightly_plan: Optional[Any] = None,
+    fallback_attributes: Optional[Dict[str, Any]] = None,
+    fallback_address: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -603,6 +717,11 @@ def run_scrape(
     daily_results is a list of dicts, one per night in [checkin, checkout).
     Each dict contains: date, median_price, comps_collected, comps_used,
     filter_stage, flags, is_sampled, is_weekend, price_distribution, error.
+
+    fallback_attributes: saved listing input attributes (bedrooms, bathrooms,
+    maxGuests, propertyType, ...) used to backfill any target spec fields that
+    extract_target_spec() could not recover from the Airbnb page. Only fills
+    missing fields — never overwrites live-extracted values.
 
     Raises ValueError if the date range exceeds MAX_NIGHTS.
     """
@@ -629,16 +748,31 @@ def run_scrape(
 
     all_nights = daterange_nights(d_start, d_end)
 
-    # Determine which nights to actually query
-    if total_nights <= SAMPLE_THRESHOLD:
-        sample_indices = list(range(total_nights))
+    # Determine which nights to actually query.
+    # Nightly jobs use the plan's tiered observe set; interactive uses the
+    # standard even-sampling strategy.
+    if nightly_plan is not None:
+        sample_indices = nightly_plan.observe_indices
+        _eff_scroll_rounds = nightly_plan.scroll_rounds
+        _eff_max_cards = nightly_plan.max_cards
+        _early_stop_threshold: Optional[int] = nightly_plan.early_stop_threshold
+        logger.info(
+            f"Day-by-day pipeline (nightly): {total_nights} nights, "
+            f"observing {len(sample_indices)} / inferring {len(nightly_plan.infer_indices)} "
+            f"(scroll_rounds={_eff_scroll_rounds}, max_cards={_eff_max_cards})"
+        )
     else:
-        sample_indices = compute_sample_dates(total_nights, MAX_SAMPLE_QUERIES)
-
-    logger.info(
-        f"Day-by-day pipeline: {total_nights} nights, "
-        f"querying {len(sample_indices)} days (sampling={'yes' if len(sample_indices) < total_nights else 'no'})"
-    )
+        if total_nights <= SAMPLE_THRESHOLD:
+            sample_indices = list(range(total_nights))
+        else:
+            sample_indices = compute_sample_dates(total_nights, MAX_SAMPLE_QUERIES)
+        _eff_scroll_rounds = max_scroll_rounds
+        _eff_max_cards = max_cards
+        _early_stop_threshold = None
+        logger.info(
+            f"Day-by-day pipeline: {total_nights} nights, "
+            f"querying {len(sample_indices)} days (sampling={'yes' if len(sample_indices) < total_nights else 'no'})"
+        )
 
     # CDP check
     cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
@@ -658,18 +792,121 @@ def run_scrape(
         page = context.new_page()
 
         try:
-            # Step 1: Extract target listing spec
+            # Step 1: Extract target listing spec (with one retry on degraded pages)
             logger.info(f"Extracting target: {listing_url}")
             extract_start = time.time()
             target, warnings = extract_target_spec(page, listing_url)
             extraction_warnings.extend(warnings)
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
             logger.info(
-                f"[run_scrape] Target spec: type={target.property_type!r} "
+                f"[run_scrape] Target spec (raw): type={target.property_type!r} "
                 f"bedrooms={target.bedrooms} accommodates={target.accommodates} "
                 f"baths={target.baths} beds={target.beds} "
                 f"location={target.location!r}"
             )
+
+            # Degraded-page detection + one retry.
+            # If the page returned suspiciously incomplete fields (e.g. bot-challenge
+            # redirect or cached fragment), wait 2 s and extract once more before
+            # falling back to saved attributes.  The retry is lightweight — it only
+            # re-navigates to the same URL and re-parses; it does not re-open a new
+            # browser context.
+            _spec_retry_attempted = False
+            _spec_retry_improved = False
+            _spec_degraded_page_suspected = _is_spec_degraded(target)
+            if _spec_degraded_page_suspected:
+                logger.warning(
+                    f"[run_scrape] Degraded page suspected "
+                    f"(location={target.location!r}, bedrooms={target.bedrooms}, "
+                    f"accommodates={target.accommodates}, baths={target.baths}, "
+                    f"type={target.property_type!r}) — retrying extraction in 2s"
+                )
+                extraction_warnings.append("Degraded page suspected; retrying spec extraction")
+                time.sleep(2)
+                _spec_retry_attempted = True
+                _retry_start = time.time()
+                target_retry, retry_warnings = extract_target_spec(page, listing_url)
+                timings["extract_retry_ms"] = round((time.time() - _retry_start) * 1000)
+                extraction_warnings.extend(retry_warnings)
+                if not _is_spec_degraded(target_retry):
+                    target = target_retry
+                    _spec_retry_improved = True
+                    logger.info("[run_scrape] Retry resolved degraded spec")
+                else:
+                    # Prefer the retry result if it has more fields even if still degraded
+                    _orig_missing = sum([
+                        not target.location, target.bedrooms is None,
+                        target.accommodates is None, target.baths is None,
+                        not target.property_type,
+                    ])
+                    _retry_missing = sum([
+                        not target_retry.location, target_retry.bedrooms is None,
+                        target_retry.accommodates is None, target_retry.baths is None,
+                        not target_retry.property_type,
+                    ])
+                    if _retry_missing < _orig_missing:
+                        target = target_retry
+                        _spec_retry_improved = True
+                        logger.info(
+                            f"[run_scrape] Retry partially improved spec "
+                            f"(missing fields: {_orig_missing} → {_retry_missing})"
+                        )
+                    else:
+                        logger.warning("[run_scrape] Retry did not improve degraded spec")
+
+            # Step 1a: Backfill missing target spec fields from saved listing attributes.
+            # Resolves the failure mode where Airbnb returns a degraded page that omits
+            # spec fields, causing all comps to score 0.35 (below the 0.40 floor) and
+            # the wrong effective_adults for the market search (None → default 2).
+            _spec_backfill_meta: Optional[Dict[str, Any]] = None
+            if fallback_attributes:
+                target, _spec_backfill_meta = _backfill_target_spec(target, fallback_attributes)
+                if _spec_backfill_meta["fields_filled"]:
+                    extraction_warnings.append(
+                        f"Target spec backfilled from saved attributes: "
+                        f"filled={_spec_backfill_meta['fields_filled']}, "
+                        f"still_missing={_spec_backfill_meta['fields_still_missing']}"
+                    )
+                    logger.info(
+                        f"[run_scrape] Target spec after backfill: type={target.property_type!r} "
+                        f"bedrooms={target.bedrooms} accommodates={target.accommodates} "
+                        f"baths={target.baths} beds={target.beds} "
+                        f"(filled: {_spec_backfill_meta['fields_filled']})"
+                    )
+                elif _spec_backfill_meta["is_partial"]:
+                    logger.warning(
+                        f"[run_scrape] Target spec incomplete after extraction + fallback: "
+                        f"still_missing={_spec_backfill_meta['fields_still_missing']}"
+                    )
+
+            # Build spec extraction telemetry — recorded in transparent result debug section.
+            _spec_still_partial = bool(
+                not target.property_type or target.accommodates is None
+                or target.bedrooms is None or target.baths is None
+            )
+            _spec_location_source = "page"
+            _spec_confidence: str
+            missing_after = sum([
+                not bool(target.location and target.location.strip()),
+                not target.property_type,
+                target.accommodates is None,
+                target.bedrooms is None,
+                target.baths is None,
+            ])
+            if missing_after == 0:
+                _spec_confidence = "high"
+            elif missing_after <= 1:
+                _spec_confidence = "medium"
+            else:
+                _spec_confidence = "low"
+            _spec_extraction_meta: Dict[str, Any] = {
+                "retryAttempted": _spec_retry_attempted,
+                "retryImproved": _spec_retry_improved,
+                "degradedPageSuspected": _spec_degraded_page_suspected,
+                "locationSource": _spec_location_source,
+                "specConfidence": _spec_confidence,
+                "stillPartial": _spec_still_partial,
+            }
 
             # Step 1b: Capture date-aware target price using a SHORT window (non-fatal).
             # Root cause of prior failures: the full 30-day checkout was passed here,
@@ -745,6 +982,7 @@ def run_scrape(
                 )
                 if loc_m:
                     target.location = loc_m.group(1).strip().rstrip(",.")
+                    _spec_location_source = "title"
                 else:
                     # Fallback: last meaningful token from title delimiters
                     tokens = [
@@ -753,8 +991,47 @@ def run_scrape(
                         if t.strip() and len(t.strip()) >= 3
                     ]
                     target.location = tokens[-1] if tokens else ""
+                    if target.location:
+                        _spec_location_source = "title"
                 extraction_warnings.append(f"Location fallback from title: '{target.location}'")
                 logger.warning(f"Location fallback from title: '{target.location}'")
+
+            # Last-resort: use the saved property address when title fallback also failed.
+            if not target.location and fallback_address:
+                loc_from_addr, _addr_conf = _extract_search_location(fallback_address)
+                if loc_from_addr:
+                    target.location = loc_from_addr
+                    _spec_location_source = "saved_address"
+                    extraction_warnings.append(
+                        f"Location fallback from saved address: '{target.location}' "
+                        f"(confidence={_addr_conf})"
+                    )
+                    logger.warning(
+                        f"[run_scrape] Location fallback from saved address: "
+                        f"'{target.location}' (confidence={_addr_conf})"
+                    )
+
+            # Finalize telemetry after all location fallbacks have run.
+            # specConfidence and stillPartial are recomputed here so they reflect
+            # the final post-fallback state (title or saved-address recovery raises
+            # confidence from "low" to "medium"/"high" when location is now resolved).
+            _spec_extraction_meta["locationSource"] = _spec_location_source
+            _final_missing = sum([
+                not bool(target.location and target.location.strip()),
+                not target.property_type,
+                target.accommodates is None,
+                target.bedrooms is None,
+                target.baths is None,
+            ])
+            _spec_extraction_meta["specConfidence"] = (
+                "high" if _final_missing == 0
+                else "medium" if _final_missing <= 1
+                else "low"
+            )
+            _spec_extraction_meta["stillPartial"] = bool(
+                not target.property_type or target.accommodates is None
+                or target.bedrooms is None or target.baths is None
+            )
 
             if not target.location:
                 return [], {
@@ -787,6 +1064,7 @@ def run_scrape(
                         "error": "Cannot determine location from listing page.",
                         "extractionWarnings": extraction_warnings,
                         "timingsMs": timings,
+                        "specExtractionMeta": _spec_extraction_meta,
                     },
                 }
 
@@ -810,7 +1088,11 @@ def run_scrape(
             from worker.scraper.day_query import DayResult
 
             sampled_results: List[DayResult] = []
+            _queried_night_indices: List[int] = []
             day_loop_start = time.time()
+            _consecutive_empty = 0
+            _consecutive_empty_peak = 0
+            _early_stop_triggered = False
 
             for idx_pos, night_idx in enumerate(sample_indices):
                 # Check global timeout
@@ -835,8 +1117,8 @@ def run_scrape(
                         base_origin,
                         date_i,
                         effective_adults,
-                        max_scroll_rounds=max_scroll_rounds,
-                        max_cards=max_cards,
+                        max_scroll_rounds=_eff_scroll_rounds,
+                        max_cards=_eff_max_cards,
                         rate_limit_seconds=rate_limit_seconds,
                         top_k=top_k,
                         preferred_comps=preferred_comps,
@@ -851,6 +1133,26 @@ def run_scrape(
 
                 if result is not None:
                     sampled_results.append(result)
+                    _queried_night_indices.append(night_idx)
+                    if result.median_price is None:
+                        _consecutive_empty += 1
+                        _consecutive_empty_peak = max(_consecutive_empty_peak, _consecutive_empty)
+                    else:
+                        _consecutive_empty = 0
+
+                # Circuit-breaker: nightly only — stop if too many consecutive empties.
+                # Preserves already-collected observations; unqueried dates are interpolated.
+                if (
+                    _early_stop_threshold is not None
+                    and _consecutive_empty >= _early_stop_threshold
+                ):
+                    logger.warning(
+                        f"[nightly] Circuit-breaker: {_consecutive_empty} consecutive empty results "
+                        f"at day {idx_pos + 1}/{len(sample_indices)} — stopping deeper crawl"
+                    )
+                    _early_stop_triggered = True
+                    break
+
                 if progress_callback is not None:
                     try:
                         progress_callback(idx_pos + 1, len(sample_indices))
@@ -858,6 +1160,34 @@ def run_scrape(
                         pass
 
             timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
+            # Record nightly crawl metadata for debug visibility.
+            if nightly_plan is not None:
+                # Compute actual observed/inferred from execution tracking, not from the
+                # original plan.  If early-stop fired, unqueried planned dates must not
+                # be counted as observed or as the plan's original infer set.
+                _actual_observed = [
+                    _queried_night_indices[i]
+                    for i, r in enumerate(sampled_results)
+                    if r.median_price is not None
+                ]
+                _actual_inferred = sorted(
+                    set(range(nightly_plan.total_nights)) - set(_actual_observed)
+                )
+                timings["nightly_crawl_debug"] = {
+                    "total_nights": nightly_plan.total_nights,
+                    "observed_count": len(_actual_observed),
+                    "queried_count": len(_queried_night_indices),
+                    "infer_count": len(_actual_inferred),
+                    "early_stop_triggered": _early_stop_triggered,
+                    "consecutive_empty_peak": _consecutive_empty_peak,
+                    "tiers": nightly_plan.tier_debug,
+                    "planned_observe_indices": nightly_plan.observe_indices,
+                    "actual_queried_indices": _queried_night_indices,
+                    "actual_observed_indices": _actual_observed,
+                    "actual_inferred_indices": _actual_inferred,
+                    "scroll_rounds": nightly_plan.scroll_rounds,
+                    "max_cards": nightly_plan.max_cards,
+                }
 
             # Step 3: Interpolate unsampled/failed days
             interp_start = time.time()
@@ -916,6 +1246,8 @@ def run_scrape(
                     preferred_comps,
                 ),
                 target_price_confidence=_target_price_confidence,
+                spec_backfill=_spec_backfill_meta,
+                spec_extraction_meta=_spec_extraction_meta,
             )
             # Phase 3B: surface page-extracted coords so main.py can write them back to DB
             if target.lat is not None and target.lng is not None:
@@ -974,6 +1306,8 @@ def run_benchmark_scrape(
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    nightly_plan: Optional[Any] = None,
+    fallback_address: Optional[str] = None,
 ) -> tuple:
     """
     Benchmark-first pipeline.
@@ -984,6 +1318,10 @@ def run_benchmark_scrape(
     Returns (daily_results, transparent_result).
     Fallback: if benchmark price fetch fails entirely, raises ValueError
     so the caller can fall back to the standard run_scrape pipeline.
+
+    nightly_plan: when provided (nightly jobs only), overrides sample indices
+    with the tiered nightly plan and applies reduced per-query limits and
+    circuit-breaker early-stop.
     """
     from playwright.sync_api import sync_playwright
     from worker.core.benchmark import (
@@ -1016,16 +1354,27 @@ def run_benchmark_scrape(
 
     all_nights = daterange_nights(d_start, d_end)
 
-    # Benchmark mode uses fewer sample queries
-    if total_nights <= SAMPLE_THRESHOLD:
-        sample_indices = list(range(total_nights))
+    # Nightly jobs use the tiered plan; benchmark interactive uses standard sampling.
+    if nightly_plan is not None:
+        sample_indices = nightly_plan.observe_indices
+        _bm_eff_scroll_rounds = nightly_plan.scroll_rounds
+        _bm_eff_max_cards = nightly_plan.max_cards
+        _bm_early_stop_threshold: Optional[int] = nightly_plan.early_stop_threshold
+        logger.info(
+            f"Benchmark pipeline (nightly): {benchmark_url} | {total_nights} nights, "
+            f"observing {len(sample_indices)} / inferring {len(nightly_plan.infer_indices)}"
+        )
     else:
-        sample_indices = compute_sample_dates(total_nights, BENCHMARK_MAX_SAMPLE_QUERIES)
-
-    logger.info(
-        f"Benchmark pipeline: {benchmark_url} | {total_nights} nights, "
-        f"querying {len(sample_indices)} days"
-    )
+        if total_nights <= SAMPLE_THRESHOLD:
+            sample_indices = list(range(total_nights))
+        else:
+            sample_indices = compute_sample_dates(total_nights, BENCHMARK_MAX_SAMPLE_QUERIES)
+        from worker.core.benchmark import BENCHMARK_SCROLL_ROUNDS as _bm_eff_scroll_rounds, BENCHMARK_MAX_CARDS as _bm_eff_max_cards  # noqa: E501
+        _bm_early_stop_threshold = None
+        logger.info(
+            f"Benchmark pipeline: {benchmark_url} | {total_nights} nights, "
+            f"querying {len(sample_indices)} days"
+        )
 
     cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
     if not cdp_ok:
@@ -1053,14 +1402,78 @@ def run_benchmark_scrape(
         try:
             # Step 1: Extract benchmark listing spec (location, capacity, etc.)
             extract_start = time.time()
+            _bm_spec_extraction_meta: Optional[Dict[str, Any]] = None
+            _bm_backfill_meta: Optional[Dict[str, Any]] = None
             if target_spec_override is not None:
                 target = target_spec_override
             else:
                 logger.info(f"[benchmark] Extracting spec from: {benchmark_url}")
                 target, warnings = extract_target_spec(page, benchmark_url)
                 extraction_warnings.extend(warnings)
+                logger.info(
+                    f"[benchmark] Target spec (raw): type={target.property_type!r} "
+                    f"bedrooms={target.bedrooms} accommodates={target.accommodates} "
+                    f"baths={target.baths} location={target.location!r}"
+                )
+
+                # Degraded-page detection + one retry (mirrors run_scrape).
+                _bm_retry_attempted = False
+                _bm_retry_improved = False
+                _bm_degraded_suspected = _is_spec_degraded(target)
+                if _bm_degraded_suspected:
+                    logger.warning(
+                        f"[benchmark] Degraded page suspected — retrying spec extraction in 2s"
+                    )
+                    extraction_warnings.append(
+                        "[benchmark] Degraded page suspected; retrying spec extraction"
+                    )
+                    time.sleep(2)
+                    _bm_retry_attempted = True
+                    target_bm_retry, bm_retry_warnings = extract_target_spec(page, benchmark_url)
+                    extraction_warnings.extend(bm_retry_warnings)
+                    if not _is_spec_degraded(target_bm_retry):
+                        target = target_bm_retry
+                        _bm_retry_improved = True
+                        logger.info("[benchmark] Retry resolved degraded spec")
+                    else:
+                        _bm_orig_missing = sum([
+                            not target.location, target.bedrooms is None,
+                            target.accommodates is None, target.baths is None,
+                            not target.property_type,
+                        ])
+                        _bm_retry_missing = sum([
+                            not target_bm_retry.location, target_bm_retry.bedrooms is None,
+                            target_bm_retry.accommodates is None, target_bm_retry.baths is None,
+                            not target_bm_retry.property_type,
+                        ])
+                        if _bm_retry_missing < _bm_orig_missing:
+                            target = target_bm_retry
+                            _bm_retry_improved = True
+                            logger.info(
+                                f"[benchmark] Retry partially improved spec "
+                                f"(missing: {_bm_orig_missing} → {_bm_retry_missing})"
+                            )
+                        else:
+                            logger.warning("[benchmark] Retry did not improve degraded spec")
+
+                # Backfill from user_attributes when structural fields are still missing.
+                _bm_backfill_meta: Optional[Dict[str, Any]] = None
+                if user_attributes:
+                    target, _bm_backfill_meta = _backfill_target_spec(target, user_attributes)
+                    if _bm_backfill_meta["fields_filled"]:
+                        extraction_warnings.append(
+                            f"[benchmark] Target spec backfilled from user attributes: "
+                            f"filled={_bm_backfill_meta['fields_filled']}, "
+                            f"still_missing={_bm_backfill_meta['fields_still_missing']}"
+                        )
+                        logger.info(
+                            f"[benchmark] Target spec after backfill: type={target.property_type!r} "
+                            f"bedrooms={target.bedrooms} accommodates={target.accommodates} "
+                            f"(filled: {_bm_backfill_meta['fields_filled']})"
+                        )
 
                 # Location fallback (mirrors run_scrape)
+                _bm_location_source = "page"
                 if not target.location:
                     loc_m = re.search(
                         r"\bin\s+([A-Z][a-zA-Z\s,]+(?:,\s*[A-Z][a-zA-Z\s]+)?)",
@@ -1068,6 +1481,7 @@ def run_benchmark_scrape(
                     )
                     if loc_m:
                         target.location = loc_m.group(1).strip().rstrip(",.")
+                        _bm_location_source = "title"
                     else:
                         tokens = [
                             t.strip()
@@ -1075,9 +1489,51 @@ def run_benchmark_scrape(
                             if t.strip() and len(t.strip()) >= 3
                         ]
                         target.location = tokens[-1] if tokens else ""
+                        if target.location:
+                            _bm_location_source = "title"
                     extraction_warnings.append(
                         f"[benchmark] Location fallback from title: '{target.location}'"
                     )
+
+                # Last-resort: saved property address (mirrors run_scrape).
+                if not target.location and fallback_address:
+                    loc_from_addr, _bm_addr_conf = _extract_search_location(fallback_address)
+                    if loc_from_addr:
+                        target.location = loc_from_addr
+                        _bm_location_source = "saved_address"
+                        extraction_warnings.append(
+                            f"[benchmark] Location fallback from saved address: "
+                            f"'{target.location}' (confidence={_bm_addr_conf})"
+                        )
+                        logger.warning(
+                            f"[benchmark] Location fallback from saved address: "
+                            f"'{target.location}' (confidence={_bm_addr_conf})"
+                        )
+
+                # Build benchmark spec extraction telemetry after all fallbacks so
+                # specConfidence / stillPartial / locationSource reflect final state.
+                _bm_missing_after = sum([
+                    not bool(target.location and target.location.strip()),
+                    not target.property_type,
+                    target.accommodates is None,
+                    target.bedrooms is None,
+                    target.baths is None,
+                ])
+                _bm_spec_extraction_meta: Dict[str, Any] = {
+                    "retryAttempted": _bm_retry_attempted,
+                    "retryImproved": _bm_retry_improved,
+                    "degradedPageSuspected": _bm_degraded_suspected,
+                    "locationSource": _bm_location_source,
+                    "specConfidence": (
+                        "high" if _bm_missing_after == 0
+                        else "medium" if _bm_missing_after <= 1
+                        else "low"
+                    ),
+                    "stillPartial": bool(
+                        not target.property_type or target.accommodates is None
+                        or target.bedrooms is None or target.baths is None
+                    ),
+                }
 
                 if not target.location:
                     return [], _empty_transparent(
@@ -1152,9 +1608,13 @@ def run_benchmark_scrape(
             }
 
             # Step 2: Benchmark day-by-day queries
-            from worker.core.benchmark import BENCHMARK_SCROLL_ROUNDS, BENCHMARK_MAX_CARDS, BENCHMARK_TOP_K
+            from worker.core.benchmark import BENCHMARK_TOP_K
             sampled_results: List[BenchmarkDayResult] = []
+            _bm_queried_night_indices: List[int] = []
             day_loop_start = time.time()
+            _bm_consecutive_empty = 0
+            _bm_consecutive_empty_peak = 0
+            _bm_early_stop_triggered = False
 
             for idx_pos, night_idx in enumerate(sample_indices):
                 elapsed = time.time() - start_time
@@ -1177,13 +1637,32 @@ def run_benchmark_scrape(
                     effective_adults,
                     secondary_benchmark_urls=secondary_benchmark_urls or [],
                     benchmark_target_similarity=bm_target_similarity,
-                    max_scroll_rounds=BENCHMARK_SCROLL_ROUNDS,
-                    max_cards=BENCHMARK_MAX_CARDS,
+                    max_scroll_rounds=_bm_eff_scroll_rounds,
+                    max_cards=_bm_eff_max_cards,
                     rate_limit_seconds=rate_limit_seconds,
                     top_k=BENCHMARK_TOP_K,
                     max_radius_km=_effective_radius,
                 )
                 sampled_results.append(result)
+                _bm_queried_night_indices.append(night_idx)
+
+                if result.median_price is None:
+                    _bm_consecutive_empty += 1
+                    _bm_consecutive_empty_peak = max(_bm_consecutive_empty_peak, _bm_consecutive_empty)
+                else:
+                    _bm_consecutive_empty = 0
+
+                if (
+                    _bm_early_stop_threshold is not None
+                    and _bm_consecutive_empty >= _bm_early_stop_threshold
+                ):
+                    logger.warning(
+                        f"[nightly/benchmark] Circuit-breaker: {_bm_consecutive_empty} consecutive "
+                        f"empty results at day {idx_pos + 1}/{len(sample_indices)} — stopping"
+                    )
+                    _bm_early_stop_triggered = True
+                    break
+
                 if progress_callback is not None:
                     try:
                         progress_callback(idx_pos + 1, len(sample_indices))
@@ -1191,6 +1670,30 @@ def run_benchmark_scrape(
                         pass
 
             timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
+            if nightly_plan is not None:
+                _bm_actual_observed = [
+                    _bm_queried_night_indices[i]
+                    for i, r in enumerate(sampled_results)
+                    if r.median_price is not None
+                ]
+                _bm_actual_inferred = sorted(
+                    set(range(nightly_plan.total_nights)) - set(_bm_actual_observed)
+                )
+                timings["nightly_crawl_debug"] = {
+                    "total_nights": nightly_plan.total_nights,
+                    "observed_count": len(_bm_actual_observed),
+                    "queried_count": len(_bm_queried_night_indices),
+                    "infer_count": len(_bm_actual_inferred),
+                    "early_stop_triggered": _bm_early_stop_triggered,
+                    "consecutive_empty_peak": _bm_consecutive_empty_peak,
+                    "tiers": nightly_plan.tier_debug,
+                    "planned_observe_indices": nightly_plan.observe_indices,
+                    "actual_queried_indices": _bm_queried_night_indices,
+                    "actual_observed_indices": _bm_actual_observed,
+                    "actual_inferred_indices": _bm_actual_inferred,
+                    "scroll_rounds": nightly_plan.scroll_rounds,
+                    "max_cards": nightly_plan.max_cards,
+                }
 
             # Step 3: Interpolate
             # Reuse standard interpolation — BenchmarkDayResult.median_price is the blended price
@@ -1335,6 +1838,8 @@ def run_benchmark_scrape(
                 source="benchmark",
                 extraction_warnings=extraction_warnings,
                 benchmark_info=benchmark_info,
+                spec_backfill=_bm_backfill_meta,
+                spec_extraction_meta=_bm_spec_extraction_meta,
             )
             _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
             _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
@@ -1424,6 +1929,7 @@ def run_criteria_search(
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    nightly_plan: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Criteria-based search: search Airbnb for listings matching the user's
@@ -1566,11 +2072,16 @@ def run_criteria_search(
             if elapsed > max_runtime_seconds - 10:
                 return [], _empty_transparent("criteria", "Timeout before scroll")
 
+            # Nightly Pass 1: apply reduced scroll/card limits to match the per-query
+            # budget of the crawl plan.  Interactive jobs use caller-supplied defaults.
+            _p1_scroll = nightly_plan.scroll_rounds if nightly_plan is not None else max_scroll_rounds
+            _p1_max_cards = nightly_plan.max_cards if nightly_plan is not None else max_cards
+
             scroll_start = time.time()
             raw_cards = scroll_and_collect(
                 page,
-                max_rounds=max_scroll_rounds,
-                max_cards=max_cards,
+                max_rounds=_p1_scroll,
+                max_cards=_p1_max_cards,
                 pause_ms=900,
                 rate_limit_seconds=rate_limit_seconds,
                 stay_nights=total_nights,
@@ -1663,6 +2174,7 @@ def run_criteria_search(
         target_lng=target_lng,
         max_radius_km=max_radius_km,
         progress_callback=progress_callback,
+        nightly_plan=nightly_plan,
     )
 
     # Merge criteria-specific info into the transparent result

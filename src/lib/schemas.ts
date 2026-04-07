@@ -1,5 +1,15 @@
 import { z } from "zod";
 
+// ── Co-host verification status ─────────────────────────────────────────────
+
+export type CohostVerificationStatus =
+  | "not_started"
+  | "invite_opened"
+  | "user_confirmed"
+  | "verification_pending"
+  | "verified"
+  | "verification_failed";
+
 // ── Property Input ──────────────────────────────────────────────
 
 export const propertyTypeEnum = z.enum([
@@ -140,24 +150,88 @@ export interface CalendarDay {
   date: string;
   dayOfWeek: string;
   isWeekend: boolean;
-  basePrice: number;
-  refundablePrice: number;
-  nonRefundablePrice: number;
+
+  // ── CANONICAL USER-FACING RECOMMENDATION ─────────────────────────────────
+  /**
+   * CANONICAL DAILY RECOMMENDATION FIELD. Use this for all primary UI.
+   *
+   * Computed as: perDayMarketMedian × demandAdjustment, where demandAdjustment
+   * accounts for weekend premium, peak/event flags, and market tightness (range
+   * ~0.90–1.05). Last-minute time discounts are intentionally NOT applied — this
+   * is the host's recommended list price, not a dynamic revenue-strategy signal.
+   *
+   * Absent on reports predating the canonical contract. UI must fall back:
+   *   const displayPrice = day.recommendedDailyPrice ?? day.basePrice;
+   */
+  recommendedDailyPrice?: number | null;
+
+  // ── MARKET REFERENCE ─────────────────────────────────────────────────────
+  /**
+   * Raw per-day market median observed across comparable listings for this date.
+   * This is the market REFERENCE signal — what comparable listings charge, unmodified.
+   * It is NOT the canonical recommendation. Use this for the market line in charts
+   * or market-reference transparency displays.
+   *
+   * Differs from recommendedDailyPrice: no demand adjustments applied.
+   * Absent on interpolated/missing days (null = no comp data for that date).
+   */
+  baseDailyPrice?: number | null;
+
+  /** Day-of-date flags. e.g. "peak", "low_demand", "missing_data", "interpolated" */
+  flags?: string[];
+
+  // ── INTERNAL / ADJUSTMENT PIPELINE ───────────────────────────────────────
+  /**
+   * Dynamic pricing adjustment metadata for this date (internal / transparency use).
+   * Contains the raw demand score, time multiplier, and demand adjustment factor
+   * used to compute priceAfterTimeAdjustment. NOT a user-facing recommendation signal.
+   */
   dynamicAdjustment?: {
     demandScore: number;
     confidence: "low" | "medium" | "high";
-    timeMultiplier: number;
-    demandAdjustment: number;
-    finalMultiplier: number;
+    timeMultiplier: number;   // last-minute discount factor (0.75–1.00); excluded from recommendation
+    demandAdjustment: number; // demand signal only (0.90–1.05); IS included in recommendedDailyPrice
+    finalMultiplier: number;  // timeMultiplier × demandAdjustment (internal combined factor)
     reasons: string[];
   };
-  // Last-minute discount transparency (newer reports)
-  baseDailyPrice?: number | null;
-  lastMinuteMultiplier?: number | null;
+  /**
+   * Internal pipeline stage: baseDailyPrice × finalMultiplier (time + demand combined).
+   * Includes last-minute discounts for near-term dates. NOT the canonical recommendation.
+   * Do not surface directly as "recommended price."
+   */
   priceAfterTimeAdjustment?: number | null;
+  /** Alias for dynamicAdjustment.timeMultiplier. Internal; not for primary UI. */
+  lastMinuteMultiplier?: number | null;
+  /**
+   * Internal: priceAfterTimeAdjustment with the full discount stack (weekly + monthly +
+   * non-refundable discounts) applied. Retained for compatibility; not primary UI.
+   */
   effectiveDailyPriceRefundable?: number | null;
+  /** Internal: same as effectiveDailyPriceRefundable plus non-refundable discount. */
   effectiveDailyPriceNonRefundable?: number | null;
-  flags?: string[]; // e.g. "peak", "low_demand", "missing_data", "interpolated"
+
+  // ── LEGACY COMPATIBILITY ──────────────────────────────────────────────────
+  // These fields predate the canonical contract. Retained so old-report readers
+  // do not break. Do NOT use these as the primary price for new UI work.
+  /**
+   * @deprecated Use recommendedDailyPrice for new UI.
+   * Legacy: equals priceAfterTimeAdjustment (or overallMedian for missing days).
+   * Ambiguously named — present on all reports including very old ones.
+   * Kept as the fallback in: `day.recommendedDailyPrice ?? day.basePrice`
+   */
+  basePrice: number;
+  /**
+   * @deprecated Use recommendedDailyPrice for new UI.
+   * Legacy: priceAfterTimeAdjustment with weekly/monthly discount stack applied.
+   * Discount concepts have been removed from the user-facing product.
+   */
+  refundablePrice: number;
+  /**
+   * @deprecated Use recommendedDailyPrice for new UI.
+   * Legacy: refundablePrice with an additional non-refundable cancellation discount.
+   * Discount concepts have been removed from the user-facing product.
+   */
+  nonRefundablePrice: number;
 }
 
 // ── Transparency Types ──────────────────────────────────────────
@@ -255,11 +329,34 @@ export interface ComparableListing {
 }
 
 export interface RecommendedPrice {
+  /**
+   * CANONICAL TOP-LEVEL RECOMMENDED PRICE.
+   * Always equals calendar[0].recommendedDailyPrice (day-0 demand-adjusted recommendation).
+   * Pinned in _execute_analysis() after the calendar is built.
+   * This is what the dashboard banner, report hero, and alert emails display.
+   * Do NOT use weekdayEstimate/weekendEstimate as the primary UI value.
+   */
   nightly: number | null;
+  /**
+   * Pre-canonical weekday estimate from the pricing engine (similarity-weighted).
+   * Not aligned to the canonical daily series. Use only for supplementary display.
+   * Null when the canonical pin block ran (most new reports).
+   */
   weekdayEstimate: number | null;
+  /**
+   * Pre-canonical weekend estimate from the pricing engine. Same caveats as weekdayEstimate.
+   */
   weekendEstimate: number | null;
+  /** @deprecated Always 0 in current product. Retained for wire-format compatibility. */
   discountApplied: number;
+  /** Diagnostic notes from the pricing engine or canonical pin block. Not primary UI. */
   notes: string;
+  /**
+   * Secondary context only: the pricing engine's 30-day similarity-weighted recommendation
+   * before the canonical pin. Preserved when transparent_result is available.
+   * Not shown in primary UI. Absent on older reports and obs-reuse reports.
+   */
+  windowMedian?: number | null;
 }
 
 // ── Benchmark Transparency ───────────────────────────────────────
@@ -391,11 +488,31 @@ export interface LivePriceIntelligence {
 
 export interface ReportSummary extends LivePriceIntelligence {
   insightHeadline: string;
+
+  // ── Market proxy stats ───────────────────────────────────────
+  // Backward-compatible market reference metrics derived from the legacy
+  // basePrice field (= priceAfterTimeAdjustment or overallMedian, depending
+  // on whether the day had valid comp data). These approximate the market
+  // but are NOT guaranteed to be raw unadjusted market medians — they may
+  // reflect time/demand multipliers on near-term dates in the scrape window.
+  // Use for "Market median" KPI, alert comparison baselines, and revenue
+  // estimates. NOT the canonical recommendation (use recommendedPrice.nightly).
+  /** Window low end — market proxy. Derived from legacy basePrice. */
   nightlyMin: number;
+  /**
+   * Window midpoint — market proxy / backward-compatible market reference.
+   * Derived from legacy basePrice (not guaranteed to be the raw per-day
+   * comp median; may include time/demand adjustments on near-term dates).
+   * Use for "Market median" KPI displays and alert comparison baselines.
+   * The canonical recommendation is recommendedPrice.nightly (= day-0 recommendedDailyPrice).
+   */
   nightlyMedian: number;
+  /** Window high end — market proxy. Derived from legacy basePrice. */
   nightlyMax: number;
   occupancyPct: number;
+  /** Market-proxy weekday average. Derived from legacy basePrice. Reference only. */
   weekdayAvg: number;
+  /** Market-proxy weekend average. Derived from legacy basePrice. Reference only. */
   weekendAvg: number;
   estimatedMonthlyRevenue: number;
   weeklyStayAvgNightly: number;
@@ -407,12 +524,17 @@ export interface ReportSummary extends LivePriceIntelligence {
     avgNightly: number;
     lengthDiscountPct: number;
   }>;
-  // Embedded transparency fields (present in new reports)
+
+  // ── Canonical recommendation ──────────────────────────────────
+  // recommendedPrice.nightly is the primary "Recommended Price" for all UI surfaces.
+  // It equals calendar[0].recommendedDailyPrice (pinned in worker after calendar build).
+  recommendedPrice?: RecommendedPrice;
+
+  // ── Embedded transparency fields (present in new reports) ─────
   targetSpec?: TargetSpec;
   queryCriteria?: QueryCriteria;
   compsSummary?: CompsSummary;
   priceDistribution?: PriceDistribution;
-  recommendedPrice?: RecommendedPrice;
   comparableListings?: ComparableListing[];
   benchmarkInfo?: BenchmarkInfo;
 }
@@ -476,6 +598,20 @@ export const updateListingSchema = z.object({
   minimumBookingNights: z.number().int().min(1).max(30).optional(),
   /** Update the Airbnb listing URL stored in input_attributes.listingUrl */
   listingUrl: z.string().url().nullable().optional(),
+  // Auto-Apply settings (migration 017 + 019)
+  autoApplyEnabled: z.boolean().optional(),
+  // Max 30: recommendation system only covers the next 30 days.
+  autoApplyWindowEndDays: z.number().int().min(1).max(30).optional(),
+  autoApplyScope: z.enum(["actionable", "all_sellable"]).optional(),
+  autoApplyMinPriceFloor: z.number().positive().nullable().optional(),
+  autoApplyMinNoticeDays: z.number().int().min(0).max(30).optional(),
+  autoApplyMaxIncreasePct: z.number().positive().max(200).nullable().optional(),
+  autoApplyMaxDecreasePct: z.number().positive().max(100).nullable().optional(),
+  autoApplySkipUnavailable: z.boolean().optional(),
+  // Co-host invite-opened transition (migration 020).
+  // Setting true transitions status from not_started → invite_opened.
+  // All other co-host status transitions go through /cohost-verify.
+  autoApplyCohostInviteOpened: z.boolean().optional(),
 });
 
 export interface SavedListing {
@@ -504,6 +640,24 @@ export interface SavedListing {
   minimumBookingNights: number;
   listingUrlValidationStatus: string | null;
   listingUrlValidatedAt: string | null;
+  // Auto-Apply settings (migration 017 + 019)
+  autoApplyEnabled: boolean;
+  autoApplyWindowEndDays: number;
+  autoApplyScope: "actionable" | "all_sellable";
+  autoApplyMinPriceFloor: number | null;
+  autoApplyMinNoticeDays: number;
+  autoApplyMaxIncreasePct: number | null;
+  autoApplyMaxDecreasePct: number | null;
+  autoApplySkipUnavailable: boolean;
+  autoApplyLastUpdatedAt: string | null;
+  // Co-host verification model (migration 020)
+  autoApplyCohostStatus: CohostVerificationStatus;
+  autoApplyCohostConfirmedAt: string | null;
+  autoApplyCohostVerifiedAt: string | null;
+  autoApplyCohostVerificationError: string | null;
+  autoApplyCohostVerificationMethod: string | null;
+  /** @deprecated Use autoApplyCohostStatus instead. */
+  autoApplyCohostReady: boolean;
 }
 
 export interface ListingReport {

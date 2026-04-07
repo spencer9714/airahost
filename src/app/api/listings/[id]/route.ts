@@ -135,7 +135,7 @@ export async function PATCH(
 
     const { data: currentListing } = await supabase
       .from("saved_listings")
-      .select("id, name, input_address, input_attributes, pricing_alerts_enabled")
+      .select("id, name, input_address, input_attributes, pricing_alerts_enabled, auto_apply_cohost_status")
       .eq("id", id)
       .eq("user_id", user.id)
       .single();
@@ -175,6 +175,46 @@ export async function PATCH(
       updates.default_end_date = parsed.data.defaultEndDate;
     if (parsed.data.minimumBookingNights !== undefined)
       updates.minimum_booking_nights = parsed.data.minimumBookingNights;
+    // Auto-Apply settings (migration 017)
+    if (parsed.data.autoApplyEnabled !== undefined)
+      updates.auto_apply_enabled = parsed.data.autoApplyEnabled;
+    if (parsed.data.autoApplyWindowEndDays !== undefined)
+      updates.auto_apply_window_end_days = parsed.data.autoApplyWindowEndDays;
+    if (parsed.data.autoApplyScope !== undefined)
+      updates.auto_apply_scope = parsed.data.autoApplyScope;
+    if (parsed.data.autoApplyMinPriceFloor !== undefined)
+      updates.auto_apply_min_price_floor = parsed.data.autoApplyMinPriceFloor;
+    if (parsed.data.autoApplyMinNoticeDays !== undefined)
+      updates.auto_apply_min_notice_days = parsed.data.autoApplyMinNoticeDays;
+    if (parsed.data.autoApplyMaxIncreasePct !== undefined)
+      updates.auto_apply_max_increase_pct = parsed.data.autoApplyMaxIncreasePct;
+    if (parsed.data.autoApplyMaxDecreasePct !== undefined)
+      updates.auto_apply_max_decrease_pct = parsed.data.autoApplyMaxDecreasePct;
+    if (parsed.data.autoApplySkipUnavailable !== undefined)
+      updates.auto_apply_skip_unavailable = parsed.data.autoApplySkipUnavailable;
+    // Co-host invite-opened transition (migration 020).
+    // Only transitions not_started → invite_opened.
+    // All other status transitions go through POST /cohost-verify.
+    if (parsed.data.autoApplyCohostInviteOpened === true) {
+      const currentStatus = (currentListing as { auto_apply_cohost_status?: string } | null)
+        ?.auto_apply_cohost_status ?? "not_started";
+      if (currentStatus === "not_started") {
+        updates.auto_apply_cohost_status = "invite_opened";
+      }
+    }
+    // Stamp last-updated when any auto_apply field is being changed
+    const autoApplyFieldsChanged = [
+      parsed.data.autoApplyEnabled,
+      parsed.data.autoApplyWindowEndDays,
+      parsed.data.autoApplyScope,
+      parsed.data.autoApplyMinPriceFloor,
+      parsed.data.autoApplyMinNoticeDays,
+      parsed.data.autoApplyMaxIncreasePct,
+      parsed.data.autoApplyMaxDecreasePct,
+      parsed.data.autoApplySkipUnavailable,
+    ].some((v) => v !== undefined);
+    if (autoApplyFieldsChanged)
+      updates.auto_apply_last_updated_at = new Date().toISOString();
 
     // Track whether the URL change forces alerts off (so the caller's pricingAlertsEnabled
     // field cannot override a URL-driven force-disable below).

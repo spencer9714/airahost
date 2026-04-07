@@ -36,6 +36,12 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from worker.core.comp_utils import (
+    build_comp_id,
+    build_comp_prices_dict,
+    compute_price_distribution,
+    to_comparable_payload,
+)
 from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM, apply_geo_filter
 from worker.core.price_band import apply_price_band_filter
 from worker.core.price_sanity import apply_price_sanity
@@ -44,12 +50,7 @@ from worker.core.similarity import (
     filter_similar_candidates,
     similarity_score,
 )
-from worker.scraper.comparable_collector import (
-    build_search_url,
-    parse_card_to_spec,
-    scroll_and_collect,
-    wait_for_cards,
-)
+from worker.scraper.comp_collection import collect_search_comps
 from worker.scraper.target_extractor import (
     ListingSpec,
     extract_nightly_price_from_listing_page,
@@ -114,8 +115,6 @@ FETCH_STATUS_SEARCH_HIT = "search_hit"       # benchmark appeared in search resu
 FETCH_STATUS_DIRECT_PAGE = "direct_page"     # obtained via listing-page scrape
 FETCH_STATUS_FAILED = "failed"               # price unavailable for this day
 
-import re
-_ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
 
 
 # ── Per-day result ────────────────────────────────────────────────────────────
@@ -282,89 +281,33 @@ def estimate_benchmark_price_for_date(
     5. Return blended final price.
     """
 
-    def _safe_num(v: Any, fallback: Optional[float]) -> float:
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(fallback, (int, float)):
-            return float(fallback)
-        return 0.0
-
-    def _to_comp_payload(spec: ListingSpec, score: float) -> Dict[str, Any]:
-        room_match = _ROOM_ID_RE.search(spec.url or "")
-        comp_id = (
-            room_match.group(1) if room_match
-            else (spec.url or f"comp-{int(time.time() * 1000)}")
-        )
-        payload: Dict[str, Any] = {
-            "id": comp_id,
-            "title": spec.title or "Comparable listing",
-            "propertyType": spec.property_type or target.property_type or "entire_home",
-            "accommodates": int(spec.accommodates) if isinstance(spec.accommodates, (int, float)) else None,
-            "bedrooms": int(spec.bedrooms) if isinstance(spec.bedrooms, (int, float)) else None,
-            "baths": round(float(spec.baths), 1) if isinstance(spec.baths, (int, float)) else None,
-            "nightlyPrice": round(_safe_num(spec.nightly_price, None), 2),
-            "currency": spec.currency or "USD",
-            "similarity": round(float(score), 3),
-            "rating": (
-                round(float(spec.rating), 2)
-                if isinstance(spec.rating, (int, float)) else None
-            ),
-            "reviews": (
-                int(spec.reviews)
-                if isinstance(spec.reviews, (int, float)) else None
-            ),
-            "location": spec.location or None,
-            "url": spec.url or None,
-            "isPinnedBenchmark": False,
-        }
-        if spec.scrape_nights > 1:
-            payload["queryNights"] = spec.scrape_nights
-        return payload
-
     checkin_str = date_i.isoformat()
     is_weekend = date_i.weekday() >= 4  # Fri=4, Sat=5
 
     try:
-        query_nights_used = 1
-        comps: List[ListingSpec] = []
-        for query_nights in (2, 1):
-            checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
-            search_url = build_search_url(
-                base_origin, target.location, checkin_str, checkout_str, adults,
-            )
-            logger.info(f"[benchmark] {checkin_str}: {query_nights}-night benchmark search (primary=2)")
+        # 2-night-primary / 1-night-fallback search with coord extraction.
+        # exclude_url is intentionally None: the benchmark listing must remain
+        # in the results so Stage 1 can capture its search-card price as a
+        # fallback when direct-page extraction fails.
+        comps, query_nights_used = collect_search_comps(
+            page,
+            target.location,
+            base_origin,
+            date_i,
+            adults,
+            max_scroll_rounds=max_scroll_rounds,
+            max_cards=max_cards,
+            rate_limit_seconds=rate_limit_seconds,
+            log_prefix="benchmark",
+        )
 
-            page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-            wait_for_cards(page)
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-
-            raw_cards = scroll_and_collect(
-                page,
-                max_rounds=max_scroll_rounds,
-                max_cards=max_cards,
-                pause_ms=600,
-                rate_limit_seconds=rate_limit_seconds,
-                stay_nights=query_nights,
-            )
-            comps = [parse_card_to_spec(c) for c in raw_cards]
-            comps = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
-            if comps:
-                query_nights_used = query_nights
-                break
-
-        comps = [c for c in comps if c.url and c.nightly_price and c.nightly_price > 0]
-
-        # ── Phase 3B: Geographic distance filter (benchmark path) ────────
-        # Mirror the same filter applied in day_query.  The benchmark card is
-        # excluded from market_comps downstream, so filtering it here is safe.
-        # Comps without coords always pass through — never blocked on missing data.
-        _bm_geo_excluded = 0
+        # ── Geographic distance filter ────────────────────────────────────
+        # Applied before Stage 1.  The benchmark card is excluded from
+        # market_comps downstream, so filtering it here is safe.
+        # Comps without coords always pass through (never blocked on missing data).
         if target.lat is not None and target.lng is not None:
             try:
-                comps, _bm_geo_excluded = apply_geo_filter(
+                comps, _ = apply_geo_filter(
                     comps, target.lat, target.lng, max_radius_km
                 )
             except Exception as _bm_geo_exc:
@@ -375,12 +318,7 @@ def estimate_benchmark_price_for_date(
         comps_collected = len(comps)
 
         # Build full comp_prices map for priceByDate tracking.
-        all_comp_prices: Dict[str, float] = {}
-        for c in comps:
-            room_match = _ROOM_ID_RE.search(c.url or "")
-            cid = room_match.group(1) if room_match else (c.url or "")
-            if cid and c.nightly_price:
-                all_comp_prices[cid] = round(float(c.nightly_price), 2)
+        all_comp_prices = build_comp_prices_dict(comps)
 
         # ── Stage 1: locate benchmark in search results ───────────────────
         benchmark_comp = next(
@@ -476,8 +414,7 @@ def estimate_benchmark_price_for_date(
         if comps_collected == 0:
             early_top_comps: List[Dict[str, Any]] = []
             if benchmark_price is not None:
-                bm_room_match = _ROOM_ID_RE.search(benchmark_url)
-                bm_id = bm_room_match.group(1) if bm_room_match else benchmark_url
+                bm_id = build_comp_id(benchmark_url)
                 all_comp_prices[bm_id] = round(benchmark_price, 2)
                 early_top_comps.append({
                     "id": bm_id,
@@ -730,11 +667,13 @@ def estimate_benchmark_price_for_date(
         # Build top-comps payload. Prepend the primary benchmark so it always
         # appears in comparableListings with its per-day benchmark_price.
         top_comps_scored = market_scored[: max(3, top_k)]
-        top_comps = [_to_comp_payload(c, s) for c, s in top_comps_scored]
+        top_comps = [
+            {**to_comparable_payload(c, s, target=target), "isPinnedBenchmark": False}
+            for c, s in top_comps_scored
+        ]
 
         if benchmark_price is not None:
-            bm_room_match = _ROOM_ID_RE.search(benchmark_url)
-            bm_id = bm_room_match.group(1) if bm_room_match else benchmark_url
+            bm_id = build_comp_id(benchmark_url)
             bm_spec = benchmark_comp  # may be None if not in search results
             bm_payload: Dict[str, Any] = {
                 "id": bm_id,
@@ -764,30 +703,18 @@ def estimate_benchmark_price_for_date(
                 None,
             )
             if sec_comp and sec_comp.nightly_price:
-                sec_room_match = _ROOM_ID_RE.search(sec_url)
-                sec_id = sec_room_match.group(1) if sec_room_match else sec_url
+                sec_id = build_comp_id(sec_url)
                 if not any(tc.get("id") == sec_id for tc in top_comps):
-                    sec_payload = _to_comp_payload(sec_comp, similarity_score(target, sec_comp))
+                    sec_payload = to_comparable_payload(
+                        sec_comp, similarity_score(target, sec_comp), target=target
+                    )
                     sec_payload["isPinnedBenchmark"] = True
                     top_comps.append(sec_payload)
                 if sec_id and sec_comp.nightly_price:
                     all_comp_prices[sec_id] = round(float(sec_comp.nightly_price), 2)
 
-        # Price distribution (include benchmark price as a data point)
-        all_prices = market_prices.copy()
-        if benchmark_price is not None:
-            all_prices = [benchmark_price] + all_prices
-        dist: Dict[str, Any] = {
-            "min": round(min(all_prices), 2) if all_prices else None,
-            "max": round(max(all_prices), 2) if all_prices else None,
-            "median": round(statistics.median(all_prices), 2) if all_prices else None,
-            "p25": None,
-            "p75": None,
-        }
-        if len(all_prices) >= 4:
-            q = statistics.quantiles(all_prices, n=4)
-            dist["p25"] = round(q[0], 2)
-            dist["p75"] = round(q[2], 2)
+        # Price distribution (benchmark anchor prepended as a data point)
+        dist = compute_price_distribution(market_prices, prepend=benchmark_price)
 
         # Hard cap: final price must stay within ±15% of benchmark anchor.
         # This prevents market noise from pushing the recommendation too far

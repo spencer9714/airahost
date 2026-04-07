@@ -77,7 +77,6 @@ export default function ListingHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
   // Today's date — used as the minimum selectable date for custom analysis (today-or-future rule).
   const todayStr = new Date().toISOString().split("T")[0];
   const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
@@ -424,7 +423,6 @@ export default function ListingHistoryPage() {
               latestReadyRow.report.result_calendar.length > 1 && (
                 <PriceLineChart
                   calendar={latestReadyRow.report.result_calendar}
-                  pricingMode={pricingMode}
                   observedListingPrice={
                     (latestReadyRow.report.result_summary as { observedListingPrice?: number | null } | null)
                       ?.observedListingPrice ?? null
@@ -437,8 +435,6 @@ export default function ListingHistoryPage() {
               latestReadyRow.report.result_calendar.length > 0 && (
                 <PricingHeatmap
                   calendar={latestReadyRow.report.result_calendar}
-                  pricingMode={pricingMode}
-                  onModeChange={setPricingMode}
                 />
               )}
 

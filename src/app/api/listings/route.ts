@@ -31,6 +31,11 @@ interface ReportSnapshot {
     date: string;
     dayOfWeek: string;
     isWeekend: boolean;
+    /** Canonical daily recommendation (demand-adjusted market median). Prefer this for UI. */
+    recommendedDailyPrice?: number | null;
+    /** Market reference: raw per-day median. Not the recommendation. */
+    baseDailyPrice?: number | null;
+    // Legacy fields — present on all reports for backward compat. Do not use for new UI.
     basePrice: number;
     refundablePrice: number;
     nonRefundablePrice: number;
