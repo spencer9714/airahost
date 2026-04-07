@@ -818,16 +818,6 @@ export default function DashboardPage() {
                   />
                 )}
 
-                {/* ── 5. Market basis / freshness ── */}
-                <ForecastBasis
-                  marketCapturedAt={resolveMarketCapturedAt(activeReport, activeListing.latestLinkedAt)}
-                  dateStart={activeReport.input_date_start}
-                  dateEnd={activeReport.input_date_end}
-                  reportType={activeReport.report_type}
-                  trigger={activeListing.latestTrigger ?? undefined}
-                  shareId={activeReport.share_id}
-                  compsUsed={activeSummary.compsSummary?.usedForPricing ?? null}
-                />
               </div>
             ) : activeListing ? (
               /* Listing selected but no nightly ready report */
