@@ -596,14 +596,8 @@ export default function DashboardPage() {
             {activeListing && activeSummary && activeReport ? (
               <div className="space-y-5">
 
-                {/* ── Context row: report type + custom analysis trigger ── */}
-                <div className="flex items-center justify-between px-0.5">
-                  <div className="flex items-center gap-2">
-                    <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
-                    <span className="text-xs text-foreground/40">
-                      {activeListing.runType === "nightly" ? "Nightly report" : "Market analysis"}
-                    </span>
-                  </div>
+                {/* ── Custom analysis trigger ── */}
+                <div className="flex justify-end px-0.5">
                   <button
                     type="button"
                     onClick={() => setShowCustomPanel((v) => !v)}
