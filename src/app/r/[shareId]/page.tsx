@@ -6,7 +6,6 @@ import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { HowWeEstimated } from "@/components/report/HowWeEstimated";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
-import { extractAirbnbListingId } from "@/lib/airbnb-utils";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import type {
   PricingReport,
@@ -379,6 +378,7 @@ export default function ResultsPage({
 
   // Auto-Apply status for this listing (null = loading, false = not configured)
   const [autoApplyConfigured, setAutoApplyConfigured] = useState<boolean | null>(null);
+  const reportListingId = (report as (typeof report & { listingId?: string | null }))?.listingId ?? null;
 
   const fetchReport = useCallback(async () => {
     try {
@@ -496,13 +496,12 @@ export default function ResultsPage({
   useEffect(() => {
     let cancelled = false;
     async function checkAutoApply() {
-      const listingId = (report as (typeof report & { listingId?: string | null }))?.listingId;
-      if (!listingId || isSignedIn !== true) {
+      if (!reportListingId || isSignedIn !== true) {
         setAutoApplyConfigured(false);
         return;
       }
       try {
-        const res = await fetch(`/api/listings/${listingId}`, { cache: "no-store" });
+        const res = await fetch(`/api/listings/${reportListingId}`, { cache: "no-store" });
         if (!res.ok) { if (!cancelled) setAutoApplyConfigured(false); return; }
         const data = await res.json();
         if (!cancelled) setAutoApplyConfigured(!!data?.auto_apply_last_updated_at);
@@ -512,7 +511,7 @@ export default function ResultsPage({
     }
     checkAutoApply();
     return () => { cancelled = true; };
-  }, [(report as (typeof report & { listingId?: string | null }))?.listingId, isSignedIn]);
+  }, [reportListingId, isSignedIn]);
 
 
   // Queued / Running state

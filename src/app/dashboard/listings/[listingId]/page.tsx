@@ -7,10 +7,9 @@ import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { PriceLineChart } from "@/components/dashboard/PriceLineChart";
-import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
-import { resolveMarketCapturedAt } from "@/lib/freshness";
+
 
 type ReportSnapshot = {
   id: string;

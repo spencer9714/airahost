@@ -11,12 +11,11 @@ import { ManualApplyPanel } from "@/components/dashboard/ManualApplyPanel";
 import { computeAutoApplyPreview } from "@/lib/autoApplyPreview";
 import type { AutoApplySettings } from "@/components/dashboard/AutoApplyDrawer";
 import { PriceLineChart } from "@/components/dashboard/PriceLineChart";
-import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
 import { extractAirbnbListingId } from "@/lib/airbnb-utils";
 import { BenchmarkModal } from "@/components/dashboard/BenchmarkModal";
-import { resolveMarketCapturedAt } from "@/lib/freshness";
+
 import type {
   PropertyType,
   CalendarDay,

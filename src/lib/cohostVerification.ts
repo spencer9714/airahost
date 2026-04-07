@@ -72,7 +72,9 @@ export interface CohostVerificationResult {
  *                        if the listing has no URL set yet.
  */
 export async function startCohostVerification(
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _listingId: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _airbnbListingId: string | null
 ): Promise<CohostVerificationResult> {
   // ── Stub ─────────────────────────────────────────────────────────────────

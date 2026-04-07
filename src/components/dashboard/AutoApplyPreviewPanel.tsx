@@ -121,6 +121,7 @@ export function AutoApplyPreviewPanel({
     () => new Set(selectableNights.map((n) => n.date))
   );
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- portal hydration guard
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
@@ -363,7 +364,7 @@ export function AutoApplyPreviewPanel({
             <div className="rounded-xl border border-gray-200 bg-gray-50/60 px-4 py-3">
               <p className="text-xs leading-snug text-foreground/55">
                 <span className="font-semibold">Non-contiguous nights:</span> some dates in
-                the window have no report data. Only the nights shown as "Will apply" or
+                the window have no report data. Only the nights shown as &quot;Will apply&quot; or
                 guardrail-adjusted below are included.
               </p>
             </div>

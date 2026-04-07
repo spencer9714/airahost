@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
 import { computeFreshness, resolveMarketCapturedAt } from "@/lib/freshness";

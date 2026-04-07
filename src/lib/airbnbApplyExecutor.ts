@@ -78,6 +78,7 @@ export interface ApplyExecutorResult {
  */
 async function executeNightPrice(
   night: NightExecutionPlan,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _listingId: string
 ): Promise<NightApplyResult> {
   // Skipped nights are never sent to the executor — short-circuit here

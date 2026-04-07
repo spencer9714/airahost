@@ -157,6 +157,7 @@ export function AutoApplyDrawer({
   const [maxDecreasePct, setMaxDecreasePct] = useState<number | null>(settings.maxDecreasePct);
   const [skipUnavailable, setSkipUnavailable] = useState(settings.skipUnavailableNights);
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- portal hydration guard
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
@@ -190,7 +191,6 @@ export function AutoApplyDrawer({
           lastUpdatedAt: null,
         }
       ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [calendar, windowEndDays, applyScope, parsedFloor, minNoticeDays, maxIncreasePct, maxDecreasePct, skipUnavailable]
   );
 
