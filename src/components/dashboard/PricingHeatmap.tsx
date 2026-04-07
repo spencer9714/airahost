@@ -122,25 +122,18 @@ export function PricingHeatmap({
           const dateNum = d.getDate();
           const isToday = day.date === TODAY;
           const isPast = day.date < TODAY;
-          const isUnavailable = day.availability === "unavailable";
           const isSelected = selectedDates.has(day.date);
 
-          // Tile background
-          const tileCls = isUnavailable && !isPast
-            ? "bg-gray-100/80 border border-gray-200/60"
-            : isSelected && selectable
+          const tileCls = isSelected && selectable
             ? "bg-white border border-gray-800/30 ring-1 ring-gray-800/20"
             : "bg-white border border-gray-200/80";
 
-          // Date number style
           const dateNumEl = isToday ? (
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-rose-500 text-xs font-semibold text-white">
               {dateNum}
             </span>
           ) : (
-            <span className={`text-sm font-medium ${
-              isPast ? "text-foreground/25" : isUnavailable ? "line-through text-foreground/30" : "text-foreground/80"
-            }`}>
+            <span className={`text-sm font-medium ${isPast ? "text-foreground/25" : "text-foreground/80"}`}>
               {dateNum}
             </span>
           );
@@ -149,7 +142,7 @@ export function PricingHeatmap({
             <div className={`rounded-2xl p-2.5 transition-colors ${tileCls} ${selectable && !isPast ? "cursor-pointer hover:border-gray-400/50" : ""}`}>
               {dateNumEl}
               {!isPast && (
-                <p className={`mt-3 text-sm font-medium ${isUnavailable ? "text-foreground/20" : "text-foreground/70"}`}>
+                <p className="mt-3 text-sm font-medium text-foreground/70">
                   ${price}
                 </p>
               )}
