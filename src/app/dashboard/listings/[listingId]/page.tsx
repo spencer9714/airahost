@@ -438,21 +438,6 @@ export default function ListingHistoryPage() {
                 />
               )}
 
-            {/* Market data basis */}
-            <ForecastBasis
-              marketCapturedAt={resolveMarketCapturedAt(
-                latestReadyRow.report,
-                latestReadyRow.row.created_at
-              )}
-              dateStart={latestReadyRow.report.input_date_start}
-              dateEnd={latestReadyRow.report.input_date_end}
-              reportType={latestReadyRow.report.report_type}
-              trigger={latestReadyRow.row.trigger}
-              shareId={latestReadyRow.report.share_id}
-              compsUsed={
-                latestReadyRow.report.result_summary?.compsSummary?.usedForPricing ?? null
-              }
-            />
           </>
         ) : (() => {
           const hasListingUrl = !!(listing?.input_attributes?.listingUrl?.includes("airbnb.com/rooms/"));
