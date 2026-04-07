@@ -7,6 +7,9 @@ import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import { RecommendationBanner } from "@/components/dashboard/RecommendationBanner";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
+import { ManualApplyPanel } from "@/components/dashboard/ManualApplyPanel";
+import { computeAutoApplyPreview } from "@/lib/autoApplyPreview";
+import type { AutoApplySettings } from "@/components/dashboard/AutoApplyDrawer";
 import { PriceLineChart } from "@/components/dashboard/PriceLineChart";
 import { ForecastBasis } from "@/components/dashboard/ForecastBasis";
 import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
@@ -121,6 +124,17 @@ type ListingRow = {
   // Alert v2 fields (migration 015)
   minimum_booking_nights?: number;
   listing_url_validation_status?: string | null;
+  // Auto-Apply fields (migration 020)
+  auto_apply_enabled?: boolean;
+  auto_apply_window_end_days?: number;
+  auto_apply_scope?: "actionable" | "all_sellable";
+  auto_apply_min_price_floor?: number | null;
+  auto_apply_min_notice_days?: number;
+  auto_apply_max_increase_pct?: number | null;
+  auto_apply_max_decrease_pct?: number | null;
+  auto_apply_skip_unavailable?: boolean;
+  auto_apply_last_updated_at?: string | null;
+  auto_apply_cohost_status?: string;
 };
 
 // RecentReportRow covers all statuses — recentReports from the API is not filtered by status.
@@ -155,7 +169,8 @@ export default function DashboardPage() {
   const [rerunningId, setRerunningId] = useState<string | null>(null);
   const [activeListingId, setActiveListingId] = useState<string | null>(null);
   const [benchmarkModalListingId, setBenchmarkModalListingId] = useState<string | null>(null);
-  const [pricingMode, setPricingMode] = useState<"refundable" | "nonRefundable">("refundable");
+  const [applyOpen, setApplyOpen] = useState(false);
+  const [applyDates, setApplyDates] = useState<string[]>([]);
   const [showCustomPanel, setShowCustomPanel] = useState(false);
   // Default to tomorrow — custom analyses are future-only.
   const [customStart, setCustomStart] = useState(() => {
@@ -323,6 +338,45 @@ export default function DashboardPage() {
     await loadDashboardData();
   }
 
+  async function handleSaveAutoApplySettings(
+    listingId: string,
+    patch: Partial<{
+      autoApplyEnabled: boolean;
+      autoApplyCohostInviteOpened: boolean;
+      autoApplyWindowEndDays: number;
+      autoApplyScope: "actionable" | "all_sellable";
+      autoApplyMinPriceFloor: number | null;
+      autoApplyMinNoticeDays: number;
+      autoApplyMaxIncreasePct: number | null;
+      autoApplyMaxDecreasePct: number | null;
+      autoApplySkipUnavailable: boolean;
+    }>
+  ) {
+    const res = await fetch(`/api/listings/${listingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as { error?: string }).error ?? "Failed to save Auto-Apply settings");
+    }
+    await loadDashboardData();
+  }
+
+  async function handleTriggerCohostVerification(listingId: string) {
+    const res = await fetch(`/api/listings/${listingId}/cohost-verify`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(
+        (body as { error?: string }).error ?? "Co-host verification request failed."
+      );
+    }
+    await loadDashboardData();
+  }
+
   async function handleSaveAlertSettings(
     listingId: string,
     settings: {
@@ -394,6 +448,31 @@ export default function DashboardPage() {
 
   const activeCalendar = activeReport?.result_calendar ?? [];
 
+  // Auto-apply settings for the active listing — used to compute the preview
+  // passed to ManualApplyPanel when the user applies from PricingHeatmap.
+  const activeAutoApplySettings = useMemo((): AutoApplySettings | null => {
+    if (!activeListing) return null;
+    return {
+      enabled: activeListing.auto_apply_enabled ?? false,
+      windowEndDays: Math.min(activeListing.auto_apply_window_end_days ?? 30, 30),
+      applyScope: activeListing.auto_apply_scope ?? "actionable",
+      minPriceFloor: activeListing.auto_apply_min_price_floor ?? null,
+      minNoticeDays: activeListing.auto_apply_min_notice_days ?? 1,
+      maxIncreasePct: activeListing.auto_apply_max_increase_pct ?? null,
+      maxDecreasePct: activeListing.auto_apply_max_decrease_pct ?? null,
+      skipUnavailableNights: activeListing.auto_apply_skip_unavailable ?? true,
+      lastUpdatedAt: activeListing.auto_apply_last_updated_at ?? null,
+    };
+  }, [activeListing]);
+
+  // Co-host status for the active listing, used to gate PricingHeatmap apply.
+  const activeAutoApplyConfigured = !!activeListing?.auto_apply_last_updated_at;
+  const activeAutoApplyCohostStatus = activeListing?.auto_apply_cohost_status ?? "not_started";
+  const activeAutoApplyVerified = activeAutoApplyCohostStatus === "verified";
+  const activeAutoApplyVerifying =
+    activeAutoApplyCohostStatus === "user_confirmed" ||
+    activeAutoApplyCohostStatus === "verification_pending";
+
   const listingCountText = useMemo(
     () => `${listings.length} listing${listings.length === 1 ? "" : "s"} saved`,
     [listings.length]
@@ -434,19 +513,16 @@ export default function DashboardPage() {
     : null;
 
   return (
-    <div className="min-h-screen bg-gray-50/50">
+    <div className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
 
         {/* ── Header ── */}
         <div className="mb-8">
-          <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-foreground/30">
-            Host Dashboard
-          </p>
-          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
-            {firstName ? `Welcome back, ${firstName}` : (userEmail || "Dashboard")}
+          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
+            {firstName ? `${firstName}'s dashboard` : (userEmail || "Dashboard")}
           </h1>
-          <p className="mt-1 text-base font-medium text-foreground/55">
-            {listingCountText} · pricing analytics
+          <p className="mt-1 text-sm text-foreground/45">
+            {listingCountText}
           </p>
         </div>
 
@@ -499,6 +575,8 @@ export default function DashboardPage() {
                     onRename={handleRenameListing}
                     onSavePreferredComps={handleSavePreferredComps}
                     onSaveAlertSettings={handleSaveAlertSettings}
+                    onSaveAutoApply={handleSaveAutoApplySettings}
+                    onTriggerCohostVerification={handleTriggerCohostVerification}
                   />
                 ))}
                 <Link href="/tool?from=dashboard" className="block">
@@ -516,60 +594,51 @@ export default function DashboardPage() {
           {/* ── Right: Market analysis panel ── */}
           <section>
             {activeListing && activeSummary && activeReport ? (
-              <div className="space-y-4">
+              <div className="space-y-5">
 
-                {/* ── Panel header ── */}
+                {/* ── Context row: report type + custom analysis trigger ── */}
                 <div className="flex items-center justify-between px-0.5">
-                  <div className="flex items-center gap-2.5">
-                    <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-                      Nightly Market Report
-                    </p>
-                    <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-teal-700">
-                      Nightly
+                  <div className="flex items-center gap-2">
+                    <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
+                    <span className="text-xs text-foreground/40">
+                      {activeListing.runType === "nightly" ? "Nightly report" : "Market analysis"}
                     </span>
                   </div>
                   <button
                     type="button"
                     onClick={() => setShowCustomPanel((v) => !v)}
-                    className={`text-sm font-semibold transition-colors ${
-                      showCustomPanel
-                        ? "text-foreground/55"
-                        : "text-blue-600 hover:text-blue-700"
-                    }`}
+                    className="text-xs font-medium text-foreground/35 transition-colors hover:text-foreground/60"
                   >
-                    {showCustomPanel ? "Cancel" : "Run custom analysis ↗"}
+                    {showCustomPanel ? "Cancel" : "Custom analysis ↗"}
                   </button>
                 </div>
 
                 {/* ── Custom analysis panel ── */}
                 {showCustomPanel && (
-                  <div className="rounded-2xl border border-blue-100 bg-blue-50/40 p-5">
-                    <p className="mb-0.5 text-sm font-semibold text-foreground/80">
-                      Custom Live Analysis
-                    </p>
-                    <p className="mb-4 text-xs text-foreground/50">
-                      Scrapes fresh Airbnb market data for any date range. You&apos;ll be taken to the full report.
+                  <div className="rounded-2xl border border-border bg-white p-5">
+                    <p className="mb-3 text-sm font-medium text-foreground/70">
+                      Run custom analysis
                     </p>
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
                       <label className="flex-1 space-y-1.5">
-                        <span className="block text-xs font-medium text-foreground/50">Start date</span>
+                        <span className="block text-xs text-foreground/45">Start date</span>
                         <input
                           type="date"
                           value={customStart}
                           min={todayStr}
                           onChange={(e) => setCustomStart(e.target.value)}
-                          className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                          className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
                         />
                       </label>
                       <label className="flex-1 space-y-1.5">
-                        <span className="block text-xs font-medium text-foreground/50">End date</span>
+                        <span className="block text-xs text-foreground/45">End date</span>
                         <input
                           type="date"
                           value={customEnd}
                           min={customStart || todayStr}
                           max={maxCustomEnd}
                           onChange={(e) => setCustomEnd(e.target.value)}
-                          className="w-full rounded-lg border border-blue-200/80 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+                          className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-3 py-2 text-sm outline-none focus:border-gray-300 focus:bg-white"
                         />
                       </label>
                       <button
@@ -581,56 +650,46 @@ export default function DashboardPage() {
                             endDate: customEnd,
                           });
                         }}
-                        className="shrink-0 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-40"
+                        className="shrink-0 rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
                       >
-                        {rerunningId === activeListing.id ? "Starting…" : "Run analysis"}
+                        {rerunningId === activeListing.id ? "Starting…" : "Run"}
                       </button>
                     </div>
                     {customRangeInvalid && (
-                      <p className="mt-2 text-xs text-amber-700">
-                        Select a date range of 30 days or less.
-                      </p>
+                      <p className="mt-2 text-xs text-amber-700">30 days max.</p>
                     )}
                   </div>
                 )}
 
                 {/* ── State banners ── */}
-                {/* Nightly in-progress (separate from activeJob so it shows even when old data is displayed) */}
                 {activeListing.activeNightlyJob && activeListing.activeNightlyJob.status !== "error" && (
-                  <div className="flex items-center gap-3 rounded-xl border border-teal-200 bg-teal-50/70 px-4 py-3 text-xs font-medium text-teal-700">
+                  <div className="flex items-center gap-2.5 rounded-xl border border-teal-200 bg-teal-50/70 px-4 py-2.5 text-xs text-teal-700">
                     <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-teal-500" />
-                    Nightly 30-day market report generating — pricing below is from your last run.
+                    Nightly report generating — pricing below is from your last run.
                   </div>
                 )}
                 {activeListing.activeNightlyJob?.status === "error" && (
-                  <div className="flex items-center gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+                  <div className="flex items-center gap-2.5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs text-rose-700">
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
                     Last nightly report failed — showing previous data.
                   </div>
                 )}
-                {/* Non-nightly active job (manual rerun running/errored) */}
                 {activeListing.activeJob && !activeListing.activeNightlyJob && (
                   <div
-                    className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-xs font-medium ${
+                    className={`flex items-center gap-2.5 rounded-xl border px-4 py-2.5 text-xs ${
                       activeListing.activeJob.status === "error"
                         ? "border-rose-200 bg-rose-50 text-rose-700"
                         : "border-amber-200 bg-amber-50 text-amber-700"
                     }`}
                   >
-                    {activeListing.activeJob.status === "error" ? (
-                      <>
-                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
-                        Last analysis failed — showing pricing from your previous completed run.
-                      </>
-                    ) : (
-                      <>
-                        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
-                        New analysis running — pricing below is from your last completed run.
-                      </>
-                    )}
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activeListing.activeJob.status === "error" ? "bg-rose-500" : "animate-pulse bg-amber-500"}`} />
+                    {activeListing.activeJob.status === "error"
+                      ? "Last analysis failed — showing pricing from your previous completed run."
+                      : "New analysis running — pricing below is from your last completed run."}
                   </div>
                 )}
-                {/* ── Price summary ── */}
+
+                {/* ── 1. Pricing hero ── */}
                 <RecommendationBanner
                   listingName={activeListing.name}
                   airbnbListingLabel={activeAirbnbListingLabel}
@@ -664,7 +723,15 @@ export default function DashboardPage() {
                   lastAnalysisDate={activeListing.latestLinkedAt}
                 />
 
-                {/* ── Smart alerts ── */}
+                {/* ── 2. Price trend ── */}
+                {activeCalendar.length > 1 && (
+                  <PriceLineChart
+                    calendar={activeCalendar}
+                    observedListingPrice={activeSummary.observedListingPrice ?? null}
+                  />
+                )}
+
+                {/* ── 3. Smart alerts ── */}
                 <SmartAlerts
                   summary={activeSummary}
                   compsSummary={activeSummary.compsSummary ?? null}
@@ -672,25 +739,55 @@ export default function DashboardPage() {
                   observedListingPrice={activeSummary.observedListingPrice ?? null}
                 />
 
-                {/* ── Price line chart ── */}
-                {activeCalendar.length > 1 && (
-                  <PriceLineChart
-                    calendar={activeCalendar}
-                    pricingMode={pricingMode}
-                    observedListingPrice={activeSummary.observedListingPrice ?? null}
-                  />
-                )}
-
-                {/* ── 30-day pricing calendar ── */}
+                {/* ── 4. 30-Day Pricing Plan ── */}
                 {activeCalendar.length > 0 && (
                   <PricingHeatmap
                     calendar={activeCalendar}
-                    pricingMode={pricingMode}
-                    onModeChange={setPricingMode}
+                    selectable={activeAutoApplyConfigured}
+                    applyGated={!activeAutoApplyVerified}
+                    cohostVerifying={activeAutoApplyVerifying}
+                    onApplyDates={(dates) => {
+                      setApplyDates(dates);
+                      setApplyOpen(true);
+                    }}
+                    onSetupCohost={() => {
+                      const rawUrl =
+                        activeListing.input_attributes.listingUrl ??
+                        activeListing.input_attributes.listing_url ??
+                        null;
+                      const airbnbId = extractAirbnbListingId(rawUrl) ?? null;
+                      const url = airbnbId
+                        ? `https://www.airbnb.com/hosting/listings/editor/${airbnbId}/details/co-hosts/invite`
+                        : "https://www.airbnb.com/hosting/listings";
+                      window.open(url, "_blank", "noopener,noreferrer");
+                    }}
+                    onManageCohost={activeAutoApplyVerified ? () => {
+                      const rawUrl =
+                        activeListing.input_attributes.listingUrl ??
+                        activeListing.input_attributes.listing_url ??
+                        null;
+                      const airbnbId = extractAirbnbListingId(rawUrl) ?? null;
+                      const url = airbnbId
+                        ? `https://www.airbnb.com/hosting/listings/editor/${airbnbId}/details/co-hosts`
+                        : "https://www.airbnb.com/hosting/listings";
+                      window.open(url, "_blank", "noopener,noreferrer");
+                    } : undefined}
                   />
                 )}
 
-                {/* ── Market basis / freshness ── */}
+                {/* Manual apply portal */}
+                {applyOpen && activeListing && activeAutoApplySettings && (
+                  <ManualApplyPanel
+                    listingId={activeListing.id}
+                    listingName={activeListing.name}
+                    preview={computeAutoApplyPreview(activeCalendar, activeAutoApplySettings)}
+                    selectedDates={applyDates}
+                    onClose={() => setApplyOpen(false)}
+                    onBack={() => setApplyOpen(false)}
+                  />
+                )}
+
+                {/* ── 5. Market basis / freshness ── */}
                 <ForecastBasis
                   marketCapturedAt={resolveMarketCapturedAt(activeReport, activeListing.latestLinkedAt)}
                   dateStart={activeReport.input_date_start}
@@ -703,12 +800,10 @@ export default function DashboardPage() {
               </div>
             ) : activeListing ? (
               /* Listing selected but no nightly ready report */
-              <div className="space-y-4">
-                {/* Panel header */}
-                <div className="px-0.5">
-                  <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
-                    Nightly Market Report
-                  </p>
+              <div className="space-y-5">
+                <div className="flex items-center gap-2 px-0.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-gray-300" />
+                  <span className="text-xs text-foreground/35">Market analysis</span>
                 </div>
 
                 {activeListing.activeNightlyJob?.status === "running" ||

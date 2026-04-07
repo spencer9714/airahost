@@ -5,7 +5,6 @@ import type { CalendarDay } from "@/lib/schemas";
 
 interface Props {
   calendar: CalendarDay[];
-  pricingMode: "refundable" | "nonRefundable";
   /** Host's observed live price on Airbnb (report start-date basis). Single value, not a series. */
   observedListingPrice?: number | null;
 }
@@ -38,7 +37,11 @@ function avg(values: number[]): number {
   return Math.round(values.reduce((a, b) => a + b, 0) / values.length);
 }
 
-export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: Props) {
+export function PriceLineChart({ calendar, observedListingPrice }: Props) {
+  // Filter on basePrice (legacy field) because it is present on all report ages,
+  // including reports that predate recommendedDailyPrice. Both the market line
+  // (baseDailyPrice ?? basePrice) and the recommended line (recommendedDailyPrice
+  // ?? baseDailyPrice ?? basePrice) fall back to basePrice as the last resort.
   const days = useMemo(
     () => calendar.filter((d) => d.basePrice != null),
     [calendar]
@@ -47,14 +50,13 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
   if (days.length < 2) return null;
 
   // ── Field mapping ──────────────────────────────────────────────
-  // Market    : baseDailyPrice ?? basePrice (market-driven base, post-LM)
-  // Suggested : effectiveDailyPrice* (all adjustments) with legacy fallback
+  // Market    : baseDailyPrice ?? basePrice (market-driven base)
+  // Suggested : recommendedDailyPrice — canonical recommended price series
+  //             Falls back to baseDailyPrice ?? basePrice for older reports.
   // Live      : observedListingPrice — single observed value, NOT a series
   const marketPrices    = days.map((d) => d.baseDailyPrice ?? d.basePrice);
   const suggestedPrices = days.map((d) =>
-    pricingMode === "refundable"
-      ? (d.effectiveDailyPriceRefundable    ?? d.refundablePrice)
-      : (d.effectiveDailyPriceNonRefundable ?? d.nonRefundablePrice)
+    d.recommendedDailyPrice ?? d.baseDailyPrice ?? d.basePrice
   );
 
   // ── Scaling — include live price so marker stays in-frame ──────
@@ -92,11 +94,13 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
   ].join(" ");
 
   // ── Y-axis ticks (3 — fewer lines = more breathing room) ──────
+  // Deduplicate by val: when the range is narrow, roundTick() can map
+  // two different raw values to the same number, producing duplicate keys.
   const yTicks = Array.from({ length: 3 }, (_, i) => {
     const raw = minY + (rangeY * (i + 0.5)) / 3;
     const val = roundTick(raw);
     return { val, y: toY(val) };
-  });
+  }).filter((tick, idx, arr) => arr.findIndex((t) => t.val === tick.val) === idx);
 
   // ── X-axis labels ──────────────────────────────────────────────
   const xLabels: { i: number; label: string }[] = [];
@@ -132,12 +136,25 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
 
       {/* ── Header ── */}
       <div className="flex items-center justify-between gap-3 px-5 pt-5 sm:px-6 sm:pt-5">
-        <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/30">
-          Market vs Suggested
+        <p className="text-xs font-medium text-foreground/45">
+          Market vs Recommended
         </p>
-        <span className="text-[10px] text-foreground/30">
-          {pricingMode === "refundable" ? "Refundable" : "Non-refundable"} · {days.length} days
-        </span>
+        <div className="flex items-center gap-4 text-[11px] text-foreground/35">
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block rounded-full" style={{ width: 14, height: 1.75, background: C_MARKET }} />
+            Market
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block rounded-full" style={{ width: 14, height: 2.5, background: C_SUGGESTED }} />
+            Recommended
+          </span>
+          {hasLive && (
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block rounded-full" style={{ width: 7, height: 7, background: C_LIVE }} />
+              Live
+            </span>
+          )}
+        </div>
       </div>
 
       {/* ── SVG chart ── */}
@@ -147,7 +164,7 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
           preserveAspectRatio="xMidYMid meet"
           className="w-full"
           style={{ height: "auto", minHeight: 110, maxHeight: 196 }}
-          aria-label="Market vs Suggested Price chart"
+          aria-label="Market vs Recommended Price chart"
           role="img"
         >
           {/* Y-axis grid lines + labels */}
@@ -264,65 +281,32 @@ export function PriceLineChart({ calendar, pricingMode, observedListingPrice }: 
       <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3 border-t border-border px-5 py-4 sm:px-6">
 
         {/* Stat pills */}
-        <div className="flex flex-wrap gap-x-5 gap-y-2.5">
+        <div className="flex flex-wrap gap-x-5 gap-y-2">
           <div>
-            <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
-              Market avg
-            </p>
-            <p className="mt-0.5 text-sm font-medium text-foreground/50">${avgMarket}</p>
+            <p className="text-[11px] text-foreground/30">Market avg</p>
+            <p className="text-sm font-medium text-foreground/50">${avgMarket}</p>
           </div>
           <div>
-            <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
-              Suggested avg
-            </p>
-            <p className="mt-0.5 text-sm font-semibold text-foreground/80">${avgSuggested}</p>
+            <p className="text-[11px] text-foreground/30">Recommended avg</p>
+            <p className="text-sm font-semibold text-foreground/75">${avgSuggested}</p>
           </div>
           <div>
-            <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
-              Gap
-            </p>
-            <p className={`mt-0.5 text-sm font-medium ${avgGap === 0 ? "text-foreground/35" : "text-foreground/55"}`}>
+            <p className="text-[11px] text-foreground/30">Gap</p>
+            <p className={`text-sm font-medium ${avgGap === 0 ? "text-foreground/30" : "text-foreground/55"}`}>
               {avgGap > 0 ? "+" : ""}{avgGap}
             </p>
           </div>
           {hasLive && (
             <div>
-              <p className="text-[9.5px] font-semibold uppercase tracking-wider text-foreground/30">
-                Your live
-              </p>
-              <p className="mt-0.5 text-sm font-semibold" style={{ color: C_LIVE }}>
+              <p className="text-[11px] text-foreground/30">Your live</p>
+              <p className="text-sm font-semibold" style={{ color: C_LIVE }}>
                 ${livePrice}
               </p>
             </div>
           )}
         </div>
 
-        {/* Legend */}
-        <div className="flex items-center gap-4 text-[11px] text-foreground/35">
-          <span className="flex items-center gap-1.5">
-            <span
-              className="inline-block rounded-full"
-              style={{ width: 14, height: 1.75, background: C_MARKET }}
-            />
-            Market
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span
-              className="inline-block rounded-full"
-              style={{ width: 14, height: 2.5, background: C_SUGGESTED }}
-            />
-            Suggested
-          </span>
-          {hasLive && (
-            <span className="flex items-center gap-1.5">
-              <span
-                className="inline-block rounded-full"
-                style={{ width: 7, height: 7, background: C_LIVE }}
-              />
-              Live
-            </span>
-          )}
-        </div>
+        <span className="text-[11px] text-foreground/25">{days.length} days</span>
       </div>
     </div>
   );
