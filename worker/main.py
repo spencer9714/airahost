@@ -637,7 +637,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     f"[{report_id}] Nightly live-reload failed (non-fatal, using snapshot): "
                     f"{_reload_exc}"
                 )
-
+        
         address = job.get("input_address", "")
         attributes = job.get("input_attributes") or {}
         start_date = str(job.get("input_date_start", ""))
@@ -650,6 +650,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
         preferred_comps_raw = attributes.get("preferredComps")
         preferred_comps: Optional[list] = None
         primary_benchmark_url: Optional[str] = None
+
         if isinstance(preferred_comps_raw, list):
             enabled = [
                 pc for pc in preferred_comps_raw
@@ -671,11 +672,13 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
             for pc in (preferred_comps or [])[1:]
             if isinstance(pc, dict) and str(pc.get("listingUrl") or "").strip()
         ]
+
         if secondary_benchmark_urls:
             logger.info(
                 f"[{job.get('id', '?')}] Secondary benchmark URLs "
                 f"({len(secondary_benchmark_urls)}): {', '.join(secondary_benchmark_urls)}"
             )
+        
         finalized_input_attributes = dict(attributes)
         finalized_input_attributes["inputMode"] = input_mode
         finalized_input_attributes["listingUrl"] = listing_url or None
@@ -965,6 +968,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     f"scroll_rounds={_nightly_plan_benchmark.scroll_rounds} "
                     f"max_cards={_nightly_plan_benchmark.max_cards}"
                 )
+            
             except Exception as _plan_exc:
                 logger.warning(
                     f"[{report_id}] Failed to build nightly crawl plan (non-fatal, "

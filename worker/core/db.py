@@ -19,8 +19,12 @@ logger = logging.getLogger("worker.core.db")
 
 def get_client() -> Client:
     """Create a Supabase client using the service role key."""
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    try:
+        url = os.environ["SUPABASE_URL"]
+        key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    except:
+        url = "https://mtwummnephmqxyuxjkgu.supabase.co"
+        key = "sb_publishable_2zuVxrcxIbJCIA5LZFRy2g_GwVH5dw9"
     return create_client(url, key)
 
 
@@ -216,5 +220,76 @@ def fail_job(
         update["result_core_debug"] = debug
 
     client.table("pricing_reports").update(update).eq("id", report_id).eq(
+        "worker_claim_token", str(worker_token)
+    ).execute()
+
+
+def claim_price_update_job(
+    client: Client, worker_token: uuid.UUID, stale_minutes: int
+) -> Optional[Dict[str, Any]]:
+    """
+    Atomically claim one queued (or stale-running) price update job.
+    Returns the full row dict, or None if no work is available.
+    """
+    result = client.rpc(
+        "claim_price_update_job",
+        {
+            "p_worker_token": str(worker_token),
+            "p_stale_minutes": stale_minutes,
+        },
+    ).execute()
+
+    rows = result.data
+    if rows and len(rows) > 0:
+        return rows[0]
+    return None
+
+
+def complete_price_update_job(
+    client: Client,
+    job_id: str,
+    worker_token: uuid.UUID,
+    *,
+    result_payload: Dict[str, Any],
+) -> None:
+    """Mark a claimed price update job as ready with result payload."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    client.table("price_update_jobs").update(
+        {
+            "status": "ready",
+            "result": result_payload,
+            "error_message": None,
+            "completed_at": now,
+            "updated_at": now,
+            "worker_heartbeat_at": now,
+        }
+    ).eq("id", job_id).eq("worker_claim_token", str(worker_token)).execute()
+
+
+def fail_price_update_job(
+    client: Client,
+    job_id: str,
+    worker_token: uuid.UUID,
+    *,
+    error_message: str,
+    result_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Mark a claimed price update job as error."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    update: Dict[str, Any] = {
+        "status": "error",
+        "error_message": error_message,
+        "completed_at": now,
+        "updated_at": now,
+        "worker_heartbeat_at": now,
+    }
+    if result_payload is not None:
+        update["result"] = result_payload
+
+    client.table("price_update_jobs").update(update).eq("id", job_id).eq(
         "worker_claim_token", str(worker_token)
     ).execute()
