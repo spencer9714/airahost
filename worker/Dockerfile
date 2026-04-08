@@ -1,19 +1,21 @@
-# Use the official Playwright Python image which includes necessary browser deps
-FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install system dependencies required by playwright install-deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies (includes playwright)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install the specific browsers required by Playwright
-RUN playwright install chromium
+# Install Chromium system deps and the browser binary
+RUN playwright install-deps chromium \
+    && playwright install chromium
 
 # Copy the worker code
-# Copy current directory (worker context) into /app/worker so imports work
 COPY . worker/
 
-# Set the entrypoint to run the worker module
-# This assumes the container will be run with access to the necessary environment variables
 CMD ["python", "-m", "worker.main"]
