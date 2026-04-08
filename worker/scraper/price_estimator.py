@@ -25,7 +25,7 @@ import time
 from datetime import datetime as dt, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM
+from worker.core.geo_filter import apply_geo_filter, haversine_km, DEFAULT_MAX_RADIUS_KM
 from worker.core.similarity import (
     SIMILARITY_FLOOR,
     comp_urls_match,
@@ -34,6 +34,7 @@ from worker.core.similarity import (
 )
 from worker.scraper.comparable_collector import (
     build_search_url,
+    extract_comp_coords,
     parse_card_to_spec,
     scroll_and_collect,
     wait_for_cards,
@@ -2003,6 +2004,139 @@ def _extract_search_location(address: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Anchor selection helper (criteria pass 1)
+# ---------------------------------------------------------------------------
+
+# Geo-filter radii used when selecting the anchor listing in criteria pass 1.
+# Tighter than the default comp radius (30 km) because the anchor must be in
+# the same neighbourhood as the target property.
+_ANCHOR_RADIUS_TIGHT_KM: float = 20.0
+_ANCHOR_RADIUS_FALLBACK_KM: float = 40.0
+# Minimum candidates that must survive the tight filter before we declare it
+# "good enough" and skip the fallback.
+_ANCHOR_MIN_GEO_CANDIDATES: int = 2
+
+
+def _select_anchor_candidate(
+    candidates: List[ListingSpec],
+    user_spec: ListingSpec,
+    target_lat: Optional[float],
+    target_lng: Optional[float],
+) -> Tuple[ListingSpec, float, Dict[str, Any]]:
+    """
+    Choose the best anchor candidate for criteria pass 2.
+
+    Strategy
+    --------
+    1. If the target has geocoded coordinates, apply a tight geo filter
+       (_ANCHOR_RADIUS_TIGHT_KM) first.  This prevents structurally-similar
+       but geographically-distant listings (e.g. a Sonoma cottage when the
+       target is in Belmont) from winning the anchor slot.
+
+    2. If the tight filter leaves fewer than _ANCHOR_MIN_GEO_CANDIDATES,
+       widen to _ANCHOR_RADIUS_FALLBACK_KM (resort / sparse markets).
+
+    3. If *no* candidates survive any geo filter, skip geo entirely so we
+       always produce an anchor (degraded quality, flagged in debug).
+
+    4. Apply structural similarity filter + scoring on the geo-constrained
+       pool.  If the similarity filter empties the pool, fall back to the
+       full geo pool so we always return something.
+
+    5. In all cases, ``distance_to_target_km`` is set on each candidate that
+       has coords (side-effect of ``apply_geo_filter``).
+
+    Returns
+    -------
+    (best_match, best_score, anchor_debug)
+    """
+    n_before_geo = len(candidates)
+    geo_radius_used: Optional[float] = None
+    geo_fallback = False
+    geo_skipped = False
+    n_after_geo = n_before_geo
+
+    pool = candidates  # default: no geo filtering
+
+    if target_lat is not None and target_lng is not None:
+        # Try tight radius first
+        tight_pool, tight_excluded = apply_geo_filter(
+            candidates, target_lat, target_lng,
+            max_radius_km=_ANCHOR_RADIUS_TIGHT_KM,
+        )
+
+        if len(tight_pool) >= _ANCHOR_MIN_GEO_CANDIDATES or tight_excluded == 0:
+            pool = tight_pool
+            geo_radius_used = _ANCHOR_RADIUS_TIGHT_KM
+            n_after_geo = len(tight_pool)
+            logger.info(
+                f"[criteria/anchor] Geo filter {_ANCHOR_RADIUS_TIGHT_KM}km: "
+                f"{n_before_geo} → {n_after_geo} candidates"
+            )
+        else:
+            # Too few in tight radius — widen to fallback
+            geo_fallback = True
+            geo_radius_used = _ANCHOR_RADIUS_FALLBACK_KM
+            fallback_pool, _ = apply_geo_filter(
+                candidates, target_lat, target_lng,
+                max_radius_km=_ANCHOR_RADIUS_FALLBACK_KM,
+            )
+            logger.info(
+                f"[criteria/anchor] Tight radius too sparse ({len(tight_pool)} candidates); "
+                f"falling back to {_ANCHOR_RADIUS_FALLBACK_KM}km → "
+                f"{len(fallback_pool)} candidates"
+            )
+            if fallback_pool:
+                pool = fallback_pool
+                n_after_geo = len(fallback_pool)
+            else:
+                # Nothing within fallback radius either — skip geo entirely
+                geo_skipped = True
+                geo_radius_used = None
+                logger.warning(
+                    "[criteria/anchor] No candidates within fallback radius; "
+                    "skipping geo filter (degraded quality)"
+                )
+    else:
+        logger.debug("[criteria/anchor] No target coords — skipping geo filter")
+
+    # Structural similarity filter + scoring on geo-constrained pool
+    filtered, _filter_debug = filter_similar_candidates(user_spec, pool)
+    if not filtered:
+        # Similarity filter emptied the pool (unusual) — score the raw pool
+        logger.warning(
+            f"[criteria/anchor] Similarity filter emptied pool of {len(pool)}; "
+            "falling back to unfiltered pool"
+        )
+        filtered = pool
+
+    scored = [(c, similarity_score(user_spec, c)) for c in filtered]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    best_match, best_score = scored[0]
+    anchor_dist = getattr(best_match, "distance_to_target_km", None)
+
+    logger.info(
+        f"[criteria/anchor] Selected: {best_match.url} "
+        f"score={best_score:.3f} "
+        f"dist={anchor_dist:.1f}km" if anchor_dist is not None else
+        f"[criteria/anchor] Selected: {best_match.url} "
+        f"score={best_score:.3f} dist=unknown"
+    )
+
+    return best_match, best_score, {
+        "anchorCandidatesBeforeGeo": n_before_geo,
+        "anchorCandidatesAfterGeo": n_after_geo,
+        "anchorGeoRadiusKm": geo_radius_used,
+        "anchorGeoFallback": geo_fallback,
+        "anchorGeoSkipped": geo_skipped,
+        "anchorStructuralScore": round(best_score, 3),
+        "anchorDistanceKm": round(anchor_dist, 2) if anchor_dist is not None else None,
+        "anchorHasTargetCoords": (target_lat is not None and target_lng is not None),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Criteria-based search (Mode B)
 # ---------------------------------------------------------------------------
 
@@ -2276,6 +2410,12 @@ def run_criteria_search(
             },
         }
 
+    # Initialised before the playwright block so they're in scope for
+    # the debug metadata section that runs after pass 2.
+    coord_map: Dict[str, tuple] = {}
+    n_coords_assigned = 0
+    anchor_debug: Dict[str, Any] = {}
+
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(
             cdp_url,
@@ -2329,6 +2469,23 @@ def run_criteria_search(
             candidates = [parse_card_to_spec(c) for c in raw_cards]
             candidates = [c for c in candidates if c.url and c.nightly_price]
 
+            # Enrich candidates with page-embedded coordinates (map pin data).
+            # extract_comp_coords() scans __NEXT_DATA__ for room_id → (lat, lng).
+            # Candidates that lack a room-id match keep lat=None (pass-through in geo filter).
+            coord_map = extract_comp_coords(page)
+            if coord_map:
+                for spec in candidates:
+                    m = ROOM_ID_RE.search(spec.url or "")
+                    if m:
+                        pair = coord_map.get(m.group(1))
+                        if pair:
+                            spec.lat, spec.lng = pair[0], pair[1]
+                            n_coords_assigned += 1
+            logger.info(
+                f"[criteria] Coord map: {len(coord_map)} entries, "
+                f"coords assigned to {n_coords_assigned}/{len(candidates)} candidates"
+            )
+
             if not candidates:
                 no_results_hint = (
                     f"No listings found for ZIP code '{search_location}'. "
@@ -2352,17 +2509,18 @@ def run_criteria_search(
                     },
                 }
 
-            # Rank by similarity to user's spec
-            filtered_candidates, _filter_debug = filter_similar_candidates(user_spec, candidates)
-            scored = [(c, similarity_score(user_spec, c)) for c in filtered_candidates]
-            scored.sort(key=lambda x: x[1], reverse=True)
-
-            best_match = scored[0][0]
-            best_score = scored[0][1]
+            # Anchor selection: geo-constrained then structural similarity.
+            # _select_anchor_candidate() filters by distance first (if target
+            # coords are available) so geographically-distant listings cannot
+            # win purely on structural similarity.
+            best_match, best_score, anchor_debug = _select_anchor_candidate(
+                candidates, user_spec, target_lat, target_lng
+            )
 
             logger.info(
-                f"[criteria] Best match: {best_match.url} "
+                f"[criteria] Anchor selected: {best_match.url} "
                 f"(score={best_score:.3f}, "
+                f"dist={anchor_debug.get('anchorDistanceKm')!r} km, "
                 f"bedrooms={best_match.bedrooms}, "
                 f"price=${best_match.nightly_price})"
             )
@@ -2421,6 +2579,10 @@ def run_criteria_search(
     scrape_transparent["debug"]["anchor_url"] = best_match.url
     scrape_transparent["debug"]["anchor_score"] = round(best_score, 3)
     scrape_transparent["debug"]["initial_candidates"] = len(candidates)
+    # Anchor geo-selection metadata (filled by _select_anchor_candidate)
+    scrape_transparent["debug"]["anchorCoordMapSize"] = len(coord_map)
+    scrape_transparent["debug"]["anchorCoordsAssigned"] = n_coords_assigned
+    scrape_transparent["debug"].update(anchor_debug)
 
     return daily_results, scrape_transparent
 
