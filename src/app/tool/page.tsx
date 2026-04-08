@@ -879,7 +879,7 @@ function Stepper({
   step?: number;
 }) {
   return (
-    <div className="flex items-center gap-1.5 sm:gap-3">
+    <div className="flex items-center gap-1 sm:gap-3">
       <button
         onClick={() => onChange(Math.max(min, value - step))}
         className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-base transition-colors hover:border-foreground/40 sm:h-9 sm:w-9 sm:text-lg"
@@ -887,7 +887,7 @@ function Stepper({
       >
         -
       </button>
-      <span className="w-6 text-center text-sm font-medium sm:w-8 sm:text-base">{value}</span>
+      <span className="w-5 text-center text-sm font-medium sm:w-8 sm:text-base">{value}</span>
       <button
         onClick={() => onChange(Math.min(max, value + step))}
         className="flex h-8 w-8 items-center justify-center rounded-full border border-border text-base transition-colors hover:border-foreground/40 sm:h-9 sm:w-9 sm:text-lg"
