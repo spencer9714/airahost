@@ -65,7 +65,7 @@ export default function ProfilePage() {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-2xl px-6 py-12">
+      <div className="mx-auto max-w-2xl px-4 py-8 sm:px-6 sm:py-12">
         <p className="text-sm text-muted">Loading profile settings...</p>
       </div>
     );

@@ -48,7 +48,7 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
     <div className="rounded-2xl border border-border bg-white">
 
       {/* ── Header ── */}
-      <div className="flex items-center justify-between gap-3 px-6 py-4">
+      <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
         <h3 className="text-sm font-semibold text-foreground/80">30-Day Pricing Plan</h3>
         <div className="flex items-center gap-3">
           <div className="flex items-center rounded-lg bg-gray-100/70 p-0.5">
@@ -78,7 +78,7 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
       </div>
 
       {/* ── Weekday headers ── */}
-      <div className="grid grid-cols-7 border-t border-gray-100 px-4">
+      <div className="grid grid-cols-7 border-t border-gray-100 px-2 sm:px-4">
         {WEEKDAYS.map((wd) => (
           <div key={wd} className="py-2 text-center text-xs font-normal text-foreground/40">
             {wd}
@@ -87,7 +87,7 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
       </div>
 
       {/* ── Calendar grid ── */}
-      <div className="grid grid-cols-7 gap-1.5 px-4 pb-4">
+      <div className="grid grid-cols-7 gap-1 px-2 pb-2 sm:gap-1.5 sm:px-4 sm:pb-4">
         {Array.from({ length: startOffset }).map((_, i) => (
           <div key={`empty-${i}`} />
         ))}
@@ -106,20 +106,20 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
             : "bg-white border border-gray-200/80";
 
           const dateNumEl = isToday ? (
-            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-rose-500 text-xs font-semibold text-white">
+            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-rose-500 text-[10px] font-semibold text-white sm:h-6 sm:w-6 sm:text-xs">
               {dateNum}
             </span>
           ) : (
-            <span className={`text-sm font-medium ${isPast ? "text-foreground/25" : "text-foreground/80"}`}>
+            <span className={`text-[11px] font-medium sm:text-sm ${isPast ? "text-foreground/25" : "text-foreground/80"}`}>
               {dateNum}
             </span>
           );
 
           const cell = (
-            <div className={`rounded-2xl p-2.5 transition-colors ${tileCls} ${selectable && !isPast ? "cursor-pointer hover:border-gray-400/50" : ""}`}>
+            <div className={`rounded-xl p-1.5 transition-colors sm:rounded-2xl sm:p-2.5 ${tileCls} ${selectable && !isPast ? "cursor-pointer hover:border-gray-400/50" : ""}`}>
               {dateNumEl}
               {!isPast && (
-                <p className="mt-3 text-sm font-medium text-foreground/70">${price}</p>
+                <p className="mt-1 text-[11px] font-medium text-foreground/70 sm:mt-3 sm:text-sm">${price}</p>
               )}
             </div>
           );
@@ -137,8 +137,8 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
 
       {/* ── Apply footer ── */}
       {selectable && (
-        <div className="border-t border-gray-100 px-6 py-4">
-          <div className="flex items-center justify-between gap-3">
+        <div className="border-t border-gray-100 px-3 py-3 sm:px-6 sm:py-4">
+          <div className="flex items-center justify-between gap-2">
             <p className="text-xs text-foreground/35">
               {selectedCount === totalCount ? `All ${totalCount} nights` : `${selectedCount} of ${totalCount} nights`}
               {" selected"}

@@ -21,11 +21,11 @@ export async function Header() {
 
   return (
     <header className="border-b border-border">
-      <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+      <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-4 sm:px-6">
         <Link href="/" className="text-lg font-semibold tracking-tight">
           AiraHost
         </Link>
-        <nav className="flex items-center gap-6 text-sm text-muted">
+        <nav className="flex items-center gap-2 text-sm text-muted sm:gap-6">
           <Link
             href="/tool"
             className="transition-colors hover:text-foreground"
