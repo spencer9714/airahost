@@ -1875,95 +1875,114 @@ def _build_structured_search_location(
     postal_code: Optional[str],
 ) -> tuple:
     """
-    Build a search-friendly location from structured address fields.
+    Build a search-friendly Airbnb search string from structured fields.
 
-    Priority (most to least precise for Airbnb geo-search):
-      1. postalCode (any combination) → "POSTAL"   ← HIGHEST PRIORITY
-         ZIP is always the most geographically precise and unambiguous token
-         for Airbnb search in the US/CA context.  Even when city + state are
-         also present, the ZIP alone is preferred — it removes all city-name
-         ambiguity (e.g. "Belmont" exists in CA, NC, and as a Long Beach
-         neighbourhood; "94002" is unambiguously San Mateo County, CA).
-      2. city + state (no postalCode)  → "City, ST"  (state disambiguates)
-      3. anything else                 → ""           (caller should fall back)
+    NOTE: This function is intentionally NOT called when a postalCode is
+    present.  run_criteria_search() geocodes the ZIP to a canonical
+    city/state first (via _geocode_postal_to_canonical), then uses that
+    canonical location as the Airbnb search string.  This function is the
+    fallback for the no-postal path.
 
-    A city name alone is intentionally not returned here because it may be
-    geographically ambiguous.  The caller falls back to
-    _extract_search_location() in that case.
+    Priority:
+      1. city + state  → "City, ST"   (state disambiguates city name)
+      2. anything else → ""           (caller falls back to address parser)
+
+    A city name alone is not returned here — it may be geographically
+    ambiguous (e.g. "Belmont" in CA vs NC vs Long Beach).
 
     Returns:
         (location: str, confidence: str)
-        When no structured location can be built, returns ("", "").
+        Returns ("", "") when no unambiguous location can be built.
     """
     city = (city or "").strip() or None
     state = (state or "").strip() or None
     postal_code = (postal_code or "").strip() or None
 
-    # postalCode is highest priority — use it regardless of city / state presence.
-    if postal_code:
-        return postal_code, "high"
     if city and state:
         return f"{city}, {state}", "high"
+    # postal_code alone: caller should geocode it; don't return raw ZIP here
     return "", ""
+
+
+def _geocode_postal_to_canonical(
+    postal_code: str,
+    hint_city: Optional[str] = None,
+    timeout: int = 3,
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a postal code to a canonical city / state / coords via Nominatim.
+
+    Uses geocode_address_details() which returns structured address fields.
+    The hint_city is appended to the query string to improve result quality
+    (e.g. "94002 Belmont" is more accurate than bare "94002").
+
+    Returns a dict with at minimum:
+        lat, lng, city, state, postal_code, country, country_code
+
+    Returns None on any failure — geocoding is always best-effort.  Callers
+    must handle None and fall back gracefully.
+    """
+    try:
+        from worker.core.geocode_details import geocode_address_details
+    except ImportError:
+        logger.warning("[criteria] geocode_details not available; skipping ZIP geocoding")
+        return None
+
+    # Prefer "ZIP city" query for better Nominatim disambiguation
+    query = f"{postal_code} {hint_city}".strip() if hint_city else postal_code
+    result = geocode_address_details(query, timeout=timeout)
+
+    # If the city-hinted query fails, retry with the bare ZIP
+    if not result and hint_city:
+        logger.debug(f"[criteria] Geocode retry with bare postal: {postal_code!r}")
+        result = geocode_address_details(postal_code, timeout=timeout)
+
+    return result
 
 
 def _extract_search_location(address: str) -> tuple:
     """
-    Extract a search-friendly location string from a full property address.
+    Extract the most useful location token from a free-text address string.
 
-    Airbnb search works best with city/neighborhood names rather than full
-    street addresses.  This function strips the street-level detail and
-    returns the most useful search token, plus a confidence indicator.
+    This is the FALLBACK used only when no structured location fields (city,
+    state, postalCode) are available.  run_criteria_search() will geocode
+    any ZIP code returned here before using it as an Airbnb search query —
+    so it is safe to return a bare ZIP; callers handle the geocoding step.
 
-    ZIP preservation rule: when a trailing ZIP is found but no two-letter
-    state code is present among the remaining parts, the city name alone
-    would be geographically ambiguous.  In that case the ZIP is returned
-    as the search term — it is more precise than an unqualified city name.
+    Rules (in priority order):
+      1. Bare ZIP (digits only, 3–6 chars)   → return ZIP  (caller geocodes)
+      2. Taiwanese address                   → extract city+district
+      3. Comma-separated with trailing ZIP   → return ZIP  (caller geocodes)
+      4. Comma-separated, city + state       → "City, ST"
+      5. Anything else                       → as-is, medium confidence
 
     Returns:
-        (search_location: str, confidence: str)  — confidence is "high" | "medium" | "low"
+        (search_location: str, confidence: str)  — "high" | "medium" | "low"
     """
     addr = address.strip()
 
-    # ZIP / postal code (digits only, 3–6 chars): use directly
+    # 1. Bare ZIP / postal code
     if re.match(r"^\d{3,6}$", addr):
         return addr, "high"
 
-    # Taiwanese address: extract city + district
-    # e.g. "台北市信義區松山路123號" → "台北市信義區"
+    # 2. Taiwanese address: e.g. "台北市信義區松山路123號" → "台北市信義區"
     tw_match = re.search(r"([^\s,]+?(?:市|縣)(?:[^\s,]+?(?:區|鄉|鎮|市))?)", addr)
     if tw_match:
         return tw_match.group(1), "high"
 
-    # Comma-separated address parsing.
-    # ZIP is highest priority: whenever a bare ZIP is found anywhere in the
-    # address, return it immediately — even when a state code is also present.
-    # This mirrors the same rule in _build_structured_search_location() and
-    # ensures the fallback path is consistent with the structured path.
-    #
-    # Examples:
-    #   "123 Main St, Belmont, CA, 94002" → "94002"
-    #   "Belmont, CA, 94002"              → "94002"
-    #   "Belmont, 94002"                  → "94002"
-    #   "Belmont, CA"                     → "Belmont, CA"
-    #   "New York, NY 10001"              → "10001"  (ZIP embedded in last part)
+    # 3 & 4. Comma-separated address
     parts = [p.strip() for p in addr.split(",") if p.strip()]
     if len(parts) >= 2:
-        # Skip leading street component (starts with a digit or looks like a house number)
+        # Skip leading street component (starts with a digit)
         start = 1 if re.match(r"^\d", parts[0]) else 0
         city_parts = parts[start:]
-        # Identify and separate a trailing bare ZIP/postal code
-        trailing_zip: Optional[str] = None
+        # Trailing bare ZIP wins — caller will geocode it
         if city_parts and re.match(r"^\d{3,6}$", city_parts[-1]):
-            trailing_zip = city_parts[-1]
-            city_parts = city_parts[:-1]
-        # ZIP is highest priority — return it regardless of whether a state is present.
-        if trailing_zip:
-            return trailing_zip, "high"
+            return city_parts[-1], "high"
         if city_parts:
             return ", ".join(city_parts[:2]), "high"
 
-    # Single token or no recognisable structure: use as-is
+    # 5. Single token or unrecognised structure
     return addr, "medium"
 
 
@@ -2008,37 +2027,138 @@ def run_criteria_search(
     timings: Dict[str, int] = {}
     base_origin = "https://www.airbnb.com"
 
-    # Prefer structured location fields from attributes to avoid ambiguous city-only searches.
-    # e.g. city="Belmont" + postalCode="94002" → "94002" (precise) not "Belmont" (ambiguous)
+    # ── Step 1: read structured location fields from attributes ──────────────
     _city = (attributes.get("city") or "").strip() or None
     _state = (attributes.get("state") or "").strip() or None
     _postal = (
         (attributes.get("postalCode") or attributes.get("postal_code") or "").strip() or None
     )
-    search_location, addr_confidence = _build_structured_search_location(_city, _state, _postal)
-    if search_location:
-        logger.info(
-            f"[criteria] Structured location: city={_city!r} state={_state!r} "
-            f"postalCode={_postal!r} → {search_location!r} (confidence={addr_confidence})"
-        )
+
+    # ── Step 2: resolve location to a canonical city/state for Airbnb search ─
+    #
+    # Strategy:
+    #   A. postalCode present → geocode ZIP to canonical city/state/coords.
+    #      Using raw ZIP as the Airbnb search query is unreliable — Airbnb
+    #      may misroute bare ZIP codes to unrelated places (e.g. "94002" has
+    #      matched San Carlos, Mexico in some sessions).  Geocoding the ZIP
+    #      produces a canonical city/state that Airbnb resolves correctly.
+    #   B. no postalCode, city + state → use "city, state" directly.
+    #   C. no postalCode, city only   → address-string fallback (medium conf).
+    #   D. nothing structured         → address-string fallback.
+    #
+    # In all cases where the fallback parser returns a bare ZIP, we also
+    # geocode it so the Airbnb search is always city/state-based.
+
+    geocode_result: Optional[Dict[str, Any]] = None
+    city_zip_mismatch: Optional[str] = None
+
+    # Detect ZIP anywhere in the address string (for the all-fallback path D)
+    _addr_zip_match = re.search(r"\b(\d{5})\b", address)
+    _addr_zip = _addr_zip_match.group(1) if _addr_zip_match else None
+
+    if _postal:
+        # Path A: geocode the ZIP
+        logger.info(f"[criteria] Geocoding postalCode={_postal!r} hint_city={_city!r}")
+        geocode_result = _geocode_postal_to_canonical(_postal, hint_city=_city)
+
+        if geocode_result:
+            gc_city = geocode_result.get("city")
+            gc_state = geocode_result.get("state")
+            gc_lat = geocode_result.get("lat")
+            gc_lng = geocode_result.get("lng")
+
+            # Carry geocoded coords forward as target coords if not already set
+            if target_lat is None and gc_lat is not None:
+                target_lat = gc_lat
+            if target_lng is None and gc_lng is not None:
+                target_lng = gc_lng
+
+            # Warn if user-supplied city disagrees with geocoded city
+            if _city and gc_city and _city.lower() != gc_city.lower():
+                city_zip_mismatch = (
+                    f"User city {_city!r} ≠ geocoded city {gc_city!r} for ZIP {_postal!r}"
+                )
+                logger.warning(f"[criteria] {city_zip_mismatch}")
+
+            # Build canonical search string from geocoded city + state
+            if gc_city and gc_state:
+                search_location = f"{gc_city}, {gc_state}"
+                addr_confidence = "high"
+            elif gc_city:
+                search_location = gc_city
+                addr_confidence = "medium"
+            else:
+                # Geocode returned coords but no city — fall through to city+state
+                search_location = ""
+                addr_confidence = "low"
+        else:
+            logger.warning(
+                f"[criteria] ZIP geocode failed for {_postal!r}; falling back to "
+                "structured city/state or address parser"
+            )
+            geocode_result = None
+            search_location = ""
+            addr_confidence = "low"
+
+        # Geocode failed or returned no city: try city+state, then address parser
+        if not search_location:
+            if _city and _state:
+                search_location = f"{_city}, {_state}"
+                addr_confidence = "medium"
+            elif _city:
+                search_location = _city
+                addr_confidence = "low"
+            else:
+                search_location, addr_confidence = _extract_search_location(address)
+
+    elif _city and _state:
+        # Path B: no ZIP, structured city + state
+        search_location = f"{_city}, {_state}"
+        addr_confidence = "high"
+
+    elif _city:
+        # Path C: city only — low confidence, ambiguous
+        search_location = _city
+        addr_confidence = "low"
+
     else:
-        # Fall back to address-string parsing when no structured fields are available
+        # Path D: no structured fields — parse address string
         search_location, addr_confidence = _extract_search_location(address)
-        logger.info(
-            f"[criteria] Address-parsed location: address={address!r} "
-            f"→ {search_location!r} (confidence={addr_confidence})"
+
+        # If the fallback parser returned a bare ZIP, geocode it too
+        raw_is_zip = bool(re.match(r"^\d{3,6}$", search_location))
+        if raw_is_zip:
+            logger.info(
+                f"[criteria] Address parser returned ZIP {search_location!r}; geocoding"
+            )
+            geocode_result = _geocode_postal_to_canonical(search_location)
+            if geocode_result:
+                gc_city = geocode_result.get("city")
+                gc_state = geocode_result.get("state")
+                if target_lat is None:
+                    target_lat = geocode_result.get("lat")
+                if target_lng is None:
+                    target_lng = geocode_result.get("lng")
+                if gc_city and gc_state:
+                    search_location = f"{gc_city}, {gc_state}"
+                    addr_confidence = "high"
+                elif gc_city:
+                    search_location = gc_city
+                    addr_confidence = "medium"
+            # If geocode fails, search_location stays as the raw ZIP (best-effort)
+
+    logger.info(
+        f"[criteria] Final search_location={search_location!r} "
+        f"confidence={addr_confidence} geocoded={geocode_result is not None}"
+    )
+    if addr_confidence == "low":
+        logger.warning(
+            f"[criteria] Low confidence location for address={address!r}. "
+            "Results may be inaccurate."
         )
 
     is_zip = bool(re.match(r"^\d{3,6}$", search_location))
     search_mode = "zip" if is_zip else "city"
-    logger.info(
-        f"[criteria] search_location={search_location!r} mode={search_mode}"
-    )
-    if addr_confidence == "low":
-        logger.warning(
-            f"[criteria] Low confidence location from address={address!r}. "
-            "Results may be inaccurate."
-        )
 
     # Extract preferred comps from attributes if not explicitly passed
     if preferred_comps is None:
@@ -2073,6 +2193,16 @@ def run_criteria_search(
             "state": _state,
             "postalCode": _postal,
         },
+        "geocodeResult": {
+            "city": geocode_result.get("city") if geocode_result else None,
+            "state": geocode_result.get("state") if geocode_result else None,
+            "postalCode": geocode_result.get("postal_code") if geocode_result else None,
+            "country": geocode_result.get("country") if geocode_result else None,
+            "countryCode": geocode_result.get("country_code") if geocode_result else None,
+            "lat": geocode_result.get("lat") if geocode_result else None,
+            "lng": geocode_result.get("lng") if geocode_result else None,
+        } if geocode_result else None,
+        "cityZipMismatch": city_zip_mismatch,
         "searchAdults": adults,
         "checkin": checkin,
         "checkout": checkout,
