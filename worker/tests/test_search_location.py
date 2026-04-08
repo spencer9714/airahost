@@ -401,6 +401,43 @@ class TestCriteriaLocationResolution:
         assert r["search_location"] == "Austin, TX"
         assert r["addr_confidence"] == "high"
 
+    def test_state_elevates_city_only_to_high_confidence(self):
+        """
+        Adding state to an otherwise city-only input produces a deterministic
+        'City, State' search string at high confidence — no geocode needed.
+        Without state the same city falls to low-confidence path C.
+        """
+        with_state = self._resolve("Belmont, CA", city="Belmont", state="CA")
+        without_state = self._resolve("Belmont", city="Belmont")
+
+        assert with_state["search_location"] == "Belmont, CA"
+        assert with_state["addr_confidence"] == "high"
+
+        assert without_state["search_location"] == "Belmont"
+        assert without_state["addr_confidence"] == "low"
+
+    def test_city_state_full_name_passed_through(self):
+        """State name (long or short) is passed as-is — the frontend sends
+        what the user typed; normalization happens in enrichListingInputAttributes."""
+        r = self._resolve("Belmont, California", city="Belmont", state="California")
+        assert r["search_location"] == "Belmont, California"
+        assert r["addr_confidence"] == "high"
+
+    def test_city_state_postal_still_geocodes(self):
+        """
+        When postalCode is present, the geocode path (A) takes priority even
+        if city + state are both provided.  State does NOT bypass geocoding.
+        """
+        r = self._resolve(
+            "Belmont, CA 94002",
+            city="Belmont", state="CA", postal_code="94002",
+            geocode_return=_BELMONT_CA,
+        )
+        # Geocode canonical result wins (includes full state name from Nominatim)
+        assert r["search_location"] == "Belmont, California"
+        assert r["addr_confidence"] == "high"
+        assert r["geocode_result"] is not None
+
     # ── Path C: city only ─────────────────────────────────────────────────
 
     def test_city_only_low_confidence(self):
