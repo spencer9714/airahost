@@ -281,7 +281,8 @@ export default function ToolPage() {
       (1000 * 60 * 60 * 24)
   );
   const criteriaInvalid =
-    (!city.trim() && !zip.trim()) ||
+    !city.trim() ||
+    !state.trim() ||
     (street.trim().length > 0 && street.trim().length < 3);
 
   const resolvedListingAddress = useMemo(
@@ -370,7 +371,7 @@ export default function ToolPage() {
                           className="input"
                         />
                       </Field>
-                      <Field label="State">
+                      <Field label="State *">
                         <input
                           type="text"
                           placeholder="e.g. CA"
@@ -380,7 +381,7 @@ export default function ToolPage() {
                           maxLength={50}
                         />
                       </Field>
-                      <Field label="ZIP / Postal code *">
+                      <Field label="ZIP / Postal code">
                         <input
                           type="text"
                           placeholder="e.g. 10001, 100"
@@ -390,10 +391,18 @@ export default function ToolPage() {
                         />
                       </Field>
                     </div>
-                    {!city.trim() && !zip.trim() && (
-                      <p className="text-xs text-warning">
-                        Please enter at least a city or ZIP code.
-                      </p>
+                    {/* Show per-field hints only after the user has touched any location field */}
+                    {(city.trim() || state.trim() || zip.trim()) && (!city.trim() || !state.trim()) && (
+                      <div className="space-y-1">
+                        {!city.trim() && (
+                          <p className="text-xs text-warning">City is required.</p>
+                        )}
+                        {!state.trim() && (
+                          <p className="text-xs text-warning">
+                            State / region is required (e.g. CA, New York, 台北市).
+                          </p>
+                        )}
+                      </div>
                     )}
                     <Field label="Street address (optional)">
                       <input
