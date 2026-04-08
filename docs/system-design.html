@@ -1,0 +1,2666 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AiraHost — 系統設計與定價架構</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #f8f8f7;
+    --surface:  #ffffff;
+    --border:   #e4e4e0;
+    --border-light: #eeeeea;
+    --text:     #1a1a18;
+    --muted:    #6b6b65;
+    --accent:   #d4450f;
+    --accent-bg:#fff3ef;
+    --blue:     #1d5fad;
+    --blue-bg:  #eef4ff;
+    --amber:    #92600a;
+    --amber-bg: #fdf6e3;
+    --green:    #1a6b3a;
+    --green-bg: #edf7f1;
+    --purple:   #5b2d91;
+    --purple-bg:#f5f0fb;
+    --mono:     "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+    --sans:     -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", "Segoe UI", system-ui, sans-serif;
+    --radius:   6px;
+    --toc-width: 240px;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.7;
+  }
+
+  /* ── Layout ── */
+  .layout { display: flex; min-height: 100vh; }
+
+  .toc-sidebar {
+    width: var(--toc-width);
+    flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 28px 0 40px;
+  }
+
+  .toc-logo {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    color: var(--accent);
+    text-transform: uppercase;
+    padding: 0 18px 20px;
+    display: block;
+    border-bottom: 1px solid var(--border-light);
+    margin-bottom: 14px;
+  }
+
+  .toc-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 8px 18px 4px;
+  }
+
+  .toc-sidebar nav a {
+    display: block;
+    font-size: 12.5px;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 5px 18px;
+    line-height: 1.45;
+    border-left: 2px solid transparent;
+    transition: color .12s, border-color .12s;
+  }
+  .toc-sidebar nav a:hover { color: var(--text); border-left-color: var(--border); }
+  .toc-sidebar nav a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 600; }
+
+  .main-content {
+    flex: 1;
+    min-width: 0;
+    padding: 48px 56px 80px;
+    max-width: 920px;
+  }
+
+  /* ── Typography ── */
+  h1 { font-size: 2rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.2; margin-bottom: 8px; }
+  h2 { font-size: 1.3rem; font-weight: 700; letter-spacing: -.01em; margin: 52px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1rem; font-weight: 700; margin: 28px 0 10px; }
+  h4 { font-size: .9rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: 22px 0 8px; }
+  p  { margin-bottom: 12px; }
+  ul, ol { padding-left: 1.4em; margin-bottom: 12px; }
+  li { margin-bottom: 4px; }
+
+  code {
+    font-family: var(--mono);
+    font-size: .82em;
+    background: #f0f0ec;
+    border: 1px solid var(--border-light);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+
+  pre {
+    background: #1c1c1a;
+    color: #e8e8e2;
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: .82em;
+    line-height: 1.6;
+    margin: 14px 0;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
+
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Summary card ── */
+  .summary-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 28px 0 40px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 20px;
+  }
+  .summary-item { }
+  .summary-item .si-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: 4px; }
+  .summary-item .si-value { font-size: .9rem; font-weight: 600; }
+
+  /* ── Callout boxes ── */
+  .callout {
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin: 16px 0;
+    font-size: .88rem;
+    border-left: 3px solid;
+  }
+  .callout strong { display: block; font-size: .78rem; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+
+  .callout-current  { background: var(--green-bg);  border-color: #2d9956; color: var(--green); }
+  .callout-reserved { background: var(--purple-bg); border-color: #8b52c9; color: var(--purple); }
+  .callout-infer    { background: var(--blue-bg);   border-color: #4a80d4; color: var(--blue); }
+  .callout-risk     { background: var(--amber-bg);  border-color: #c47f1a; color: var(--amber); }
+
+  /* ── Tables ── */
+  .table-wrap { overflow-x: auto; margin: 16px 0; border-radius: var(--radius); border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+  th { background: #f3f3f0; font-weight: 700; text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 8px 14px; border-bottom: 1px solid var(--border-light); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafaf8; }
+
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 20px;
+    padding: 2px 8px;
+    letter-spacing: .02em;
+  }
+  .badge-green  { background: var(--green-bg);  color: var(--green); }
+  .badge-purple { background: var(--purple-bg); color: var(--purple); }
+  .badge-amber  { background: var(--amber-bg);  color: var(--amber); }
+  .badge-gray   { background: #f0f0ec; color: var(--muted); }
+  .badge-blue   { background: var(--blue-bg);   color: var(--blue); }
+
+  /* ── Source footer ── */
+  .sources {
+    margin-top: 20px;
+    font-size: .8rem;
+    color: var(--muted);
+    font-family: var(--mono);
+    background: #f3f3f0;
+    border-radius: var(--radius);
+    padding: 8px 12px;
+    border: 1px solid var(--border-light);
+  }
+
+  /* ── Formula blocks ── */
+  .formula {
+    background: #1c1c1a;
+    color: #a8e6cf;
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    font-family: var(--mono);
+    font-size: .83em;
+    line-height: 1.8;
+    margin: 14px 0;
+  }
+  .formula .comment { color: #888; }
+  .formula .key { color: #f5c842; }
+  .formula .num { color: #7dd3fc; }
+
+  /* ── Diagrams ── */
+  .diagram-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+  .diagram-title {
+    font-size: .78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--muted);
+    margin-bottom: 16px;
+    font-family: var(--sans);
+  }
+
+  /* ── Weight bar ── */
+  .weight-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: .86rem; }
+  .weight-label { width: 130px; flex-shrink: 0; font-weight: 600; }
+  .weight-bar-track { flex: 1; height: 10px; background: #eee; border-radius: 20px; overflow: hidden; }
+  .weight-bar-fill { height: 100%; border-radius: 20px; background: var(--accent); }
+  .weight-num { width: 50px; text-align: right; color: var(--muted); font-family: var(--mono); font-size: .8em; }
+  .weight-tol { width: 80px; color: var(--muted); font-family: var(--mono); font-size: .8em; }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .toc-sidebar { display: none; }
+    .main-content { padding: 28px 20px 60px; }
+    h1 { font-size: 1.6rem; }
+    h2 { font-size: 1.15rem; }
+  }
+
+  /* section anchors */
+  section { scroll-margin-top: 24px; }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+<!-- ═══════════════════════════════════════════════════
+     SIDEBAR TOC
+════════════════════════════════════════════════════ -->
+<aside class="toc-sidebar">
+  <span class="toc-logo">AiraHost · 系統設計</span>
+  <div class="toc-label">章節目錄</div>
+  <nav id="toc">
+    <a href="#s1">1. 執行摘要</a>
+    <a href="#s2">2. 系統總覽</a>
+    <a href="#s3">3. 主要元件</a>
+    <a href="#s4">4. 報表完整生命週期</a>
+    <a href="#s5">5. 執行政策模型</a>
+    <a href="#s6">6. 即時 vs 夜間報表</a>
+    <a href="#s7">7. Worker 排程器</a>
+    <a href="#s8">8. Worker 派送與處理流程</a>
+    <a href="#s9">9. 定價合約規範</a>
+    <a href="#s10">10. 定價策略</a>
+    <a href="#s11">11. 相似度計算方式</a>
+    <a href="#s12">12. 比較物件篩選方式</a>
+    <a href="#s13">13. 基準優先定價路徑</a>
+    <a href="#s14">14. 動態需求與時間調整</a>
+    <a href="#s15">15. 夜間爬取策略</a>
+    <a href="#s16">16. 資料真實性規則</a>
+    <a href="#s17">17. 快取、重用與觀察說明</a>
+    <a href="#s18">18. 已知缺口與保留勾點</a>
+    <a href="#s19">19. 原始碼參考</a>
+    <div class="toc-label" style="margin-top:10px">資料庫</div>
+    <a href="#s20">20. 資料庫總覽</a>
+    <a href="#s21">21. 核心資料表與關聯</a>
+    <a href="#s22">22. 佇列與 Worker DB 機制</a>
+    <a href="#s23">23. RLS 與存取模型</a>
+    <a href="#s24">24. 觀察與歷史資料模型</a>
+    <a href="#s25">25. 架構演進說明</a>
+    <div class="toc-label" style="margin-top:10px">機器學習</div>
+    <a href="#s26">26. ML 總覽</a>
+    <a href="#s27">27. ML 輸入與資料來源</a>
+    <a href="#s28">28. 訓練資料集建構</a>
+    <a href="#s29">29. 特徵工程</a>
+    <a href="#s30">30. 模型訓練與驗證</a>
+    <a href="#s31">31. 推論流程</a>
+    <a href="#s32">32. ML 輸出與產物</a>
+    <a href="#s33">33. 回測與評估</a>
+    <a href="#s34">34. 觀察資料與 ML 的關係</a>
+    <a href="#s35">35. 現有限制與未來勾點</a>
+  </nav>
+</aside>
+
+<!-- ═══════════════════════════════════════════════════
+     MAIN CONTENT
+════════════════════════════════════════════════════ -->
+<main class="main-content">
+
+<h1>AiraHost — 系統設計與定價架構</h1>
+<p style="color:var(--muted);font-size:.9rem;margin-bottom:0">內部工程參考文件 · 反映目前程式碼庫狀態 · 2025 年 4 月</p>
+
+<!-- Summary card -->
+<div class="summary-card">
+  <div class="summary-item">
+    <div class="si-label">前端</div>
+    <div class="si-value">Next.js 16 App Router、TypeScript、Tailwind v4</div>
+  </div>
+  <div class="summary-item">
+    <div class="si-label">資料庫</div>
+    <div class="si-value">Supabase（PostgreSQL + RLS + Auth）</div>
+  </div>
+  <div class="summary-item">
+    <div class="si-label">Worker</div>
+    <div class="si-value">Python 3.10+、Playwright CDP、Railway</div>
+  </div>
+  <div class="summary-item">
+    <div class="si-label">相似度門檻</div>
+    <div class="si-value">0.40 — 進入定價計算的硬性最低分</div>
+  </div>
+  <div class="summary-item">
+    <div class="si-label">執行政策</div>
+    <div class="si-value">3 種（2 種啟用中、1 種保留）</div>
+  </div>
+  <div class="summary-item">
+    <div class="si-label">正式定價欄位</div>
+    <div class="si-value"><code>CalendarDay.recommendedDailyPrice</code></div>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s1">
+<h2>1. 執行摘要</h2>
+<p>AiraHost 為 Airbnb 房東提供逐日定價建議。使用者描述房源（或提供 URL）後，Python Worker 爬取 Airbnb 尋找相似房源，計算相似度加權市場中位數，並按日疊加需求與時間調整，可選擇以使用者指定的基準房源錨定結果。</p>
+<p>系統有兩類報表：<strong>即時報表</strong>（使用者觸發、自訂日期範圍、出現於歷史記錄）與<strong>夜間報表</strong>（排程器觸發、固定 30 天、成為儀表板看板的真實資料來源）。兩者共用同一執行引擎（<code>_execute_analysis</code>），但抓取預算與快取規則不同。</p>
+<p>正式的使用者端定價欄位為 <code>CalendarDay.recommendedDailyPrice</code>。日曆中所有其他定價欄位均為舊版相容別名或內部流水線階段。本文件精確說明整個系統，並全程引用程式碼路徑。</p>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s2">
+<h2>2. 系統總覽</h2>
+
+<div class="diagram-box">
+  <div class="diagram-title">高階架構圖</div>
+  <svg viewBox="0 0 780 340" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'PingFang TC','Microsoft JhengHei',sans-serif">
+    <defs>
+      <marker id="arr" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#9a9a94"/>
+      </marker>
+      <marker id="arr-blue" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#4a80d4"/>
+      </marker>
+      <marker id="arr-amber" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#c47f1a"/>
+      </marker>
+      <marker id="arr-green" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#2d9956"/>
+      </marker>
+      <marker id="arr-red" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#d4450f"/>
+      </marker>
+    </defs>
+
+    <!-- Zone backgrounds -->
+    <rect x="8" y="8" width="172" height="324" rx="8" fill="#f8f8f7" stroke="#ddd" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="94" y="28" text-anchor="middle" font-size="10" font-weight="700" fill="#aaa" letter-spacing="1">用戶端</text>
+
+    <rect x="196" y="8" width="232" height="324" rx="8" fill="#f8f8f7" stroke="#ddd" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="312" y="28" text-anchor="middle" font-size="10" font-weight="700" fill="#aaa" letter-spacing="1">後端基礎設施</text>
+
+    <rect x="444" y="8" width="164" height="324" rx="8" fill="#fff8f6" stroke="#e8c4b4" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="526" y="28" text-anchor="middle" font-size="10" font-weight="700" fill="#c47f1a" letter-spacing="1">Worker 層</text>
+
+    <rect x="624" y="8" width="148" height="324" rx="8" fill="#fff8f0" stroke="#e8d0b4" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="698" y="28" text-anchor="middle" font-size="10" font-weight="700" fill="#c07030" letter-spacing="1">外部服務</text>
+
+    <!-- 用戶端：Browser -->
+    <rect x="22" y="40" width="144" height="56" rx="7" fill="#fff" stroke="#d0d0cc" stroke-width="1.5"/>
+    <text x="94" y="63" text-anchor="middle" font-size="13" font-weight="700">瀏覽器</text>
+    <text x="94" y="80" text-anchor="middle" font-size="10.5" fill="#6b6b65">Next.js App</text>
+
+    <!-- 用戶端：Railway Cron -->
+    <rect x="22" y="240" width="144" height="56" rx="7" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="94" y="263" text-anchor="middle" font-size="13" font-weight="700">Railway Cron</text>
+    <text x="94" y="280" text-anchor="middle" font-size="10.5" fill="#92600a">每日凌晨觸發</text>
+
+    <!-- 後端：Next.js API -->
+    <rect x="210" y="40" width="204" height="56" rx="7" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="312" y="63" text-anchor="middle" font-size="13" font-weight="700">Next.js API</text>
+    <text x="312" y="80" text-anchor="middle" font-size="10.5" fill="#1d5fad">App Router Routes</text>
+
+    <!-- 後端：Supabase -->
+    <rect x="210" y="148" width="204" height="56" rx="7" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="312" y="171" text-anchor="middle" font-size="13" font-weight="700">Supabase</text>
+    <text x="312" y="188" text-anchor="middle" font-size="10.5" fill="#1a6b3a">PostgreSQL + Auth + RLS</text>
+
+    <!-- 後端：Nightly Schedule -->
+    <rect x="210" y="256" width="204" height="56" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="312" y="279" text-anchor="middle" font-size="13" font-weight="700">夜間排程 API</text>
+    <text x="312" y="296" text-anchor="middle" font-size="10.5" fill="#6b6b65">POST /api/internal/nightly/schedule</text>
+
+    <!-- Worker -->
+    <rect x="458" y="100" width="136" height="72" rx="7" fill="#fff3ef" stroke="#d4450f" stroke-width="2"/>
+    <text x="526" y="128" text-anchor="middle" font-size="13" font-weight="700" fill="#d4450f">Python Worker</text>
+    <text x="526" y="146" text-anchor="middle" font-size="10.5" fill="#92400a">輪詢 Supabase</text>
+    <text x="526" y="160" text-anchor="middle" font-size="10.5" fill="#92400a">Playwright CDP</text>
+
+    <!-- Airbnb -->
+    <rect x="638" y="100" width="126" height="72" rx="7" fill="#fff8f0" stroke="#e07020" stroke-width="1.5"/>
+    <text x="701" y="128" text-anchor="middle" font-size="13" font-weight="700">Airbnb.com</text>
+    <text x="701" y="146" text-anchor="middle" font-size="10.5" fill="#a05010">搜尋 + 房源頁面</text>
+    <text x="701" y="160" text-anchor="middle" font-size="10.5" fill="#a05010">Playwright 爬蟲</text>
+
+    <!-- Arrows: Browser → Next.js API -->
+    <line x1="166" y1="62" x2="208" y2="62" stroke="#4a80d4" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+    <text x="187" y="57" text-anchor="middle" font-size="9.5" fill="#4a80d4">API 請求</text>
+
+    <!-- Arrows: Browser ← Supabase (reads reports) -->
+    <path d="M166,78 Q180,110 210,176" stroke="#2d9956" stroke-width="1.5" fill="none" marker-end="url(#arr-green)" stroke-dasharray="5,3"/>
+    <text x="175" y="130" font-size="9.5" fill="#2d9956">讀取報表</text>
+
+    <!-- Next.js API ↔ Supabase -->
+    <line x1="312" y1="96" x2="312" y2="146" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr)"/>
+
+    <!-- Supabase → Worker (queue) -->
+    <line x1="414" y1="168" x2="456" y2="148" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="430" y="148" font-size="9.5" fill="#6b6b65">佇列</text>
+
+    <!-- Worker → Supabase (write results) -->
+    <line x1="458" y1="158" x2="416" y2="178" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="425" y="182" font-size="9.5" fill="#6b6b65">寫入結果</text>
+
+    <!-- Railway Cron → Nightly Schedule -->
+    <line x1="166" y1="270" x2="208" y2="278" stroke="#c47f1a" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arr-amber)"/>
+
+    <!-- Nightly Schedule → Supabase -->
+    <line x1="312" y1="256" x2="312" y2="206" stroke="#c47f1a" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#arr-amber)"/>
+    <text x="322" y="236" font-size="9.5" fill="#92600a">插入夜間任務</text>
+
+    <!-- Worker ↔ Airbnb -->
+    <line x1="594" y1="128" x2="636" y2="128" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="636" y1="144" x2="594" y2="144" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr)"/>
+    <text x="615" y="122" text-anchor="middle" font-size="9.5" fill="#6b6b65">爬取</text>
+    <text x="615" y="152" text-anchor="middle" font-size="9.5" fill="#6b6b65">回傳</text>
+  </svg>
+</div>
+
+<p>系統有三個執行時角色：</p>
+<ul>
+  <li><strong>Next.js App Router</strong> — 提供前端與所有 <code>/api/*</code> 路由。以 Zod 驗證輸入，將 <code>pricing_reports</code> 列寫入 Supabase，並將結果傳回瀏覽器。</li>
+  <li><strong>Supabase（PostgreSQL）</strong> — 持久化儲存使用者、已儲存房源、定價報表、房源–報表連結及觀察資料。Row-Level Security 確保使用者資料隔離。</li>
+  <li><strong>Python Worker</strong> — 部署在 Railway 的長期執行程序。輪詢 Supabase 取得 <code>queued</code> 報表，認領後以 Playwright CDP 爬取 Airbnb、執行定價並將結果寫回。無 HTTP 伺服器 — 純輪詢處理迴圈。</li>
+</ul>
+<p>Railway cron 每日呼叫 <code>POST /api/internal/nightly/schedule</code> 一次，為所有符合條件的已儲存房源排入夜間看板更新報表。</p>
+
+<div class="sources">來源：docs/PROJECT_MEMORY.md、worker/main.py、src/app/api/internal/nightly/schedule/route.ts</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s3">
+<h2>3. 主要元件</h2>
+
+<h3>前端（Next.js App Router）</h3>
+<ul>
+  <li><code>/tool</code> — 多步驟表單：房源輸入（URL 或條件）、日期、可選基準 URL。提交至 <code>POST /api/reports</code>。</li>
+  <li><code>/r/[shareId]</code> — 報表檢視頁。輪詢 <code>GET /api/r/[shareId]</code> 直到狀態為 <code>ready</code> 或 <code>error</code>。包含從 <code>progressMeta</code> 衍生的進度條。</li>
+  <li><code>/dashboard</code> — 雙欄版面：已儲存房源列表 + 市場分析面板。讀取 <code>GET /api/listings</code>。顯示夜間看板報表、PricingHeatmap、PriceLineChart、SmartAlerts、Auto-Apply 及 Co-host 區塊。</li>
+  <li><code>/r/demo</code> — 由 <code>src/core/pricingCore.ts</code> 以預設資料驅動的靜態展示頁。<strong>非正式定價引擎。</strong></li>
+</ul>
+
+<h3>API 路由</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>路由</th><th>用途</th><th>發出的政策</th></tr>
+  <tr><td><code>POST /api/reports</code></td><td>建立報表（匿名或已儲存房源捷徑）</td><td><code>interactive_live_report</code></td></tr>
+  <tr><td><code>POST /api/listings/[id]/rerun</code></td><td>重新執行已儲存房源分析</td><td><code>interactive_live_report</code></td></tr>
+  <tr><td><code>POST /api/internal/nightly/schedule</code></td><td>排入夜間看板更新（cron）</td><td><code>nightly_board_refresh</code></td></tr>
+  <tr><td><code>GET /api/listings</code></td><td>讀取已儲存房源 + 最新看板報表</td><td>— （唯讀）</td></tr>
+  <tr><td><code>GET /api/r/[shareId]</code></td><td>以 share ID 輪詢報表</td><td>— （唯讀）</td></tr>
+</table>
+</div>
+
+<h3>Worker 模組（Python）</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>模組</th><th>職責</th></tr>
+  <tr><td><code>worker/main.py</code></td><td>輪詢迴圈、任務認領、心跳、派送（<code>process_job → run_nightly_job / run_interactive_job → _execute_analysis</code>）</td></tr>
+  <tr><td><code>worker/core/report_policy.py</code></td><td>執行政策類型 + 解析邏輯（<code>resolve_execution_policy</code>）</td></tr>
+  <tr><td><code>worker/core/similarity.py</code></td><td>相似度計算 + 多層篩選（嚴格 / 中等 / 寬鬆）</td></tr>
+  <tr><td><code>worker/core/pricing_engine.py</code></td><td>相似度加權定價建議 + 透明結果組裝</td></tr>
+  <tr><td><code>worker/core/benchmark.py</code></td><td>基準優先流水線（階段 1 錨定 + 階段 2 市場混合）</td></tr>
+  <tr><td><code>worker/core/dynamic_pricing.py</code></td><td>逐日需求評分 + 時間乘數 + <code>recommendedDailyPrice</code> 計算</td></tr>
+  <tr><td><code>worker/core/nightly_strategy.py</code></td><td>分層夜間爬取計劃（觀察 / 推算索引、滾動 / 卡片預算）</td></tr>
+  <tr><td><code>worker/core/observation_reuse.py</code></td><td>Phase 6A：即時 / 條件任務的觀察優先重用</td></tr>
+  <tr><td><code>worker/core/comp_utils.py</code></td><td>共用比較物件 payload 建構（<code>to_comparable_payload</code>、<code>build_comp_id</code> 等）</td></tr>
+  <tr><td><code>worker/scraper/comp_collection.py</code></td><td>統一 2 晚優先 / 1 晚備援 Airbnb 搜尋迴圈</td></tr>
+  <tr><td><code>worker/scraper/day_query.py</code></td><td>標準逐日搜尋（模式 A / B — 條件 + URL 模式）</td></tr>
+</table>
+</div>
+<div class="sources">來源：worker/main.py、worker/core/*.py、docs/PROJECT_MEMORY.md</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s4">
+<h2>4. 報表完整生命週期</h2>
+
+<div class="diagram-box">
+  <div class="diagram-title">報表生命週期 — 左：即時路徑　右：夜間路徑</div>
+  <svg viewBox="0 0 740 430" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'PingFang TC','Microsoft JhengHei',sans-serif">
+    <defs>
+      <marker id="arr2" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#9a9a94"/>
+      </marker>
+      <marker id="arr2b" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#c47f1a"/>
+      </marker>
+    </defs>
+
+    <!-- Column headers -->
+    <rect x="30" y="8" width="310" height="30" rx="5" fill="#eef4ff"/>
+    <text x="185" y="28" text-anchor="middle" font-size="13" font-weight="700" fill="#1d5fad">即時報表路徑</text>
+
+    <rect x="400" y="8" width="310" height="30" rx="5" fill="#fdf6e3"/>
+    <text x="555" y="28" text-anchor="middle" font-size="13" font-weight="700" fill="#92600a">夜間報表路徑</text>
+
+    <!-- Divider -->
+    <line x1="370" y1="8" x2="370" y2="422" stroke="#e0e0dc" stroke-width="1.5" stroke-dasharray="6,4"/>
+
+    <!-- ── Interactive column ── -->
+    <!-- Step 1 -->
+    <rect x="55" y="52" width="260" height="52" rx="7" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="185" y="72" text-anchor="middle" font-size="12" font-weight="600">使用者提交 /tool 表單</text>
+    <text x="185" y="89" text-anchor="middle" font-size="10.5" fill="#1d5fad">POST /api/reports</text>
+    <line x1="185" y1="104" x2="185" y2="126" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Step 2 -->
+    <rect x="55" y="126" width="260" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="185" y="146" text-anchor="middle" font-size="12" font-weight="600">pricing_reports 寫入</text>
+    <text x="185" y="163" text-anchor="middle" font-size="10.5" fill="#6b6b65">status=queued · policy=interactive</text>
+    <line x1="185" y1="178" x2="185" y2="200" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Step 3 -->
+    <rect x="55" y="200" width="260" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="185" y="220" text-anchor="middle" font-size="12" font-weight="600">Worker 輪詢並認領任務</text>
+    <text x="185" y="237" text-anchor="middle" font-size="10.5" fill="#6b6b65">run_interactive_job()</text>
+    <line x1="185" y1="252" x2="185" y2="274" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Step 4 -->
+    <rect x="55" y="274" width="260" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="185" y="294" text-anchor="middle" font-size="12" font-weight="600">檢查觀察資料重用</text>
+    <text x="185" y="311" text-anchor="middle" font-size="10.5" fill="#6b6b65">Phase 6A（僅條件模式）</text>
+    <line x1="185" y1="326" x2="185" y2="348" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Step 5 -->
+    <rect x="55" y="348" width="260" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="185" y="368" text-anchor="middle" font-size="12" font-weight="600">爬取 Airbnb + 計算定價</text>
+    <text x="185" y="385" text-anchor="middle" font-size="10.5" fill="#6b6b65">_execute_analysis(is_nightly=False)</text>
+    <line x1="185" y1="400" x2="185" y2="414" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Result -->
+    <rect x="55" y="400" width="260" height="22" rx="4" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="185" y="415" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1a6b3a">status=ready → 僅出現於報表歷史</text>
+
+    <!-- ── Nightly column ── -->
+    <!-- Step 1 -->
+    <rect x="420" y="52" width="268" height="52" rx="7" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="554" y="72" text-anchor="middle" font-size="12" font-weight="600">Railway cron 觸發</text>
+    <text x="554" y="89" text-anchor="middle" font-size="10.5" fill="#92600a">POST /api/internal/nightly/schedule</text>
+    <line x1="554" y1="104" x2="554" y2="126" stroke="#c47f1a" stroke-width="1.5" marker-end="url(#arr2b)"/>
+
+    <!-- Step 2 -->
+    <rect x="420" y="126" width="268" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="554" y="146" text-anchor="middle" font-size="12" font-weight="600">pricing_reports 寫入</text>
+    <text x="554" y="163" text-anchor="middle" font-size="10.5" fill="#6b6b65">status=queued · policy=nightly_board</text>
+    <line x1="554" y1="178" x2="554" y2="200" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Step 3 -->
+    <rect x="420" y="200" width="268" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="554" y="220" text-anchor="middle" font-size="12" font-weight="600">Worker 輪詢並認領任務</text>
+    <text x="554" y="237" text-anchor="middle" font-size="10.5" fill="#6b6b65">run_nightly_job()</text>
+    <line x1="554" y1="252" x2="554" y2="274" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Step 4 -->
+    <rect x="420" y="274" width="268" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="554" y="294" text-anchor="middle" font-size="12" font-weight="600">重新載入已儲存房源輸入</text>
+    <text x="554" y="311" text-anchor="middle" font-size="10.5" fill="#6b6b65">即時從 saved_listings 重讀</text>
+    <line x1="554" y1="326" x2="554" y2="348" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Step 5 -->
+    <rect x="420" y="348" width="268" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="554" y="368" text-anchor="middle" font-size="12" font-weight="600">分層爬取 + 計算定價</text>
+    <text x="554" y="385" text-anchor="middle" font-size="10.5" fill="#6b6b65">_execute_analysis(is_nightly=True)</text>
+    <line x1="554" y1="400" x2="554" y2="414" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr2)"/>
+
+    <!-- Result -->
+    <rect x="420" y="400" width="268" height="22" rx="4" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="554" y="415" text-anchor="middle" font-size="10.5" font-weight="600" fill="#1a6b3a">status=ready → 成為儀表板看板資料</text>
+  </svg>
+</div>
+
+<div class="callout callout-current">
+  <strong>目前行為</strong>
+  關鍵差異：夜間報表在執行時重新載入已儲存的房源輸入（排隊後的編輯會被反映）。即時報表保留排隊快照 — 提交當下的使用者意圖被凍結。
+</div>
+<div class="sources">來源：docs/report-contract.md、worker/main.py、src/app/api/internal/nightly/schedule/route.ts</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s5">
+<h2>5. 執行政策模型</h2>
+
+<p>Phase 1 後建立的每一個 <code>pricing_reports</code> 列均帶有明確的 <code>result_core_debug.execution_policy</code> 欄位。Worker 讀取此欄位以選擇流水線。舊版列（Phase 1 前）則從 <code>job_lane</code> 推導政策作為備援。</p>
+
+<h3>政策對照表</h3>
+<div class="table-wrap">
+<table>
+  <tr>
+    <th>政策</th><th>狀態</th><th>job_lane</th><th>觸發方式</th><th>流水線</th>
+  </tr>
+  <tr>
+    <td><code>nightly_board_refresh</code></td>
+    <td><span class="badge badge-green">啟用中</span></td>
+    <td><code>nightly</code></td>
+    <td><code>scheduled</code></td>
+    <td><code>run_nightly_job()</code></td>
+  </tr>
+  <tr>
+    <td><code>interactive_live_report</code></td>
+    <td><span class="badge badge-green">啟用中</span></td>
+    <td><code>interactive</code></td>
+    <td><code>manual</code> / <code>rerun</code></td>
+    <td><code>run_interactive_job()</code></td>
+  </tr>
+  <tr>
+    <td><code>nightly_alert_training_refresh</code></td>
+    <td><span class="badge badge-purple">保留中</span></td>
+    <td><code>nightly</code></td>
+    <td><code>scheduled</code></td>
+    <td>— 尚未路由</td>
+  </tr>
+</table>
+</div>
+
+<h3>解析演算法（<code>worker/core/report_policy.py</code>）</h3>
+<pre><code>def resolve_execution_policy(job):
+    # 1. 明確欄位：從 result_core_debug 讀取（Phase 1 報表）
+    debug = job.get("result_core_debug")
+    if isinstance(debug, dict):
+        explicit = debug.get("execution_policy")
+        if isinstance(explicit, str) and explicit in _VALID_POLICIES:
+            return explicit  # 大多數報表走此路徑
+
+    # 2. 推導：從 job_lane 欄位的舊版備援
+    job_lane = job.get("job_lane") or "interactive"
+    if job_lane == "nightly":
+        return POLICY_NIGHTLY_BOARD      # "nightly_board_refresh"
+    return POLICY_INTERACTIVE            # "interactive_live_report"</code></pre>
+
+<p><strong><code>NIGHTLY_POLICIES</code></strong> 目前為 frozenset，僅包含 <code>nightly_board_refresh</code>。當 <code>nightly_alert_training_refresh</code> 啟用後，它將被加入此集合，並在 <code>run_nightly_job()</code> 內部以不同方式路由。</p>
+
+<pre><code>NIGHTLY_POLICIES: frozenset[str] = frozenset({
+    "nightly_board_refresh",
+    "nightly_alert_training_refresh",   # 已定義但目前無 API 路由發出
+})</code></pre>
+
+<div class="callout callout-risk">
+  <strong>注意事項</strong>
+  <code>result_core_debug</code> 是 JSONB 僅附加稽核 blob。鍵的順序不保證。請一律以鍵名讀取 <code>execution_policy</code>，不要依賴位置。不要在 <code>nightly_alert_training_refresh</code> 上建立邏輯 — 目前尚無 API 路由發出此政策。
+</div>
+<div class="sources">來源：worker/core/report_policy.py、src/lib/reportPolicy.ts、docs/report-contract.md</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s6">
+<h2>6. 即時 vs 夜間報表</h2>
+
+<div class="table-wrap">
+<table>
+  <tr><th>屬性</th><th>即時報表</th><th>夜間報表</th></tr>
+  <tr><td>來源</td><td><code>POST /api/reports</code>、<code>/rerun</code></td><td><code>POST /api/internal/nightly/schedule</code></td></tr>
+  <tr><td>日期範圍</td><td>使用者自訂（1–30 天）</td><td>固定 30 天：明天 → 明天 +29</td></tr>
+  <tr><td>執行時的輸入</td><td>排隊時凍結（快照）</td><td>從 <code>saved_listings</code> 即時重讀</td></tr>
+  <tr><td>快取命中</td><td>是（24h TTL）</td><td>否（永遠 <code>force_rerun: true</code>）</td></tr>
+  <tr><td>爬取預算</td><td>最多 ~16 / 30 天取樣</td><td>分層：~14 天觀察，其餘插值</td></tr>
+  <tr><td>儀表板看板</td><td>永遠不成為真實資料來源</td><td>status=ready 後成為看板資料</td></tr>
+  <tr><td>出現於歷史記錄</td><td>是</td><td>是（透過 <code>recentReports</code>）</td></tr>
+  <tr><td>觀察資料重用</td><td>Phase 6A：僅條件模式</td><td>否 — 永遠重新爬取</td></tr>
+  <tr><td>爬取 debug 區塊</td><td>不存在於 <code>result_core_debug</code></td><td>存在：<code>result_core_debug.nightly_crawl</code></td></tr>
+  <tr><td>合格房源</td><td>任何已儲存房源或匿名</td><td>僅有效 <code>airbnb.com/rooms/</code> URL 的已儲存房源</td></tr>
+</table>
+</div>
+
+<div class="callout callout-infer">
+  <strong>推論</strong>
+  <code>run_nightly_job()</code> 與 <code>run_interactive_job()</code> 目前是薄包裝函式 — 兩者都立即委派給 <code>_execute_analysis(is_nightly=True/False)</code>。此分離作為明確命名的勾點而存在，以供未來夜間專屬或即時專屬的前 / 後處理邏輯使用（例如單獨路由 <code>nightly_alert_training_refresh</code>）。目前除了傳遞 <code>is_nightly</code> 旗標並為夜間任務建構 <code>NightlyCrawlPlan</code> 外，兩個函式之間沒有其他分叉的流水線邏輯。
+</div>
+<div class="sources">來源：worker/main.py、docs/report-contract.md、worker/core/nightly_strategy.py</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s7">
+<h2>7. Worker 排程器</h2>
+
+<p>夜間排程器是單一 Next.js API 路由，由 Railway 內建 cron 在約 UTC 午夜呼叫。這不是背景工作或佇列 — 它同步執行並插入 <code>pricing_reports</code> 列，Python Worker 再透過輪詢迴圈取得。</p>
+
+<h3>身份驗證</h3>
+<p>所有呼叫需要 <code>Authorization: Bearer &lt;INTERNAL_API_SECRET&gt;</code>。若環境變數缺失，路由回傳 500（而非 401）以使設定錯誤明顯可見。Token 無效 → 401。</p>
+
+<h3>去重複 — 23 小時視窗</h3>
+<p>插入前，路由查詢 <code>listing_reports</code>，檢查過去 23 小時內是否有已連結至該房源的排程任務（狀態：queued、running 或 ready）。若有，該房源以 <code>duplicate_recent_ready</code> 原因跳過。23 小時視窗（短於 24 小時）可容許 cron 抖動，同時不阻擋合法的重新執行。</p>
+
+<div class="callout callout-current">
+  <strong>強制略過（僅限本地開發）</strong>
+  傳送 <code>{ "listingId": "…", "force": true }</code> 可跳過去重複檢查。僅在 <code>WORKER_TARGET_ENV === "local"</code> 時允許。在正式環境嘗試 force 會回傳 400。不帶房源篩選的 force 永遠被拒絕（防止意外的全量略過）。
+</div>
+
+<h3>合格門檻</h3>
+<p>僅有有效 <code>airbnb.com/rooms/</code> URL（儲存在 <code>input_attributes.listingUrl</code>）的房源才會被排程。僅條件模式的房源以 <code>missing_listing_url</code> 或 <code>invalid_listing_url</code> 原因跳過。</p>
+
+<h3>時區感知日期範圍</h3>
+<p>每個房源的 <code>listing_timezone</code> 欄位（IANA 時區字串）用於計算正確的「本地明天」開始日期。這可防止 UTC+ 時區房源的 UTC 截斷錯誤。備援值：<code>America/Los_Angeles</code>。驗證透過 <code>Intl.DateTimeFormat</code> — 無效時區字串靜默回退。</p>
+
+<pre><code>// startDate = 房源時區的本地明天
+// endDate   = 本地明天 + 29 天
+// 每份夜間報表永遠涵蓋 30 晚</code></pre>
+
+<h3>排程器不做的事</h3>
+<ul>
+  <li>不執行定價分析本身</li>
+  <li>不重試失敗的任務</li>
+  <li>不直接推送給 Worker — Worker 獨立輪詢</li>
+  <li>不設定 <code>completed_at</code> 或 <code>market_captured_at</code> — 這些欄位由 Worker 擁有</li>
+</ul>
+
+<h3>回應格式</h3>
+<p>永遠回傳 HTTP 200（即使每個房源有個別錯誤），確保 Railway cron 不會因部分失敗而重試整個執行。回應本文：<code>{ filter, force, scheduled, skipped, total, results[] }</code>。</p>
+
+<div class="sources">來源：src/app/api/internal/nightly/schedule/route.ts</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s8">
+<h2>8. Worker 派送與處理流程</h2>
+
+<div class="diagram-box">
+  <div class="diagram-title">Worker 派送流程（worker/main.py → process_job）</div>
+  <svg viewBox="0 0 760 320" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'PingFang TC','Microsoft JhengHei',sans-serif">
+    <defs>
+      <marker id="arr3" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#9a9a94"/>
+      </marker>
+      <marker id="arr3r" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#d44040"/>
+      </marker>
+    </defs>
+
+    <!-- Row 1: Poll → Claim → process_job -->
+    <rect x="20" y="20" width="148" height="52" rx="7" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="94" y="42" text-anchor="middle" font-size="12" font-weight="600">輪詢 Supabase</text>
+    <text x="94" y="58" text-anchor="middle" font-size="10.5" fill="#1d5fad">每 5 秒一次</text>
+
+    <line x1="168" y1="46" x2="194" y2="46" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr3)"/>
+
+    <rect x="194" y="20" width="148" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="268" y="42" text-anchor="middle" font-size="12" font-weight="600">claim_job()</text>
+    <text x="268" y="58" text-anchor="middle" font-size="10.5" fill="#6b6b65">status=running + 鎖定</text>
+
+    <line x1="342" y1="46" x2="368" y2="46" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr3)"/>
+
+    <rect x="368" y="20" width="184" height="52" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="460" y="42" text-anchor="middle" font-size="12" font-weight="600">process_job()</text>
+    <text x="460" y="58" text-anchor="middle" font-size="10.5" fill="#6b6b65">resolve_execution_policy()</text>
+
+    <!-- Rejected forecast_snapshot -->
+    <rect x="586" y="8" width="158" height="42" rx="6" fill="#fff0f0" stroke="#d44040" stroke-width="1.5"/>
+    <text x="665" y="25" text-anchor="middle" font-size="11" font-weight="600" fill="#c03030">拒絕 forecast_snapshot</text>
+    <text x="665" y="41" text-anchor="middle" font-size="10" fill="#c03030">（已棄用）</text>
+    <line x1="552" y1="34" x2="584" y2="28" stroke="#d44040" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arr3r)"/>
+
+    <!-- Arrow down from process_job -->
+    <line x1="460" y1="72" x2="460" y2="108" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr3)"/>
+
+    <!-- Decision diamond -->
+    <polygon points="460,108  600,148  460,188  320,148" fill="#fdf6e3" stroke="#c47f1a" stroke-width="2"/>
+    <text x="460" y="140" text-anchor="middle" font-size="11.5" font-weight="700">policy 在</text>
+    <text x="460" y="156" text-anchor="middle" font-size="11.5" font-weight="700">NIGHTLY_POLICIES？</text>
+    <text x="460" y="173" text-anchor="middle" font-size="9.5" fill="#92600a">目前僅含 nightly_board_refresh</text>
+
+    <!-- Yes branch (left) -->
+    <line x1="322" y1="148" x2="240" y2="210" stroke="#2d9956" stroke-width="1.5" marker-end="url(#arr3)"/>
+    <text x="266" y="195" font-size="10.5" fill="#1a6b3a" font-weight="600">是</text>
+
+    <rect x="112" y="210" width="220" height="60" rx="7" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="222" y="235" text-anchor="middle" font-size="12" font-weight="600">run_nightly_job()</text>
+    <text x="222" y="253" text-anchor="middle" font-size="10.5" fill="#1a6b3a">建構 NightlyCrawlPlan</text>
+    <text x="222" y="266" text-anchor="middle" font-size="10" fill="#1a6b3a">重讀已儲存房源輸入</text>
+
+    <!-- No branch (right) -->
+    <line x1="598" y1="148" x2="660" y2="210" stroke="#4a80d4" stroke-width="1.5" marker-end="url(#arr3)"/>
+    <text x="638" y="195" font-size="10.5" fill="#1d5fad" font-weight="600">否</text>
+
+    <rect x="564" y="210" width="180" height="60" rx="7" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="654" y="235" text-anchor="middle" font-size="12" font-weight="600">run_interactive_job()</text>
+    <text x="654" y="253" text-anchor="middle" font-size="10.5" fill="#1d5fad">檢查觀察資料重用</text>
+    <text x="654" y="266" text-anchor="middle" font-size="10" fill="#1d5fad">Phase 6A</text>
+
+    <!-- Converge to _execute_analysis -->
+    <line x1="222" y1="270" x2="340" y2="300" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr3)"/>
+    <line x1="654" y1="270" x2="570" y2="300" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr3)"/>
+
+    <rect x="286" y="296" width="290" height="20" rx="5" fill="#fff3ef" stroke="#d4450f" stroke-width="1.5"/>
+    <text x="431" y="310" text-anchor="middle" font-size="11" font-weight="700" fill="#d4450f">_execute_analysis(is_nightly) — 共用引擎：爬取 + 定價 + 寫入</text>
+  </svg>
+</div>
+
+<h3>Worker 迴圈設定</h3>
+<pre><code>POLL_SECONDS            = 5    # 輪詢間隔
+STALE_MINUTES           = 15   # 重新排隊逾時任務
+MAX_ATTEMPTS            = 3    # 每個任務最大重試次數
+HEARTBEAT_SECONDS       = 10   # Worker 健康信號頻率
+MAX_RUNTIME_SECONDS     = 180  # 每個任務執行逾時</code></pre>
+
+<h3>任務認領 + 心跳</h3>
+<p>Worker 以 <code>SELECT ... FOR UPDATE SKIP LOCKED</code> 風格的認領（透過 Supabase RPC）原子性地將 <code>status</code> 從 <code>queued</code> 轉為 <code>running</code> 並記錄 <code>worker_token</code>。執行期間，背景執行緒每 10 秒更新 <code>worker_heartbeat_at</code>。前端以心跳時間差顯示過時橫幅（「比預期更久」、「Worker 無回應」）。</p>
+
+<div class="sources">來源：worker/main.py、docs/report-contract.md</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s9">
+<h2>9. 定價合約規範</h2>
+
+<h3>唯一正式欄位</h3>
+<div class="callout callout-current">
+  <strong>規則 — 由 docs/report-contract.md 強制執行</strong>
+  <code>CalendarDay.recommendedDailyPrice</code> 是唯一正式的每日建議定價。所有使用者端的價格呈現（儀表板看板磁磚、圖表建議系列、報表日曆、警示電子郵件）必須且只能從此欄位衍生。缺少此欄位的舊版報表則回退使用 <code>basePrice</code>。
+</div>
+
+<h3>欄位角色說明</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>欄位</th><th>角色</th><th>UI 用途</th></tr>
+  <tr><td><code>CalendarDay.recommendedDailyPrice</code></td><td><strong>正式欄位</strong>：需求調整後的建議定價。<code>baseDailyPrice × demandAdjustment</code>。不含時間（臨時）折扣。</td><td>看板磁磚、圖表建議線、日曆</td></tr>
+  <tr><td><code>summary.recommendedPrice.nightly</code></td><td>永遠等於 <code>calendar[0].recommendedDailyPrice</code> — 報表開始日期的正式建議值。</td><td>儀表板橫幅、報表主視覺</td></tr>
+  <tr><td><code>CalendarDay.baseDailyPrice</code></td><td>每日原始市場中位數（未修改）。當天可比房源的實際定價。</td><td>圖表市場參考線、除錯</td></tr>
+  <tr><td><code>summary.nightlyMedian</code></td><td>來自舊版 <code>basePrice</code> 的視窗級市場代理值。近期日期可能含時間調整。向後相容。</td><td>儀表板 KPI 列、市場快照</td></tr>
+  <tr><td><code>summary.observedListingPrice</code></td><td>報表時從 Airbnb 爬取的房東即時定價。</td><td>儀表板橫幅主視覺、圖表即時標記</td></tr>
+  <tr><td><code>summary.recommendedPrice.windowMedian</code></td><td>30 天相似度加權引擎建議（單一值，非逐日）。次要參考。</td><td>主要 UI 不顯示</td></tr>
+</table>
+</div>
+
+<h3>舊版 / 內部欄位 — 不要在這些欄位上建立新的 UI</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>欄位</th><th>為何為舊版</th></tr>
+  <tr><td><code>CalendarDay.basePrice</code></td><td>命名不明確；等於 <code>priceAfterTimeAdjustment</code> 或 <code>overallMedian</code>。早於正式欄位存在。</td></tr>
+  <tr><td><code>CalendarDay.priceAfterTimeAdjustment</code></td><td>內部：<code>baseDailyPrice × finalMultiplier</code>（含臨時折扣）。不是建議定價。</td></tr>
+  <tr><td><code>CalendarDay.refundablePrice</code></td><td>舊版：含週 / 月折扣的時間調整價格。折扣堆疊已從產品移除。</td></tr>
+  <tr><td><code>CalendarDay.nonRefundablePrice</code></td><td>舊版：<code>refundablePrice</code> + 不可退款折扣。折扣堆疊已從產品移除。</td></tr>
+  <tr><td><code>CalendarDay.effectiveDailyPriceRefundable</code></td><td>內部流水線階段：時間調整價格上的完整折扣堆疊。</td></tr>
+  <tr><td><code>CalendarDay.effectiveDailyPriceNonRefundable</code></td><td>內部：同上 + 不可退款折扣。</td></tr>
+</table>
+</div>
+
+<h3>正確使用模式</h3>
+<pre><code>// ✓ 正式欄位 — 永遠使用這個
+const price = day.recommendedDailyPrice ?? day.basePrice;
+
+// ✗ 錯誤 — 市場參考 ≠ 建議定價
+const price = day.baseDailyPrice;
+
+// ✗ 錯誤 — 不明確的舊版別名
+const price = day.basePrice;</code></pre>
+
+<div class="callout callout-infer">
+  <strong>推論 — Demo vs 正式</strong>
+  <code>src/core/pricingCore.ts</code> 產生展示資料。它將 <code>basePrice</code> 與 <code>recommendedDailyPrice</code> 設為相同的需求調整值 — 市場 / 建議的區別在此沒有意義。正式 Worker 將兩者計算為獨立值（<code>baseDailyPrice</code> = 原始市場、<code>recommendedDailyPrice</code> = 需求調整後）。
+</div>
+<div class="sources">來源：docs/report-contract.md、worker/core/dynamic_pricing.py</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s10">
+<h2>10. 定價策略</h2>
+
+<div class="diagram-box">
+  <div class="diagram-title">定價流水線 — 逐日資料流</div>
+  <svg viewBox="0 0 720 110" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'PingFang TC','Microsoft JhengHei',sans-serif">
+    <defs>
+      <marker id="arr4" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#9a9a94"/>
+      </marker>
+    </defs>
+
+    <!-- Stage 1 -->
+    <rect x="4" y="12" width="128" height="86" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="68" y="36" text-anchor="middle" font-size="12" font-weight="700">① 爬取 Airbnb</text>
+    <text x="68" y="54" text-anchor="middle" font-size="10.5" fill="#6b6b65">1 晚掛牌價</text>
+    <text x="68" y="70" text-anchor="middle" font-size="10.5" fill="#6b6b65">逐取樣日期</text>
+    <text x="68" y="86" text-anchor="middle" font-size="9.5" fill="#9a9a94">collect_search_comps</text>
+    <line x1="132" y1="55" x2="155" y2="55" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr4)"/>
+
+    <!-- Stage 2 -->
+    <rect x="155" y="12" width="130" height="86" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="220" y="36" text-anchor="middle" font-size="12" font-weight="700">② 篩選 + 評分</text>
+    <text x="220" y="54" text-anchor="middle" font-size="10.5" fill="#6b6b65">嚴格 / 中等 / 寬鬆</text>
+    <text x="220" y="70" text-anchor="middle" font-size="10.5" fill="#6b6b65">相似度計算</text>
+    <text x="220" y="86" text-anchor="middle" font-size="9.5" fill="#9a9a94">similarity.py</text>
+    <line x1="285" y1="55" x2="308" y2="55" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr4)"/>
+
+    <!-- Stage 3 -->
+    <rect x="308" y="12" width="130" height="86" rx="7" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="373" y="36" text-anchor="middle" font-size="12" font-weight="700">③ baseDailyPrice</text>
+    <text x="373" y="54" text-anchor="middle" font-size="10.5" fill="#1a6b3a">相似度加權</text>
+    <text x="373" y="70" text-anchor="middle" font-size="10.5" fill="#1a6b3a">前 K 名中位數</text>
+    <text x="373" y="86" text-anchor="middle" font-size="9.5" fill="#2d9956">pricing_engine.py</text>
+    <line x1="438" y1="55" x2="461" y2="55" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr4)"/>
+
+    <!-- Stage 4 -->
+    <rect x="461" y="12" width="130" height="86" rx="7" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="526" y="36" text-anchor="middle" font-size="12" font-weight="700">④ × 需求調整</text>
+    <text x="526" y="54" text-anchor="middle" font-size="10.5" fill="#92600a">週末 / 尖峰加成</text>
+    <text x="526" y="70" text-anchor="middle" font-size="10.5" fill="#92600a">市場緊俏度</text>
+    <text x="526" y="86" text-anchor="middle" font-size="9.5" fill="#c47f1a">dynamic_pricing.py</text>
+    <line x1="591" y1="55" x2="614" y2="55" stroke="#9a9a94" stroke-width="1.5" marker-end="url(#arr4)"/>
+
+    <!-- Stage 5 (canonical output) -->
+    <rect x="614" y="12" width="102" height="86" rx="7" fill="#fff3ef" stroke="#d4450f" stroke-width="2"/>
+    <text x="665" y="36" text-anchor="middle" font-size="11" font-weight="700" fill="#d4450f">⑤ recommended</text>
+    <text x="665" y="52" text-anchor="middle" font-size="11" font-weight="700" fill="#d4450f">DailyPrice</text>
+    <text x="665" y="70" text-anchor="middle" font-size="10" fill="#d4450f">正式欄位</text>
+    <text x="665" y="86" text-anchor="middle" font-size="9.5" fill="#c47f1a">CalendarDay</text>
+  </svg>
+</div>
+
+<h3>標準流水線（模式 A 與 B）</h3>
+<ol>
+  <li><strong>爬取</strong> — 每個取樣日期的 Airbnb 搜尋結果。透過 <code>collect_search_comps</code> 進行雙晚搜尋（2 晚優先、1 晚備援）。</li>
+  <li><strong>篩選</strong> — 房源類型硬性門檻，接著是嚴格 / 中等 / 寬鬆容差層（詳見第 12 節）。</li>
+  <li><strong>評分</strong> — 對每個通過篩選的比較物件與目標房源進行相似度評分（詳見第 11 節）。</li>
+  <li><strong>建議</strong> — 高於門檻的前 K 名比較物件的相似度加權均值，含可選新房源折扣與價格合理性權重。</li>
+  <li><strong>baseDailyPrice</strong> = 該日期的相似度加權市場中位數。</li>
+  <li><strong>demandAdjustment</strong> = 週末加成 + 尖峰 / 活動旗標 + 市場緊俏度（詳見第 14 節）。鉗制範圍 0.90–1.05。</li>
+  <li><strong>recommendedDailyPrice</strong> = <code>round(baseDailyPrice × demandAdjustment)</code>。這是正式輸出。時間折扣<em>排除在外</em>。</li>
+</ol>
+
+<h3>基準流水線（模式 C）</h3>
+<p>當使用者提供偏好的可比房源 URL 時，該房源的基準優先引擎接管，結果再混合回標準日曆。<em>完整細節見第 13 節。</em></p>
+
+<h3>插值</h3>
+<p>未直接取樣的日期由 <code>interpolate_missing_days()</code> 填充 — 在相鄰觀察值之間進行線性插值。當無相鄰觀察值時，插值日期回退使用視窗層級的整體中位數。</p>
+
+<div class="sources">來源：worker/core/pricing_engine.py、worker/core/dynamic_pricing.py、worker/core/benchmark.py、docs/report-contract.md</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s11">
+<h2>11. 相似度計算方式</h2>
+<p>相似度是目標房源與每個候選比較物件之間計算的 0–1 加權分數。它同時決定篩選門檻與定價權重。</p>
+
+<h3>權重（V1 — 來自 <code>worker/core/similarity.py</code>）</h3>
+<p>最大總權重 = 3.0 + 2.8 + 2.2 + 1.8 + 1.2 + 1.0 = <strong>12.0</strong></p>
+
+<div style="margin:16px 0">
+  <div class="weight-row">
+    <span class="weight-label">property_type</span>
+    <div class="weight-bar-track"><div class="weight-bar-fill" style="width:100%"></div></div>
+    <span class="weight-num">3.0</span>
+    <span class="weight-tol">類別型</span>
+  </div>
+  <div class="weight-row">
+    <span class="weight-label">bedrooms</span>
+    <div class="weight-bar-track"><div class="weight-bar-fill" style="width:93.3%"></div></div>
+    <span class="weight-num">2.8</span>
+    <span class="weight-tol">容差 ±2</span>
+  </div>
+  <div class="weight-row">
+    <span class="weight-label">baths</span>
+    <div class="weight-bar-track"><div class="weight-bar-fill" style="width:73.3%"></div></div>
+    <span class="weight-num">2.2</span>
+    <span class="weight-tol">容差 ±1.5</span>
+  </div>
+  <div class="weight-row">
+    <span class="weight-label">accommodates</span>
+    <div class="weight-bar-track"><div class="weight-bar-fill" style="width:60%"></div></div>
+    <span class="weight-num">1.8</span>
+    <span class="weight-tol">容差 ±3</span>
+  </div>
+  <div class="weight-row">
+    <span class="weight-label">beds</span>
+    <div class="weight-bar-track"><div class="weight-bar-fill" style="width:40%"></div></div>
+    <span class="weight-num">1.2</span>
+    <span class="weight-tol">容差 ±3</span>
+  </div>
+  <div class="weight-row">
+    <span class="weight-label">amenities</span>
+    <div class="weight-bar-track"><div class="weight-bar-fill" style="width:33.3%"></div></div>
+    <span class="weight-num">1.0</span>
+    <span class="weight-tol">Jaccard</span>
+  </div>
+</div>
+
+<h3>數值特徵公式</h3>
+<div class="formula">
+<span class="comment"># 對每個容差為 `tol`、權重為 `w` 的數值特徵：</span>
+score_component = <span class="key">max</span>(<span class="num">0.0</span>, <span class="num">1.0</span> - <span class="key">abs</span>(target - candidate) / tol) * w
+
+<span class="comment"># 若任一值為 None（未知欄位）：部分分數 = 0.35 × w</span>
+<span class="comment"># 缺少欄位不會歸零總分 — 而是按比例降低。</span>
+</div>
+
+<h3>房源類型類別公式</h3>
+<div class="formula">
+<span class="comment"># 兩者已知 → 完全匹配</span>
+score += (<span class="num">1.0</span> if target.property_type == cand.property_type else <span class="num">0.0</span>) * <span class="num">3.0</span>
+<span class="comment"># 任一未知 → 部分分數（0.35 × 3.0 = 1.05）</span>
+</div>
+
+<h3>設施重疊（Jaccard）</h3>
+<div class="formula">
+overlap = |target_amenities ∩ cand_amenities| / |target_amenities ∪ cand_amenities|
+score += overlap * <span class="num">1.0</span>
+<span class="comment"># 任一端為空 → 部分分數 0.35</span>
+</div>
+
+<h3>最終分數</h3>
+<div class="formula">
+similarity = sum(score_components) / sum(weights)   <span class="comment"># 範圍：0.0 – 1.0</span>
+</div>
+
+<h3>相似度門檻</h3>
+<p>任何 <code>similarity &lt; 0.40</code> 的比較物件均被排除於定價權重之外。此門檻在篩選層之後、<code>recommend_price()</code> 被呼叫之前套用。被提升排名的比較物件（釘選 / 偏好比較物件使用 2× 加成）仍以其原始相似度分數接受門檻檢查。</p>
+
+<h3>釘選比較物件排名加成</h3>
+<div class="formula">
+effective_score = <span class="key">min</span>(raw_similarity * <span class="num">2.0</span>, <span class="num">0.98</span>)   <span class="comment"># 僅用於排名順序</span>
+pricing_weight  = raw_similarity                                    <span class="comment"># 定價永遠使用原始分數</span>
+</div>
+
+<div class="callout callout-current">
+  <strong>重要區別</strong>
+  偏好 / 釘選比較物件被提升以在候選清單中排名靠前，增加進入定價前 K 名的機會。但其實際定價權重是原始（未加成）的相似度分數 — 加成分數絕不會膨脹定價。
+</div>
+
+<div class="sources">來源：worker/core/similarity.py、worker/core/pricing_engine.py</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s12">
+<h2>12. 比較物件篩選方式</h2>
+
+<p>篩選發生在相似度評分之前。目標是在避免房源類型污染的同時，找到最大的結構一致比較物件集合。</p>
+
+<h3>房源類型硬性門檻</h3>
+<div class="callout callout-current">
+  <strong>適用於所有層級 — 包含寬鬆層</strong>
+  此門檻阻擋與目標互斥的房源類型：
+  <ul style="margin-top:8px">
+    <li><code>entire_home</code> 目標 → 拒絕 <code>private_room</code> 與 <code>shared_room</code> 比較物件</li>
+    <li><code>private_room</code> 目標 → 拒絕 <code>entire_home</code> 比較物件</li>
+    <li>未知比較物件類型 → 允許（無法對無法讀取的資料施加懲罰）</li>
+    <li>未知目標類型 → 不套用門檻</li>
+  </ul>
+</div>
+
+<h3>三層備援</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>層級</th><th>容差範圍</th><th>必要條件</th><th>通過所需最低比較物件數</th></tr>
+  <tr>
+    <td><strong>嚴格</strong></td>
+    <td>accommodates ±2、bedrooms ±1、baths ±1、beds ±2</td>
+    <td>bedrooms 與 accommodates 必須非空</td>
+    <td>6</td>
+  </tr>
+  <tr>
+    <td><strong>中等</strong></td>
+    <td>accommodates ±3、bedrooms ±2、baths ±1.5</td>
+    <td>bedrooms 與 accommodates 必須非空</td>
+    <td>4</td>
+  </tr>
+  <tr>
+    <td><strong>寬鬆</strong></td>
+    <td>accommodates ±5、bedrooms ±3、baths ±2</td>
+    <td>無（允許 bedrooms / accommodates 缺失）</td>
+    <td>0（但若 0 個通過則 stage = <code>insufficient_data</code>）</td>
+  </tr>
+</table>
+</div>
+
+<p>解析順序：先嘗試嚴格 → 若少於 6 個比較物件，嘗試中等 → 若少於 4 個，落入寬鬆。寬鬆層不會將 0 個比較物件作為有效集合傳回呼叫端 — 它改為傳回 <code>insufficient_data</code> 階段，在上游觸發錯誤條件。</p>
+
+<h3>篩選後：相似度評分 + 門檻</h3>
+<p>通過篩選層的所有比較物件均進行相似度評分。原始分數 &lt; 0.40 的比較物件，無論通過哪個篩選層，都會被排除於定價之外。篩選階段（嚴格 / 中等 / 寬鬆）存入 <code>compsSummary.filterStage</code>，並在報表透明度面板中顯示。</p>
+
+<div class="sources">來源：worker/core/similarity.py → filter_similar_candidates()</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s13">
+<h2>13. 基準優先定價路徑</h2>
+
+<p>當使用者提供一或多個偏好的可比房源 URL（釘選基準）時，系統切換至兩階段定價模型，以基準房源的實際定價（而非市場中位數）錨定估算。</p>
+
+<h3>階段 1 — 基準錨定價格</h3>
+<p>Worker 直接導航至基準房源頁面（Playwright）並讀取每個取樣日期的預訂小工具夜間價格。這是主要且最可靠的價格信號。若 1 晚萃取失敗，以 2 晚最低入住備援重試（仍傳回每晚價格）。</p>
+
+<p>若基準房源出現在 Airbnb 搜尋結果中，其價格則從搜尋卡片擷取（較高信心度，標記為 <code>search_hit</code>）。直接頁面萃取標記為 <code>direct_page</code>（較低信心度）。失敗 → <code>failed</code>。</p>
+
+<h3>階段 2 — 市場驗證 / 調整</h3>
+<p>從相同搜尋中收集較小的其他市場比較物件集合。其中位數成為<strong>市場參考價格</strong>。計算基準與市場之間的原始偏移量，鉗制至 ±25%，再依有效市場權重縮放後作為修正量套用。</p>
+
+<div class="formula">
+<span class="comment"># 核心混合公式</span>
+raw_offset    = (market_median - benchmark_price) / benchmark_price
+capped_adj    = <span class="key">clamp</span>(raw_offset, <span class="num">-0.25</span>, <span class="num">+0.25</span>)
+final_price   = benchmark_price × (<span class="num">1</span> + capped_adj × effective_weight)
+
+<span class="comment"># 依基準抓取信心度的有效市場權重：</span>
+<span class="comment">#   search_hit (高)       → 0.30  （基準最可信）</span>
+<span class="comment">#   direct_page (中)      → 0.42  （有些不確定性）</span>
+<span class="comment">#   direct_page (低)      → 0.55  （本文萃取，最不可靠）</span>
+
+<span class="comment"># 額外調整：</span>
+<span class="comment"># - 市場比較物件少於 5 個 → 權重按比例縮小</span>
+<span class="comment"># - 市場與基準差距 > 40% → 離群值保護，權重減半</span>
+<span class="comment"># - 結構相似度（基準 vs 目標）< 0.45 → 權重 × 0.65</span>
+<span class="comment"># - 結構相似度 0.45–0.70 → 權重 × 0.85</span>
+</div>
+
+<h3>次要比較物件共識</h3>
+<p>可選的次要釘選基準 URL 被收集，其價格與主要基準和市場進行比較。共識信號（<code>strong</code> / <code>mixed</code> / <code>divergent</code>）透過小幅乘數進一步微調有效市場權重（0.90 支持 → 1.15 反對）。範圍刻意設計得很窄，使次要比較物件無法覆蓋主要信號。</p>
+
+<h3>透明度輸出</h3>
+<p><code>resultSummary.benchmarkInfo</code> 中的基準區塊公開：基準 URL、平均價格、抓取狀態 / 方法、結構匹配分數 + 不匹配程度、市場偏移 %、有效權重、離群值旗標及每個次要比較物件的資料。</p>
+
+<div class="callout callout-risk">
+  <strong>注意事項 — 基準設定</strong>
+  <code>benchmark.py</code> 中的基準常數無法透過環境變數設定（與夜間策略不同）。更改 <code>BENCHMARK_MARKET_WEIGHT</code>、<code>BENCHMARK_MAX_ADJ</code> 或信心度表格值需要程式碼部署。
+</div>
+
+<div class="sources">來源：worker/core/benchmark.py、docs/report-contract.md §Benchmark Architecture</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s14">
+<h2>14. 動態需求與時間調整</h2>
+
+<p>每個日曆日均獲得一個 <code>demandScore</code> 及兩個乘數。<strong>需求調整</strong>用於產生 <code>recommendedDailyPrice</code>。<strong>時間乘數</strong>額外套用以產生 <code>priceAfterTimeAdjustment</code> — 這是內部流水線欄位，非正式建議定價。</p>
+
+<h3>需求評分公式</h3>
+<div class="formula">
+demand_score = <span class="key">clamp</span>(
+    <span class="num">0.50</span>                            <span class="comment"># 中性基準</span>
+    + <span class="num">0.20</span> × premium_index             <span class="comment"># 當日中位數 vs 前後 ±3 天</span>
+    + <span class="num">0.15</span> × tightness_index           <span class="comment"># (p75-p25)/中位數 — 低緊俏度 = 供應緊張</span>
+    + weekend_boost                     <span class="comment"># 五 / 六 = +0.08，日 = +0.04，平日 = 0</span>
+    + flag_boost,                       <span class="comment"># 尖峰 / 活動 = +0.15，低需求 = -0.15，否則 = 0</span>
+    <span class="num">0.0</span>, <span class="num">1.0</span>
+)
+</div>
+
+<h3>需求調整（套用於 recommendedDailyPrice）</h3>
+<div class="formula">
+demand_adjustment = <span class="key">clamp</span>(<span class="num">1.0</span> - (<span class="num">0.6</span> - demand_score) × <span class="num">0.10</span>, <span class="num">0.90</span>, <span class="num">1.05</span>)
+<span class="comment"># 中性評分（0.6）→ 1.00（無變化）
+# 高需求（0.8+）  → 1.02–1.05（輕微溢價）
+# 低需求（0.4）   → 0.98–0.90（輕微折扣）
+# 範圍：baseDailyPrice 的 ×0.90 至 ×1.05</span>
+</div>
+
+<h3>時間乘數（僅套用於 priceAfterTimeAdjustment — 臨時折扣）</h3>
+<div class="formula">
+compute_time_multiplier(today, target_date):
+    days_away = target_date - today
+    if days_away > <span class="num">30</span>: return <span class="num">1.00</span>
+    if days_away > <span class="num">14</span>: return <span class="num">0.97</span>   <span class="comment"># -3%</span>
+    if days_away > <span class="num">7</span>:  return <span class="num">0.92</span>   <span class="comment"># -8%</span>
+    if days_away > <span class="num">3</span>:  return <span class="num">0.85</span>   <span class="comment"># -15%</span>
+    return <span class="num">0.75</span>                          <span class="comment"># 0–3 天：-25%</span>
+</div>
+
+<h3>最終乘數（僅限內部）</h3>
+<div class="formula">
+final_multiplier = <span class="key">clamp</span>(time_multiplier × demand_adjustment, <span class="num">0.65</span>, <span class="num">1.05</span>)
+priceAfterTimeAdjustment = baseDailyPrice × final_multiplier
+
+<span class="comment"># recommendedDailyPrice = baseDailyPrice × demand_adjustment   ← 正式欄位</span>
+<span class="comment"># priceAfterTimeAdjustment 含時間折扣 ← 內部 / 舊版欄位</span>
+</div>
+
+<div class="callout callout-risk">
+  <strong>關鍵區別</strong>
+  <code>recommendedDailyPrice</code> 刻意<em>不</em>對臨時日期套用折扣。它代表房東應發布的建議定價。包含時間折扣的 <code>priceAfterTimeAdjustment</code> 是內部流水線階段；日曆中的 <code>basePrice</code> 因向後相容性而等於此值，供舊版 UI 元件使用。
+</div>
+
+<div class="sources">來源：worker/core/dynamic_pricing.py、docs/report-contract.md</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s15">
+<h2>15. 夜間爬取策略</h2>
+
+<p>夜間任務是<strong>有預算的收集器</strong>。與均勻取樣 ~16 / 30 天（即時行為）不同，它們使用分層計劃，將觀察集中在近期日期（警示關鍵），並對較遠日期逐步降低頻率。</p>
+
+<h3>四個層級（預設值，均可透過環境變數調整）</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>層級</th><th>日期範圍</th><th>採集頻率</th><th>~觀察次數（30 晚）</th><th>環境變數</th></tr>
+  <tr>
+    <td><code>near_term</code></td>
+    <td>D0–D3</td>
+    <td>每晚</td>
+    <td>4</td>
+    <td><code>NIGHTLY_TIER1_END=4</code></td>
+  </tr>
+  <tr>
+    <td><code>medium</code></td>
+    <td>D4–D10</td>
+    <td>每 2 晚</td>
+    <td>4</td>
+    <td><code>NIGHTLY_TIER2_END=11</code>、<code>TIER2_STEP=2</code></td>
+  </tr>
+  <tr>
+    <td><code>far</code></td>
+    <td>D11–D21</td>
+    <td>每 3 晚</td>
+    <td>4</td>
+    <td><code>NIGHTLY_TIER3_END=22</code>、<code>TIER3_STEP=3</code></td>
+  </tr>
+  <tr>
+    <td><code>sparse</code></td>
+    <td>D22–D29</td>
+    <td>僅首尾兩天</td>
+    <td>2</td>
+    <td><code>NIGHTLY_TIER4_COUNT=2</code></td>
+  </tr>
+</table>
+</div>
+
+<p><strong>硬性上限：</strong>觀察日期總數永遠不超過 <code>NIGHTLY_MAX_OBSERVE_DATES=15</code>（基準模式為 10）。分層計算後，計劃集合截斷至前 <code>hard_cap</code> 個索引，保留近期優先順序。剩餘 ~16 天以線性插值填充。</p>
+
+<h3>每次查詢限制（vs 即時預設值）</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>設定</th><th>即時</th><th>夜間（標準）</th><th>夜間（基準）</th></tr>
+  <tr><td>每次查詢滾動輪數</td><td>2</td><td>1</td><td>1</td></tr>
+  <tr><td>每次查詢最大卡片數</td><td>30</td><td>20</td><td>15</td></tr>
+  <tr><td>最大觀察日期數</td><td>~16（共 30 天）</td><td>15</td><td>10</td></tr>
+</table>
+</div>
+
+<h3>熔斷器（提前停止）</h3>
+<p>若連續 <code>NIGHTLY_EARLY_STOP_THRESHOLD=3</code> 次日期查詢無法取得價格結果（挑戰頁面或空 Airbnb 搜尋），迴圈停止。已收集的觀察資料被保留；剩餘日期以插值處理。若已有足夠有效價格，任務仍完成（不報錯）。<code>result_core_debug.nightly_crawl.early_stop_triggered</code> 記錄是否觸發此機制。</p>
+
+<h3>Debug 區塊</h3>
+<p>每份夜間新鮮爬取報表均包含 <code>result_core_debug.nightly_crawl</code>，含層級明細、計劃 / 查詢 / 觀察 / 推算索引清單，及提前停止狀態。即時報表不包含此區塊 — 其缺席表示這是標準即時執行。</p>
+
+<div class="sources">來源：worker/core/nightly_strategy.py、docs/report-contract.md §Nightly Crawl Strategy</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s16">
+<h2>16. 資料真實性規則</h2>
+
+<h3>儀表板看板選擇</h3>
+<p><code>GET /api/listings</code> 使用以下確切篩選條件從 <code>listing_reports</code> 為每個房源選取 <code>latestReport</code>：</p>
+<pre><code>trigger     = "scheduled"
+status      = "ready"
+report_type ≠ "forecast_snapshot"</code></pre>
+
+<p>使用最新的符合連結。即時報表（<code>trigger = "manual" | "rerun"</code>）<strong>永遠不會</strong>被選為 <code>latestReport</code>。它們只出現在 <code>recentReports</code>（歷史面板）中。</p>
+
+<div class="callout callout-infer">
+  <strong>推論</strong>
+  <code>result_core_debug</code> 中的 <code>execution_policy</code> 欄位使路由意圖可被機器讀取，但儀表板選擇查詢仍直接使用資料庫的 <code>trigger + status + report_type</code> 欄位。<code>execution_policy</code> 欄位可供未來篩選使用（例如區分 <code>nightly_board_refresh</code> 與 <code>nightly_alert_training_refresh</code>），無需結構描述遷移。
+</div>
+
+<h3>按報表類型的規則</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>報表類型</th><th>成為看板？</th><th>出現於歷史？</th><th>可分享？</th></tr>
+  <tr>
+    <td><code>nightly_board_refresh</code></td>
+    <td><span class="badge badge-green">是</span> — status=ready 時</td>
+    <td>是（透過 <code>recentReports</code>）</td>
+    <td>是（<code>/r/[shareId]</code>）</td>
+  </tr>
+  <tr>
+    <td><code>interactive_live_report</code></td>
+    <td><span class="badge badge-gray">永不</span></td>
+    <td>是</td>
+    <td>是</td>
+  </tr>
+  <tr>
+    <td><code>forecast_snapshot</code></td>
+    <td><span class="badge badge-gray">明確拒絕</span></td>
+    <td>已篩除</td>
+    <td>是（舊版）</td>
+  </tr>
+</table>
+</div>
+
+<h3>儀表板「即時資料」的決定因素</h3>
+<ul>
+  <li><code>market_captured_at</code> — Airbnb 市場資料被爬取的時間（由 Worker 設定，非 API）</li>
+  <li><code>completed_at</code> — 報表轉為 <code>status=ready</code> 的時間（由 Worker 設定）</li>
+  <li><code>worker_heartbeat_at</code> — 前端用於在報表執行中顯示過時橫幅</li>
+</ul>
+
+<p>夜間報表只有在狀態達到 <code>ready</code> 後才成為看板真實資料來源。若夜間任務報錯，上一份就緒的夜間報表仍保留在看板 — 不會推送過時或部分結果。</p>
+
+<div class="sources">來源：docs/report-contract.md、src/app/api/internal/nightly/schedule/route.ts、worker/main.py</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s17">
+<h2>17. 快取、重用與觀察說明</h2>
+
+<h3>快取（即時報表）</h3>
+<p>即時報表有 24 小時快取 TTL。若 24 小時內存在匹配 <code>cache_key</code> 且 <code>status=ready</code> 的 <code>pricing_reports</code> 列，API 可直接傳回而無需排入新任務（<code>core_version</code> = <code>cache-hit</code>）。夜間報表永遠略過快取（<code>result_core_debug</code> 中的 <code>force_rerun: true</code>）。</p>
+
+<h3>Phase 6A — 觀察優先重用（僅條件模式）</h3>
+<p>爬取 Airbnb 前，Worker 檢查 <code>target_price_observations</code> 是否有涵蓋所請求日期視窗的最新資料。此機制僅在以下條件下啟用：</p>
+<ul>
+  <li>任務為即時（<code>is_nightly=False</code>）</li>
+  <li>有可用的 <code>saved_listing_id</code>（房源捷徑 / 重新執行流程）</li>
+  <li><code>input_mode</code> 為 <code>criteria</code>、<code>criteria-by-city</code> 或 <code>criteria-by-zip</code>（URL 模式永遠重新爬取）</li>
+</ul>
+
+<h4>新鮮度門檻（Phase 6A，均可透過環境變數設定）</h4>
+<div class="table-wrap">
+<table>
+  <tr><th>層級</th><th>日期範圍</th><th>最大觀察資料年齡</th><th>環境變數</th></tr>
+  <tr><td><code>near_term</code></td><td>D0–D3</td><td>12 小時</td><td><code>OBS_FRESH_NEAR_TERM_HOURS</code></td></tr>
+  <tr><td><code>medium</code></td><td>D4–D10</td><td>36 小時</td><td><code>OBS_FRESH_MEDIUM_HOURS</code></td></tr>
+  <tr><td><code>far</code></td><td>D11+</td><td>72 小時</td><td><code>OBS_FRESH_FAR_HOURS</code></td></tr>
+</table>
+</div>
+
+<div class="callout callout-reserved">
+  <strong>Phase 6A 限制（目前）</strong>
+  全有或全無門檻：若任何日期缺失或過時，整份報表回退至即時爬取。按日期混用觀察資料與即時爬取（部分日期重用）是 Phase 6B，尚未實作。
+</div>
+
+<h3>觀察資料儲存</h3>
+<p><code>target_price_observations</code> 由夜間任務寫入（透過 <code>worker/core/observations.py</code>），由即時任務讀取（透過 <code>worker/core/observation_reuse.py</code>）。層級邊界使用與 <code>nightly_strategy.py</code> 相同的環境變數，確保新鮮度門檻與收集頻率保持一致。</p>
+
+<div class="sources">來源：worker/core/observation_reuse.py、worker/core/observations.py、docs/report-contract.md</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s18">
+<h2>18. 已知缺口、保留勾點與風險</h2>
+
+<div class="callout callout-reserved">
+  <strong>保留：nightly_alert_training_refresh</strong>
+  此政策已在 TypeScript 與 Python 中定義，但尚無 API 路由發出。當警示模型訓練流水線接入排程器後，它將被加入發出點，並在 <code>run_nightly_job()</code> 內部以不同方式路由。目前請勿在此政策上建立邏輯。
+</div>
+
+<div class="callout callout-reserved">
+  <strong>保留：execution_policy 作為資料庫欄位</strong>
+  目前僅存放在 JSONB <code>result_core_debug</code> blob 內部。下一個計劃階段是新增正式的 <code>execution_policy TEXT</code> 欄位（可建索引、可查詢，無需 JSONB 萃取），並從 <code>resolve_execution_policy()</code> / <code>deriveExecutionPolicy()</code> 回填。
+</div>
+
+<div class="callout callout-reserved">
+  <strong>保留：Phase 6B — 部分觀察資料重用</strong>
+  Phase 6A 需要 100% 日期覆蓋率。Phase 6B 將允許針對過時日期混用最新觀察資料與目標即時爬取。尚未設計或實作。
+</div>
+
+<div class="callout callout-risk">
+  <strong>風險：相似度權重無法透過環境變數設定</strong>
+  <code>worker/core/similarity.py</code> 中的六個相似度權重與容差為硬編碼。更改它們需要程式碼部署，且可能改變所有現有房源的定價。
+</div>
+
+<div class="callout callout-risk">
+  <strong>風險：基準常數無法透過環境變數設定</strong>
+  <code>benchmark.py</code> 中的 <code>BENCHMARK_MARKET_WEIGHT</code>、<code>BENCHMARK_MAX_ADJ</code> 及信心度權重表為硬編碼。所有夜間策略設定均可透過環境變數調整；基準設定尚未支援。
+</div>
+
+<div class="callout callout-risk">
+  <strong>風險：listing_timezone 不總是有值</strong>
+  夜間排程器使用 <code>listing_timezone</code> 計算正確的「本地明天」日期範圍。缺少此欄位的房源回退至 <code>America/Los_Angeles</code>。UTC+ 時區但未填寫時區的房源可能收到從錯誤日曆日開始的日期範圍。
+</div>
+
+<div class="callout callout-risk">
+  <strong>風險：舊版 basePrice 不明確性</strong>
+  <code>CalendarDay.basePrice</code> 等於 <code>priceAfterTimeAdjustment</code>（含臨時時間折扣）而非 <code>baseDailyPrice</code>（原始市場中位數）。任何在不了解此區別下讀取 <code>basePrice</code> 進行價格呈現的 UI 元件，對近期日期顯示的是折扣後的值。
+</div>
+
+<div class="callout callout-infer">
+  <strong>推論：src/core/pricingCore.ts 非正式定價</strong>
+  此 TypeScript 模組為 <code>/r/demo</code> 路由產生確定性的預設資料。它不連接 Python Worker 或任何即時 Airbnb 資料。新的 UI 元件不應在展示內容以外的任何情況下呼叫此模組。
+</div>
+
+<div class="sources">來源：docs/report-contract.md §Next Phases、worker/core/report_policy.py、worker/core/benchmark.py、worker/core/similarity.py</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s19">
+<h2>19. 原始碼參考</h2>
+
+<div class="table-wrap">
+<table>
+  <tr><th>檔案</th><th>在本文件中的角色</th></tr>
+  <tr><td><code>docs/report-contract.md</code></td><td>正式定價合約、執行政策規格、夜間爬取策略文件、儀表板真實資料來源規則、基準架構文件</td></tr>
+  <tr><td><code>docs/PROJECT_MEMORY.md</code></td><td>產品北極星、技術堆疊、API 合約摘要、折扣規則</td></tr>
+  <tr><td><code>worker/main.py</code></td><td>輪詢迴圈、認領、心跳、<code>process_job</code>、派送、<code>_execute_analysis</code>、執行時設定常數</td></tr>
+  <tr><td><code>worker/core/report_policy.py</code></td><td>政策類型定義、<code>NIGHTLY_POLICIES</code>、<code>resolve_execution_policy()</code></td></tr>
+  <tr><td><code>worker/core/nightly_strategy.py</code></td><td>層級設定常數、<code>NightlyCrawlPlan</code>、<code>build_nightly_crawl_plan()</code>、熔斷器邏輯</td></tr>
+  <tr><td><code>worker/core/pricing_engine.py</code></td><td><code>recommend_price()</code>（相似度加權均值）、釘選比較物件加成、<code>build_transparent_result()</code></td></tr>
+  <tr><td><code>worker/core/similarity.py</code></td><td>所有相似度權重與容差、<code>similarity_score()</code>、<code>filter_similar_candidates()</code>、房源類型硬性門檻、門檻常數</td></tr>
+  <tr><td><code>worker/core/dynamic_pricing.py</code></td><td>需求評分公式、<code>compute_time_multiplier()</code>、<code>compute_demand_adjustment()</code>、<code>compute_dynamic_pricing_adjustment()</code></td></tr>
+  <tr><td><code>worker/core/benchmark.py</code></td><td>階段 1/2 混合公式、信心度權重、離群值保護、結構不匹配因子、次要比較物件共識</td></tr>
+  <tr><td><code>worker/core/observation_reuse.py</code></td><td>Phase 6A 新鮮度門檻、合格門檻、範圍限制</td></tr>
+  <tr><td><code>src/app/api/internal/nightly/schedule/route.ts</code></td><td>排程器身份驗證、去重複視窗、時區感知日期範圍、合格門檻、強制略過</td></tr>
+  <tr><td><code>src/lib/reportPolicy.ts</code></td><td>TypeScript 政策類型、<code>executionPolicyMeta()</code>、<code>deriveExecutionPolicy()</code></td></tr>
+  <tr><td><code>src/core/pricingCore.ts</code></td><td>僅供展示的定價模組（非正式）</td></tr>
+</table>
+</div>
+
+<p style="margin-top:24px;font-size:.82rem;color:var(--muted)">本文件反映 2025 年 4 月的程式碼庫狀態。推論行為標記為「推論」。若程式碼與本文件有出入，以程式碼為準。</p>
+</section>
+
+<!-- ═══════════════════════════════════════════════════
+     DATABASE SECTIONS 20–25
+════════════════════════════════════════════════════ -->
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s20">
+<h2>20. 資料庫總覽</h2>
+
+<p>AiraHost 使用 Supabase 管理的 PostgreSQL 14+ 作為唯一的持久化資料儲存。資料庫承擔四個不同角色：</p>
+<ol>
+  <li><strong>任務佇列</strong> — <code>pricing_reports</code> 同時是「待處理任務」與「已完成報表」的單一記錄，Worker 透過原子性 Postgres 函式認領任務。</li>
+  <li><strong>使用者資料儲存</strong> — <code>saved_listings</code>、<code>listing_reports</code>、<code>market_tracking_preferences</code> 儲存使用者定義的房源與報表歷史。</li>
+  <li><strong>歷史時序資料</strong> — 四個觀察表（<code>target_price_observations</code>、<code>benchmark_price_observations</code>、<code>market_comp_observations</code>、<code>market_price_observations</code>）以僅附加模式儲存夜間爬取資料，供未來 ML 訓練使用。</li>
+  <li><strong>功能狀態</strong> — <code>auto_apply_runs</code>、<code>auto_apply_run_nights</code>、<code>pricing_alert_log</code>、<code>comparable_pool_entries</code> 儲存自動化功能的執行狀態與稽核記錄。</li>
+</ol>
+
+<h3>存取層分離</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>存取者</th><th>憑證</th><th>RLS</th><th>可寫入</th></tr>
+  <tr><td>已登入使用者（瀏覽器）</td><td>anon / authenticated JWT</td><td>完全套用</td><td>僅限自己擁有的列</td></tr>
+  <tr><td>Next.js API 路由</td><td>service role key（伺服器端）</td><td>繞過</td><td>代表使用者寫入；用於共享報表讀取</td></tr>
+  <tr><td>Python Worker（Railway）</td><td>service role key</td><td>繞過</td><td>所有 Worker 寫入路徑（claims、results、observations）</td></tr>
+</table>
+</div>
+
+<div class="callout callout-current">
+  <strong>目前行為</strong>
+  共享報表存取（<code>/r/[shareId]</code>）由 Next.js API 路由以 service role key 提供服務。RLS 中<strong>沒有</strong>公開政策允許匿名讀取 <code>pricing_reports</code>。這是刻意設計 — 共享存取由伺服器端控制，而非開放 DB 層。
+</div>
+
+<h3>關鍵 Postgres 函式</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>函式</th><th>定義於</th><th>用途</th></tr>
+  <tr><td><code>claim_pricing_report(token, stale_min, lane, env)</code></td><td>002、012</td><td>原子性認領佇列任務（FOR UPDATE SKIP LOCKED）</td></tr>
+  <tr><td><code>heartbeat_pricing_report(report_id, token)</code></td><td>002</td><td>僅擁有者可更新心跳時間戳</td></tr>
+  <tr><td><code>ingest_market_price_observations(report_id)</code></td><td>016b</td><td>將 result_calendar 展開至 ML 訓練表</td></tr>
+  <tr><td><code>update_updated_at_column()</code></td><td>003</td><td>觸發器函式，自動更新 updated_at</td></tr>
+</table>
+</div>
+
+<div class="sources">來源：supabase/migrations/001–020</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s21">
+<h2>21. 核心資料表與關聯</h2>
+
+<div class="diagram-box">
+  <div class="diagram-title">ER 關聯概覽（主要外鍵關係）</div>
+  <svg viewBox="0 0 820 520" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'PingFang TC','Microsoft JhengHei',sans-serif">
+    <defs>
+      <marker id="errarr" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#9a9a94"/>
+      </marker>
+      <marker id="errarr-b" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#4a80d4"/>
+      </marker>
+      <marker id="errarr-g" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#2d9956"/>
+      </marker>
+      <marker id="errarr-p" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#8b52c9"/>
+      </marker>
+    </defs>
+
+    <!-- auth.users (external) -->
+    <rect x="8" y="200" width="110" height="44" rx="6" fill="#f0f0ec" stroke="#bbb" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <text x="63" y="218" text-anchor="middle" font-size="11" font-weight="600" fill="#888">auth.users</text>
+    <text x="63" y="234" text-anchor="middle" font-size="9.5" fill="#aaa">Supabase Auth</text>
+
+    <!-- saved_listings (CENTRAL) -->
+    <rect x="148" y="170" width="168" height="140" rx="7" fill="#eef4ff" stroke="#4a80d4" stroke-width="2"/>
+    <text x="232" y="192" text-anchor="middle" font-size="12" font-weight="700" fill="#1d5fad">saved_listings</text>
+    <text x="232" y="208" text-anchor="middle" font-size="10" fill="#6b6b65">id (PK)</text>
+    <text x="232" y="222" text-anchor="middle" font-size="10" fill="#6b6b65">user_id → auth.users</text>
+    <text x="232" y="236" text-anchor="middle" font-size="10" fill="#6b6b65">input_attributes JSONB</text>
+    <text x="232" y="250" text-anchor="middle" font-size="10" fill="#6b6b65">listing_timezone</text>
+    <text x="232" y="264" text-anchor="middle" font-size="10" fill="#6b6b65">auto_apply_* · alert_*</text>
+    <text x="232" y="278" text-anchor="middle" font-size="10" fill="#6b6b65">comp_pool_* · target_lat/lng</text>
+    <text x="232" y="296" text-anchor="middle" font-size="9.5" fill="#4a80d4">源頭：夜間任務即時重讀</text>
+
+    <!-- auth.users → saved_listings -->
+    <line x1="118" y1="222" x2="146" y2="222" stroke="#bbb" stroke-width="1.5" marker-end="url(#errarr)"/>
+
+    <!-- pricing_reports -->
+    <rect x="400" y="120" width="180" height="160" rx="7" fill="#fff3ef" stroke="#d4450f" stroke-width="2"/>
+    <text x="490" y="142" text-anchor="middle" font-size="12" font-weight="700" fill="#d4450f">pricing_reports</text>
+    <text x="490" y="158" text-anchor="middle" font-size="10" fill="#6b6b65">id (PK) · share_id UNIQUE</text>
+    <text x="490" y="172" text-anchor="middle" font-size="10" fill="#6b6b65">user_id · listing_id FK</text>
+    <text x="490" y="186" text-anchor="middle" font-size="10" fill="#6b6b65">status: queued/running/ready/error</text>
+    <text x="490" y="200" text-anchor="middle" font-size="10" fill="#6b6b65">job_lane · target_env</text>
+    <text x="490" y="214" text-anchor="middle" font-size="10" fill="#6b6b65">result_summary/calendar JSONB</text>
+    <text x="490" y="228" text-anchor="middle" font-size="10" fill="#6b6b65">completed_at · market_captured_at</text>
+    <text x="490" y="242" text-anchor="middle" font-size="10" fill="#6b6b65">worker_claim_token · attempts</text>
+    <text x="490" y="256" text-anchor="middle" font-size="10" fill="#6b6b65">report_type · source_report_id</text>
+    <text x="490" y="270" text-anchor="middle" font-size="9.5" fill="#d4450f">任務佇列 + 報表記錄合一</text>
+
+    <!-- listing_reports (junction) -->
+    <rect x="270" y="60" width="108" height="72" rx="7" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="324" y="80" text-anchor="middle" font-size="11" font-weight="700" fill="#92600a">listing_reports</text>
+    <text x="324" y="96" text-anchor="middle" font-size="10" fill="#6b6b65">saved_listing_id FK</text>
+    <text x="324" y="110" text-anchor="middle" font-size="10" fill="#6b6b65">pricing_report_id FK</text>
+    <text x="324" y="124" text-anchor="middle" font-size="10" fill="#92600a">trigger: manual/rerun/sched</text>
+
+    <!-- saved_listings → listing_reports -->
+    <line x1="272" y1="190" x2="324" y2="132" stroke="#c47f1a" stroke-width="1.5" marker-end="url(#errarr)"/>
+    <!-- pricing_reports → listing_reports -->
+    <line x1="450" y1="140" x2="378" y2="110" stroke="#c47f1a" stroke-width="1.5" marker-end="url(#errarr)"/>
+
+    <!-- pricing_cache -->
+    <rect x="620" y="40" width="156" height="60" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="698" y="62" text-anchor="middle" font-size="11" font-weight="700">pricing_cache</text>
+    <text x="698" y="78" text-anchor="middle" font-size="10" fill="#6b6b65">cache_key UNIQUE · expires_at</text>
+    <text x="698" y="92" text-anchor="middle" font-size="9.5" fill="#9a9a94">service-role only</text>
+    <line x1="620" y1="70" x2="582" y2="160" stroke="#9a9a94" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#errarr)"/>
+    <text x="608" y="120" font-size="9" fill="#9a9a94">cache_key</text>
+
+    <!-- comparable_pool_entries -->
+    <rect x="148" y="356" width="168" height="60" rx="7" fill="#f5f0fb" stroke="#8b52c9" stroke-width="1.5"/>
+    <text x="232" y="376" text-anchor="middle" font-size="11" font-weight="700" fill="#5b2d91">comparable_pool_entries</text>
+    <text x="232" y="392" text-anchor="middle" font-size="10" fill="#6b6b65">airbnb_listing_id · similarity_score</text>
+    <text x="232" y="406" text-anchor="middle" font-size="10" fill="#6b6b65">status: active/degraded/removed</text>
+    <line x1="232" y1="356" x2="232" y2="310" stroke="#8b52c9" stroke-width="1.5" marker-end="url(#errarr-p)"/>
+
+    <!-- Observation tables -->
+    <rect x="400" y="330" width="400" height="44" rx="7" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="600" y="350" text-anchor="middle" font-size="12" font-weight="700" fill="#1a6b3a">target_price_observations</text>
+    <text x="600" y="365" text-anchor="middle" font-size="10" fill="#1a6b3a">saved_listing_id FK · pricing_report_id FK · stay_date · 各類價格欄位</text>
+
+    <rect x="400" y="384" width="400" height="34" rx="7" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="600" y="398" text-anchor="middle" font-size="11" font-weight="600" fill="#1a6b3a">benchmark_price_observations</text>
+    <text x="600" y="412" text-anchor="middle" font-size="10" fill="#1a6b3a">saved_listing_id · pricing_report_id · stay_date · benchmark_nightly_price</text>
+
+    <rect x="400" y="428" width="400" height="34" rx="7" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="600" y="442" text-anchor="middle" font-size="11" font-weight="600" fill="#1a6b3a">market_comp_observations</text>
+    <text x="600" y="456" text-anchor="middle" font-size="10" fill="#1a6b3a">comp_airbnb_id · nightly_price · similarity_score · is_pinned_benchmark</text>
+
+    <rect x="400" y="472" width="400" height="34" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="600" y="486" text-anchor="middle" font-size="11" font-weight="600">market_price_observations</text>
+    <text x="600" y="500" text-anchor="middle" font-size="10" fill="#6b6b65">ML 訓練用 · ingest_market_price_observations() 展開 · service-role only</text>
+
+    <!-- pricing_reports → observation tables -->
+    <line x1="490" y1="280" x2="490" y2="328" stroke="#2d9956" stroke-width="1.5" marker-end="url(#errarr-g)"/>
+
+    <!-- Alert + Auto-apply -->
+    <rect x="8" y="356" width="128" height="44" rx="7" fill="#fff3ef" stroke="#d4450f" stroke-width="1.5"/>
+    <text x="72" y="374" text-anchor="middle" font-size="10.5" font-weight="600" fill="#d4450f">pricing_alert_log</text>
+    <text x="72" y="390" text-anchor="middle" font-size="9.5" fill="#6b6b65">saved_listing_id · report_id</text>
+
+    <rect x="8" y="412" width="128" height="34" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="72" y="427" text-anchor="middle" font-size="10.5" font-weight="600">auto_apply_runs</text>
+    <text x="72" y="441" text-anchor="middle" font-size="9.5" fill="#6b6b65">listing_id · user_id</text>
+
+    <rect x="8" y="456" width="128" height="34" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="72" y="470" text-anchor="middle" font-size="10.5" font-weight="600">auto_apply_run_nights</text>
+    <text x="72" y="484" text-anchor="middle" font-size="9.5" fill="#6b6b65">run_id · listing_id · night_date</text>
+
+    <!-- saved_listings → alert + auto_apply -->
+    <line x1="148" y1="290" x2="72" y2="354" stroke="#9a9a94" stroke-width="1.2" marker-end="url(#errarr)"/>
+    <line x1="72" y1="400" x2="72" y2="410" stroke="#9a9a94" stroke-width="1.2" marker-end="url(#errarr)"/>
+    <line x1="72" y1="446" x2="72" y2="454" stroke="#9a9a94" stroke-width="1.2" marker-end="url(#errarr)"/>
+  </svg>
+</div>
+
+<h3>核心交易資料表說明</h3>
+
+<div class="table-wrap">
+<table>
+  <tr><th>資料表</th><th>用途</th><th>寫入者</th><th>讀取者</th><th>面向</th></tr>
+  <tr>
+    <td><code>pricing_reports</code></td>
+    <td>每份報表的單一記錄，同時作為 Worker 任務佇列。<code>status</code> 欄位是任務狀態機（queued → running → ready/error）。</td>
+    <td>API 路由（INSERT）；Worker（UPDATE 結果）</td>
+    <td>已登入用戶；Worker 輪詢；共享連結讀取（service role）</td>
+    <td>使用者 + Worker</td>
+  </tr>
+  <tr>
+    <td><code>saved_listings</code></td>
+    <td>使用者定義的房源設定，是夜間任務的即時輸入來源。包含所有功能開關（alerts、auto_apply、co-host 驗證狀態）。</td>
+    <td>使用者（CRUD）；Worker（更新 timezone、comp_pool、alert 冷卻狀態）</td>
+    <td>使用者；Worker（夜間任務重讀輸入）</td>
+    <td>使用者 + Worker</td>
+  </tr>
+  <tr>
+    <td><code>listing_reports</code></td>
+    <td>已儲存房源與報表的多對多連結，攜帶 <code>trigger</code>（manual/rerun/scheduled）。儀表板看板選擇邏輯依賴 <code>trigger=scheduled</code>。</td>
+    <td>API 路由（排程/即時）；Worker（夜間）</td>
+    <td>API /api/listings 決定 latestReport</td>
+    <td>內部</td>
+  </tr>
+  <tr>
+    <td><code>pricing_cache</code></td>
+    <td>24 小時快取層，以 <code>cache_key</code>（雜湊輸入參數）作索引。命中時 API 直接建立 status=ready 報表，不排隊給 Worker。</td>
+    <td>API 路由（insert on cache miss）；Worker（讀取以確認命中）</td>
+    <td>API 路由</td>
+    <td>內部（service-role only）</td>
+  </tr>
+  <tr>
+    <td><code>comparable_pool_entries</code></td>
+    <td>每個房源的持久化比較物件池，在多次重跑中演進。追蹤相似度、可靠性評分、在場率。</td>
+    <td>Worker（每次重跑後更新）</td>
+    <td>Worker（構建搜尋基準）；使用者（透過 RLS）</td>
+    <td>Worker</td>
+  </tr>
+  <tr>
+    <td><code>market_tracking_preferences</code></td>
+    <td>市場追蹤電子郵件訂閱（<code>/api/track-market</code>）。包含 notify_weekly 和 notify_under_market 旗標。</td>
+    <td>API 路由（用戶訂閱）</td>
+    <td>通知服務</td>
+    <td>使用者</td>
+  </tr>
+</table>
+</div>
+
+<h3>報表生命週期中的資料表關聯圖</h3>
+
+<div class="diagram-box">
+  <div class="diagram-title">saved_listings → pricing_reports → listing_reports 關聯流程</div>
+  <svg viewBox="0 0 720 200" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'PingFang TC','Microsoft JhengHei',sans-serif">
+    <defs>
+      <marker id="lcrarr" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#9a9a94"/>
+      </marker>
+      <marker id="lcrarr-b" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#4a80d4"/>
+      </marker>
+      <marker id="lcrarr-a" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#c47f1a"/>
+      </marker>
+    </defs>
+
+    <!-- saved_listings -->
+    <rect x="10" y="40" width="180" height="120" rx="7" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="100" y="62" text-anchor="middle" font-size="12" font-weight="700" fill="#1d5fad">saved_listings</text>
+    <text x="100" y="80" text-anchor="middle" font-size="10" fill="#6b6b65">id (PK)</text>
+    <text x="100" y="95" text-anchor="middle" font-size="10" fill="#6b6b65">input_attributes（夜間重讀）</text>
+    <text x="100" y="110" text-anchor="middle" font-size="10" fill="#6b6b65">listing_timezone</text>
+    <text x="100" y="125" text-anchor="middle" font-size="10" fill="#6b6b65">pricing_alerts_enabled</text>
+    <text x="100" y="140" text-anchor="middle" font-size="10" fill="#6b6b65">auto_apply_cohost_status</text>
+
+    <!-- pricing_reports -->
+    <rect x="270" y="40" width="180" height="120" rx="7" fill="#fff3ef" stroke="#d4450f" stroke-width="1.5"/>
+    <text x="360" y="62" text-anchor="middle" font-size="12" font-weight="700" fill="#d4450f">pricing_reports</text>
+    <text x="360" y="80" text-anchor="middle" font-size="10" fill="#6b6b65">id · share_id</text>
+    <text x="360" y="95" text-anchor="middle" font-size="10" fill="#6b6b65">listing_id → saved_listings</text>
+    <text x="360" y="110" text-anchor="middle" font-size="10" fill="#6b6b65">status · job_lane</text>
+    <text x="360" y="125" text-anchor="middle" font-size="10" fill="#d4450f">input_attributes（即時快照）</text>
+    <text x="360" y="140" text-anchor="middle" font-size="10" fill="#6b6b65">result_summary/calendar JSONB</text>
+
+    <!-- listing_reports -->
+    <rect x="530" y="40" width="180" height="120" rx="7" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="620" y="62" text-anchor="middle" font-size="12" font-weight="700" fill="#92600a">listing_reports</text>
+    <text x="620" y="80" text-anchor="middle" font-size="10" fill="#6b6b65">saved_listing_id FK</text>
+    <text x="620" y="95" text-anchor="middle" font-size="10" fill="#6b6b65">pricing_report_id FK</text>
+    <text x="620" y="110" text-anchor="middle" font-size="10" fill="#92600a">trigger: manual/rerun/scheduled</text>
+    <text x="620" y="128" text-anchor="middle" font-size="10" fill="#6b6b65">儀表板看板：trigger=scheduled</text>
+    <text x="620" y="143" text-anchor="middle" font-size="10" fill="#6b6b65">報表歷史：全部 trigger</text>
+
+    <!-- Arrows -->
+    <line x1="190" y1="100" x2="268" y2="100" stroke="#4a80d4" stroke-width="1.5" marker-end="url(#lcrarr-b)"/>
+    <text x="229" y="93" text-anchor="middle" font-size="9.5" fill="#4a80d4">listing_id FK</text>
+    <line x1="450" y1="100" x2="528" y2="100" stroke="#c47f1a" stroke-width="1.5" marker-end="url(#lcrarr-a)"/>
+    <text x="489" y="93" text-anchor="middle" font-size="9.5" fill="#c47f1a">M:N 連結</text>
+
+    <!-- note boxes -->
+    <rect x="10" y="172" width="180" height="24" rx="4" fill="#eef4ff"/>
+    <text x="100" y="188" text-anchor="middle" font-size="9.5" fill="#1d5fad">夜間：即時重讀 input_attributes</text>
+    <rect x="270" y="172" width="180" height="24" rx="4" fill="#fff3ef"/>
+    <text x="360" y="188" text-anchor="middle" font-size="9.5" fill="#d4450f">即時：凍結排隊時的快照</text>
+    <rect x="530" y="172" width="180" height="24" rx="4" fill="#fdf6e3"/>
+    <text x="620" y="188" text-anchor="middle" font-size="9.5" fill="#92600a">trigger 欄位決定看板 vs 歷史</text>
+  </svg>
+</div>
+
+<div class="callout callout-risk">
+  <strong>注意：listing_id vs listing_reports 的雙路關聯</strong>
+  <code>pricing_reports.listing_id</code>（migration 005）是直接的 FK，讓 RLS 不依賴 JOIN 即可驗證所有權。<code>listing_reports</code> 是攜帶觸發方式語意的多對多連結。儀表板看板選擇查詢使用 <code>listing_reports.trigger</code>，而非 <code>pricing_reports.listing_id</code>。若未同時寫入 <code>listing_reports</code> 列，排程報表<strong>不會</strong>出現在看板。
+</div>
+
+<div class="sources">來源：supabase/migrations/001、002、003、005、006、009–016</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s22">
+<h2>22. 佇列與 Worker DB 機制</h2>
+
+<h3>為何任務佇列建於 Postgres 而非獨立佇列</h3>
+<p><code>pricing_reports</code> 同時扮演任務記錄與結果儲存的角色。這避免了分散式系統中常見的任務與結果分離問題，並讓 Worker 的任務認領具有與結果一致的事務保證。代價是必須以 FOR UPDATE SKIP LOCKED 防止競爭，以心跳機制偵測 Worker 崩潰。</p>
+
+<h3>原子性認領（claim_pricing_report）</h3>
+<pre><code>-- 002 migration：初始版本
+-- 012 migration：加入 job_lane + target_env 過濾
+
+claim_pricing_report(
+  p_worker_token  uuid,
+  p_stale_minutes int  DEFAULT 15,
+  p_job_lane      text DEFAULT 'interactive',
+  p_target_env    text DEFAULT 'production'
+)
+
+-- 認領邏輯：
+-- 1. 選取 status='queued' 或（status='running' 且 heartbeat 超過 p_stale_minutes）
+-- 2. 依 job_lane + target_env 過濾（Worker 只認領自己的車道）
+-- 3. ORDER BY created_at ASC（先進先出）
+-- 4. LIMIT 1 FOR UPDATE SKIP LOCKED（防止並行 Worker 競爭）
+-- 5. 原子性更新：status=running、worker_claimed_at、worker_claim_token、worker_attempts+1</code></pre>
+
+<h3>心跳機制（heartbeat_pricing_report）</h3>
+<pre><code>heartbeat_pricing_report(p_report_id uuid, p_worker_token uuid)
+-- 僅在 id + worker_claim_token 匹配且 status='running' 時更新 worker_heartbeat_at
+-- 傳回 boolean：true = 更新成功，false = token 不匹配（表示任務已被回收）
+
+-- Worker 每 HEARTBEAT_SECONDS=10 秒呼叫一次
+-- 主要迴圈每 POLL_SECONDS=5 秒輪詢
+-- STALE_MINUTES=15：超過此時間無心跳的 running 任務可被重新認領</code></pre>
+
+<h3>車道隔離（job_lane + target_env）</h3>
+<p>Migration 012 新增 <code>job_lane</code>（interactive / nightly）與 <code>target_env</code>（production / local），確保互動式 Worker 不會認領夜間任務，反之亦然。本地開發 Worker 使用 <code>target_env=local</code> 避免影響正式環境任務。</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>欄位</th><th>值</th><th>用途</th></tr>
+  <tr><td><code>job_lane</code></td><td><code>interactive</code> / <code>nightly</code></td><td>互動與夜間 Worker 車道隔離</td></tr>
+  <tr><td><code>target_env</code></td><td><code>production</code> / <code>local</code></td><td>本地開發 Worker 與正式 Worker 隔離</td></tr>
+  <tr><td><code>worker_claim_token</code></td><td>UUID</td><td>擁有者身份驗證（心跳 + 防止過期 Worker 寫入）</td></tr>
+  <tr><td><code>worker_attempts</code></td><td>int（0 起始）</td><td>每次認領遞增；達到 MAX_ATTEMPTS=3 後停止重試</td></tr>
+  <tr><td><code>worker_heartbeat_at</code></td><td>timestamptz</td><td>前端用於顯示「Worker 無回應」橫幅</td></tr>
+</table>
+</div>
+
+<h3>逾時任務回收</h3>
+<div class="callout callout-current">
+  <strong>目前行為</strong>
+  若一個 <code>running</code> 任務的 <code>worker_heartbeat_at</code> 超過 15 分鐘沒有更新（Worker 崩潰），下一次 <code>claim_pricing_report()</code> 呼叫會自動認領並重試。<code>worker_attempts</code> 會遞增。達到 3 次嘗試後，任務狀態保持 <code>running</code> 但 Worker 不再處理（需手動介入或等待清理）。
+</div>
+
+<h3>複合索引（支援佇列掃描）</h3>
+<pre><code>-- 012 migration：
+CREATE INDEX idx_reports_lane_env_status_created
+  ON pricing_reports (job_lane, target_env, status, created_at);
+
+-- 查詢模式：job_lane=? AND target_env=? AND status IN ('queued','running')
+-- 此索引使佇列掃描成為 Index Scan 而非 Seq Scan</code></pre>
+
+<div class="sources">來源：supabase/migrations/002、012、worker/main.py</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s23">
+<h2>23. RLS 與存取模型</h2>
+
+<h3>設計原則</h3>
+<p>每個使用者只能讀取自己擁有的資料。Worker 和 API 路由使用 service role key，完全繞過 RLS。共享報表存取（<code>/r/[shareId]</code>）由伺服器端路由以 service role 提供服務，<strong>不</strong>依賴任何公開 RLS 政策。</p>
+
+<h3>安全/所有權模型</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>資料表</th><th>使用者 SELECT</th><th>使用者 INSERT</th><th>使用者 UPDATE/DELETE</th><th>Worker 寫入</th></tr>
+  <tr>
+    <td><code>pricing_reports</code></td>
+    <td><code>user_id = auth.uid()</code> 或 <code>listing_id</code> → <code>saved_listings.user_id</code></td>
+    <td><code>user_id = auth.uid()</code> 或 <code>user_id IS NULL</code>（匿名）</td>
+    <td>無使用者政策</td>
+    <td>service role（更新結果、狀態、claim token）</td>
+  </tr>
+  <tr>
+    <td><code>saved_listings</code></td>
+    <td><code>user_id = auth.uid()</code></td>
+    <td><code>user_id = auth.uid()</code></td>
+    <td>有（SELECT+UPDATE+DELETE 政策）</td>
+    <td>service role（更新 timezone、comp_pool、alert 狀態）</td>
+  </tr>
+  <tr>
+    <td><code>listing_reports</code></td>
+    <td>EXISTS 子查詢 via <code>saved_listings.user_id</code></td>
+    <td>EXISTS 子查詢 via <code>saved_listings.user_id</code></td>
+    <td>無使用者政策</td>
+    <td>service role</td>
+  </tr>
+  <tr>
+    <td><code>pricing_cache</code></td>
+    <td colspan="4" style="text-align:center;color:var(--muted)">無使用者政策 — 僅 service role（API + Worker）</td>
+  </tr>
+  <tr>
+    <td><code>comparable_pool_entries</code></td>
+    <td>EXISTS via <code>saved_listings.user_id</code></td>
+    <td>無使用者政策</td>
+    <td>無使用者政策</td>
+    <td>service role（全部寫入）</td>
+  </tr>
+  <tr>
+    <td><code>target / benchmark / market_comp observations</code></td>
+    <td>EXISTS via <code>saved_listings.user_id</code></td>
+    <td>無使用者政策</td>
+    <td>無使用者政策</td>
+    <td>service role（僅附加寫入）</td>
+  </tr>
+  <tr>
+    <td><code>market_price_observations</code></td>
+    <td colspan="4" style="text-align:center;color:var(--muted)">無使用者政策 — service role only（ML 訓練資料）</td>
+  </tr>
+  <tr>
+    <td><code>pricing_alert_log</code></td>
+    <td><code>saved_listing_id IN (SELECT id FROM saved_listings WHERE user_id = auth.uid())</code></td>
+    <td>無使用者政策</td>
+    <td>無使用者政策</td>
+    <td>service role（Worker 寫入評估結果）</td>
+  </tr>
+  <tr>
+    <td><code>auto_apply_runs</code></td>
+    <td><code>user_id = auth.uid()</code></td>
+    <td>無使用者政策</td>
+    <td>無使用者政策</td>
+    <td>API service role</td>
+  </tr>
+  <tr>
+    <td><code>auto_apply_run_nights</code></td>
+    <td>EXISTS via <code>saved_listings.user_id</code></td>
+    <td>無使用者政策</td>
+    <td>無使用者政策</td>
+    <td>API service role</td>
+  </tr>
+</table>
+</div>
+
+<h3>共享報表存取路徑</h3>
+<div class="callout callout-infer">
+  <strong>重要設計決策</strong>
+  <code>GET /api/r/[shareId]</code> 以 service role key 按 <code>share_id</code> 查詢 <code>pricing_reports</code>。此 8 字元隨機字串的不可猜測性是唯一的存取控制。DB 層沒有公開政策 — <strong>不</strong>能直接以 Supabase client 從瀏覽器讀取共享報表。如果 share_id 洩漏，任何人均可透過 API 路由存取該報表。
+</div>
+
+<h3>匿名報表</h3>
+<p>未登入使用者可建立報表（<code>user_id = NULL</code>）。RLS 政策允許 <code>user_id IS NULL</code> 的 INSERT。這些報表只能透過 <code>share_id</code> 存取，無法在任何已登入使用者的儀表板中看到。</p>
+
+<div class="sources">來源：supabase/migrations/001–020（各 RLS 政策）</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s24">
+<h2>24. 觀察與歷史資料模型</h2>
+
+<div class="diagram-box">
+  <div class="diagram-title">夜間觀察寫入流水線</div>
+  <svg viewBox="0 0 720 160" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,BlinkMacSystemFont,'PingFang TC','Microsoft JhengHei',sans-serif">
+    <defs>
+      <marker id="oarr" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+        <polygon points="0 0, 9 3.5, 0 7" fill="#2d9956"/>
+      </marker>
+    </defs>
+
+    <!-- Nightly report -->
+    <rect x="8" y="40" width="148" height="80" rx="7" fill="#fff3ef" stroke="#d4450f" stroke-width="1.5"/>
+    <text x="82" y="62" text-anchor="middle" font-size="12" font-weight="700" fill="#d4450f">夜間報表完成</text>
+    <text x="82" y="80" text-anchor="middle" font-size="10.5" fill="#6b6b65">pricing_reports</text>
+    <text x="82" y="96" text-anchor="middle" font-size="10.5" fill="#6b6b65">status=ready</text>
+    <text x="82" y="110" text-anchor="middle" font-size="10.5" fill="#6b6b65">result_calendar JSONB</text>
+
+    <!-- Worker observations.py -->
+    <rect x="200" y="40" width="148" height="80" rx="7" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="274" y="62" text-anchor="middle" font-size="12" font-weight="700">Worker</text>
+    <text x="274" y="80" text-anchor="middle" font-size="10.5" fill="#6b6b65">observations.py</text>
+    <text x="274" y="96" text-anchor="middle" font-size="10.5" fill="#6b6b65">解析 result_calendar</text>
+    <text x="274" y="110" text-anchor="middle" font-size="10.5" fill="#6b6b65">失敗不中斷任務</text>
+
+    <!-- Observation tables (fan-out) -->
+    <rect x="392" y="8" width="200" height="36" rx="6" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="492" y="30" text-anchor="middle" font-size="11" font-weight="600" fill="#1a6b3a">target_price_observations</text>
+
+    <rect x="392" y="54" width="200" height="36" rx="6" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="492" y="75" text-anchor="middle" font-size="11" font-weight="600" fill="#1a6b3a">benchmark_price_observations</text>
+
+    <rect x="392" y="100" width="200" height="36" rx="6" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="492" y="122" text-anchor="middle" font-size="11" font-weight="600" fill="#1a6b3a">market_comp_observations</text>
+
+    <!-- ML ingestion -->
+    <rect x="608" y="54" width="108" height="36" rx="6" fill="#f3f3f0" stroke="#c0c0bc" stroke-width="1.5"/>
+    <text x="662" y="69" text-anchor="middle" font-size="10.5" font-weight="600">market_price_obs</text>
+    <text x="662" y="82" text-anchor="middle" font-size="9.5" fill="#6b6b65">ingest() 函式</text>
+
+    <!-- Arrows -->
+    <line x1="156" y1="80" x2="198" y2="80" stroke="#2d9956" stroke-width="1.5" marker-end="url(#oarr)"/>
+    <line x1="348" y1="70" x2="390" y2="26" stroke="#2d9956" stroke-width="1.5" marker-end="url(#oarr)"/>
+    <line x1="348" y1="80" x2="390" y2="72" stroke="#2d9956" stroke-width="1.5" marker-end="url(#oarr)"/>
+    <line x1="348" y1="90" x2="390" y2="118" stroke="#2d9956" stroke-width="1.5" marker-end="url(#oarr)"/>
+    <line x1="592" y1="72" x2="606" y2="72" stroke="#9a9a94" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#oarr)"/>
+  </svg>
+</div>
+
+<h3>四個觀察資料表的差異</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>資料表</th><th>粒度</th><th>來源</th><th>主要欄位</th><th>用途</th></tr>
+  <tr>
+    <td><code>target_price_observations</code></td>
+    <td>一列 per（報表 × 日期）</td>
+    <td>result_calendar 每個日曆日</td>
+    <td>market_median_price、market_price_adjusted、effective_price_refundable/nonrefundable、is_weekend、day_flags</td>
+    <td>Phase 6A 重用門檻檢查；房源每日市場中位數時序</td>
+  </tr>
+  <tr>
+    <td><code>benchmark_price_observations</code></td>
+    <td>一列 per（報表 × 日期）（僅基準房源）</td>
+    <td>comparableListings 中 isPinnedBenchmark=true 的項目</td>
+    <td>benchmark_nightly_price、market_median_price、benchmark_listing_url</td>
+    <td>基準房源逐日價格歷史追蹤</td>
+  </tr>
+  <tr>
+    <td><code>market_comp_observations</code></td>
+    <td>一列 per（報表 × 比較物件 × 日期）</td>
+    <td>comparableListings[].priceByDate</td>
+    <td>comp_airbnb_id、nightly_price、similarity_score、is_pinned_benchmark</td>
+    <td>個別比較物件逐日價格；未來跨報表比較物件識別與去重</td>
+  </tr>
+  <tr>
+    <td><code>market_price_observations</code></td>
+    <td>一列 per（報表 × 日期），含完整情境</td>
+    <td><code>ingest_market_price_observations()</code> Postgres 函式</td>
+    <td>所有定價欄位 + 房源屬性 + days_until_stay + 地理座標 + amenities</td>
+    <td>ML 訓練資料；含 lead-time 學習特徵；service-role only</td>
+  </tr>
+</table>
+</div>
+
+<h3>唯一約束與冪等性</h3>
+<p><code>target_price_observations</code> 在 <code>(saved_listing_id, pricing_report_id, stay_date)</code> 上有唯一約束，確保觀察寫入器重試時不會建立重複列（例如暫時性失敗後的重試）。<code>market_price_observations</code> 在 <code>(pricing_report_id, stay_date)</code> 上有唯一索引，<code>ingest()</code> 函式使用 <code>ON CONFLICT DO UPDATE</code> 達到冪等性。</p>
+
+<h3>新鮮度閾值與 Phase 6A 重用</h3>
+<p><code>target_price_observations</code> 是 Phase 6A 觀察優先重用機制的來源。Worker 在 <code>observation_reuse.py</code> 中以 <code>captured_at</code> 欄位計算每個層級的資料年齡：</p>
+<div class="table-wrap">
+<table>
+  <tr><th>層級</th><th>stay_date 範圍</th><th>最大 captured_at 年齡</th></tr>
+  <tr><td>near_term</td><td>D0–D3</td><td>12 小時</td></tr>
+  <tr><td>medium</td><td>D4–D10</td><td>36 小時</td></tr>
+  <tr><td>far</td><td>D11+</td><td>72 小時</td></tr>
+</table>
+</div>
+<p>若所有請求日期均在上述新鮮度內，Worker 跳過 Airbnb 爬取，直接以觀察資料構建定價結果。任何一個日期過期或缺失，即回退至完整爬取（Phase 6A 的全有全無門檻）。</p>
+
+<div class="callout callout-reserved">
+  <strong>保留：benchmark_price_observations 的 confidence 欄位</strong>
+  <code>benchmark_price_observations.confidence</code> 欄位目前永遠為 NULL。設計文件保留此欄位供未來逐日基準信心度使用，但目前未計算。
+</div>
+
+<div class="sources">來源：supabase/migrations/016_observation_tables.sql、016_market_price_observations.sql、worker/core/observation_reuse.py、worker/core/observations.py</div>
+</section>
+
+<!-- ─────────────────────────────────────────────── -->
+<section id="s25">
+<h2>25. 架構演進說明</h2>
+
+<h3>資料庫真實性規則</h3>
+<p>以下說明哪個資料表 / 欄位對每類資訊具有決定性權威：</p>
+<div class="table-wrap">
+<table>
+  <tr><th>查詢</th><th>權威來源</th><th>說明</th></tr>
+  <tr>
+    <td>已儲存房源的輸入設定</td>
+    <td><code>saved_listings.input_attributes</code>（JSONB）</td>
+    <td>夜間任務在執行時重新讀取此欄位。互動式任務使用排隊時凍結在 <code>pricing_reports.input_attributes</code> 中的快照。</td>
+  </tr>
+  <tr>
+    <td>已排隊任務的輸入快照</td>
+    <td><code>pricing_reports.input_attributes</code>、<code>.input_date_start</code>、<code>.input_date_end</code>、<code>.discount_policy</code></td>
+    <td>互動式任務在提交時凍結這些欄位；後續對 saved_listings 的編輯不影響已排隊的互動式任務。</td>
+  </tr>
+  <tr>
+    <td>儀表板看板報表</td>
+    <td><code>listing_reports</code>（<code>trigger=scheduled AND status=ready AND report_type≠forecast_snapshot</code>）</td>
+    <td><code>GET /api/listings</code> 聯合查詢並取最近一筆符合的 listing_reports 記錄。直接在 pricing_reports 上查詢 listing_id 是不夠的。</td>
+  </tr>
+  <tr>
+    <td>報表歷史連結</td>
+    <td><code>listing_reports</code>（所有 trigger 類型）</td>
+    <td>所有成功連結到房源的報表（包含互動式）均出現在 listing_reports 中，並在儀表板歷史面板顯示。</td>
+  </tr>
+  <tr>
+    <td>夜間市場觀察資料</td>
+    <td><code>target_price_observations</code>（按 captured_at 排序的最新列）</td>
+    <td>Phase 6A 重用機制以此資料表作為每個 stay_date 的新鮮度判斷依據。pricing_reports.result_calendar 是完整的原始資料，觀察表提供已結構化的時序版本。</td>
+  </tr>
+  <tr>
+    <td>報表市場資料的採集時間</td>
+    <td><code>pricing_reports.market_captured_at</code></td>
+    <td>注意：<code>created_at</code> 是任務排隊時間，<strong>不是</strong>資料採集時間。快取命中報表的 market_captured_at 可能比 created_at 早最多 24 小時。</td>
+  </tr>
+  <tr>
+    <td>Co-host 驗證狀態</td>
+    <td><code>saved_listings.auto_apply_cohost_status</code>（migration 020）</td>
+    <td>舊版 <code>auto_apply_cohost_ready</code> 布林值已棄用。只有 <code>auto_apply_cohost_status = 'verified'</code> 才能解鎖 Auto-Apply 執行。</td>
+  </tr>
+</table>
+</div>
+
+<h3>重要架構演進（按 migration 順序）</h3>
+
+<h4>001 — 初始架構</h4>
+<p><code>pricing_reports</code> 與 <code>market_tracking_preferences</code> 建立。初始的 status 約束只有三種（queued/ready/error）。報表 RLS 以 <code>user_id</code> 作為存取邊界。</p>
+
+<h4>002 — Worker 佇列機制</h4>
+<p>新增 <code>running</code> 狀態。新增 Worker 認領欄位（<code>worker_claim_token</code>、<code>worker_heartbeat_at</code>、<code>worker_attempts</code>）。建立 <code>pricing_cache</code>（24h TTL 快取）。實作 <code>claim_pricing_report()</code> 和 <code>heartbeat_pricing_report()</code> Postgres 函式。</p>
+
+<h4>003 — 已儲存房源與歷史連結</h4>
+<p><code>saved_listings</code> 與 <code>listing_reports</code> 建立，完整 CRUD RLS。<code>listing_reports.trigger</code> 欄位的三種值從此開始作為看板 vs 歷史的語意區分。</p>
+
+<h4>005 — 直接 listing_id + 日期預設</h4>
+<p><code>pricing_reports.listing_id</code> 直接 FK 消除了許多查詢中對 <code>listing_reports</code> JOIN 的依賴，並為 RLS 提供更直接的所有權驗證路徑。<code>saved_listings.default_date_mode</code> 和 default_start/end_date 讓使用者可以為每個房源設定預設日期模式。</p>
+
+<h4>006 — 比較物件池</h4>
+<p><code>comparable_pool_entries</code> 建立，用於跨重跑持久化比較物件資料。<code>saved_listings</code> 新增地理錨點（<code>target_lat</code>/<code>target_lng</code>）和池統計欄位。</p>
+
+<h4>009 — 報表類型</h4>
+<p><code>pricing_reports.report_type</code>（live_analysis / forecast_snapshot）讓儀表板看板查詢能明確排除 <code>forecast_snapshot</code>，即使它們有 <code>trigger=scheduled</code>。</p>
+
+<h4>010 — 明確新鮮度時間戳</h4>
+<p><code>completed_at</code>（狀態變 ready 的時間）與 <code>market_captured_at</code>（Airbnb 資料實際採集時間）分離。對快取命中報表而言，<code>market_captured_at</code> 可能比 <code>completed_at</code> 早最多 24 小時，而 <code>created_at</code>（排隊時間）則早於兩者。三個時間戳均有不同語意。</p>
+
+<h4>011 — 報表來源血緣</h4>
+<p><code>pricing_reports.source_report_id</code> 自引用 FK 讓 forecast_snapshot 記錄能追蹤到產生它的 live_analysis 報表。目前僅供稽核使用。</p>
+
+<h4>012 — Worker 車道隔離</h4>
+<p><code>job_lane</code> 和 <code>target_env</code> 加入 <code>pricing_reports</code>，並更新 <code>claim_pricing_report()</code> 函式以按車道過濾。複合索引 <code>(job_lane, target_env, status, created_at)</code> 是高效佇列掃描的關鍵。</p>
+
+<h4>013 — 房源時區</h4>
+<p><code>saved_listings.listing_timezone</code>（IANA 字串）讓夜間排程器在計算「本地明天」起始日期時使用正確的時區，避免 UTC 截斷問題。Worker 在成功爬取後填入此欄位；NULL 時退回 <code>America/Los_Angeles</code>。</p>
+
+<h4>014–015 — 定價警示</h4>
+<p><code>saved_listings</code> 新增警示開關和冷卻狀態欄位（<code>pricing_alerts_enabled</code>、<code>last_alert_sent_at</code>、<code>last_alert_direction</code> 等）。<code>pricing_alert_log</code> 建立為僅附加稽核記錄。Migration 015 新增 <code>minimum_booking_nights</code> 和 URL 驗證狀態欄位。</p>
+
+<h4>016 — 觀察資料表（雙 migration）</h4>
+<p>注意：此版本號有兩個不同的 migration 檔案（<code>016_observation_tables.sql</code> 和 <code>016_market_price_observations.sql</code>）。前者建立三個 Worker 觀察表（target/benchmark/market_comp）；後者建立 ML 訓練表 <code>market_price_observations</code> 和 <code>ingest_market_price_observations()</code> 函式。</p>
+
+<div class="callout callout-risk">
+  <strong>注意：重複的 migration 版本號</strong>
+  Migration 016 有兩個檔案（<code>016_observation_tables.sql</code> 和 <code>016_market_price_observations.sql</code>）。若使用自動 migration 執行工具，可能發生衝突或只有一個被執行。目前已確認兩者均應套用。建議在下一個 migration 前確認兩個資料表群組均已建立。
+</div>
+
+<h4>017 — Auto-Apply 設定</h4>
+<p><code>saved_listings</code> 新增大量 <code>auto_apply_*</code> 欄位（enabled、window_end_days、scope、min_price_floor、guardrails 等）。<strong>注意：</strong>此時 Auto-Apply 的 Airbnb 實際寫入未實作；欄位僅儲存使用者意圖。</p>
+
+<h4>018 — Auto-Apply 執行記錄</h4>
+<p><code>auto_apply_runs</code>（執行標頭）和 <code>auto_apply_run_nights</code>（逐晚稽核）建立。<code>execution_mode=stub</code> 表示第一期為模擬執行。schema 設計已預留 live 執行所需欄位，未來升級不需 migration 變更。</p>
+
+<h4>019 — Co-host 追蹤</h4>
+<p><code>saved_listings.auto_apply_cohost_ready</code>（布林值）新增，同時收緊 <code>auto_apply_window_end_days</code> 上限至 30 天（匹配定價系統的 30 天覆蓋範圍）。</p>
+
+<h4>020 — Co-host 驗證狀態機</h4>
+<p>以六個狀態值的文字欄位 <code>auto_apply_cohost_status</code> 取代原本的布林值，明確區分「使用者說已完成」（user_confirmed）與「系統已確認」（verified）。<strong>只有</strong> <code>verified</code> 狀態才應解鎖 Auto-Apply 執行。舊版 <code>auto_apply_cohost_ready</code> 欄位保留一個周期以向後相容，並附有棄用 COMMENT，將在未來 migration 中刪除。</p>
+
+<div class="sources">來源：supabase/migrations/001–020（全部 migration 檔案）</div>
+</section>
+
+<!-- ═══════════════════════════════════════════════════
+     ML SECTIONS 26–35
+════════════════════════════════════════════════════ -->
+
+<section id="s26">
+<h2>26. ML 總覽</h2>
+
+<div class="callout callout-infer">
+  <strong>Inference — 這是什麼？</strong>
+  <code>ml/</code> 是 repo 內獨立的 Python ML pipeline，負責從 Supabase 拉取歷史觀察資料、訓練 XGBoost 定價模型，並輸出未來 30 天的預測建議價格。它是一個<em>批次 / 研究</em>子系統，與主線上產品流程平行運作。
+</div>
+
+<div class="callout callout-risk">
+  <strong>Risk — ML 目前不是主線定價</strong>
+  主線上線定價路徑仍是 Worker 的 <code>live_analysis</code> pipeline（<code>worker/main.py</code>）。ML 子系統的預測結果目前寫入本地 <code>ml/reports/</code> 檔案，<strong>不會自動覆蓋</strong> <code>pricing_reports</code> 的建議價格。儀表板顯示的建議價格來自 Worker，而非 ML。
+</div>
+
+<div class="diagram-box">
+  <div class="diagram-title">Live Pricing vs ML Forecasting — 並存架構</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>面向</th>
+          <th>Live 定價 pipeline（主線）</th>
+          <th>ML forecasting pipeline（平行）</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>觸發方式</td>
+          <td>使用者按鈕 / 夜間 Worker 排程</td>
+          <td>手動執行腳本 / npm run ml:*</td>
+        </tr>
+        <tr>
+          <td>語言 / runtime</td>
+          <td>Python Worker（<code>worker/main.py</code>）</td>
+          <td>Python ML scripts（<code>ml/</code>）</td>
+        </tr>
+        <tr>
+          <td>核心演算法</td>
+          <td>相似度加權市場中位數 + 需求調整</td>
+          <td>XGBoost 回歸（log1p 空間）</td>
+        </tr>
+        <tr>
+          <td>輸出目的地</td>
+          <td><code>pricing_reports</code>（Supabase）→ 儀表板顯示</td>
+          <td><code>ml/reports/*.csv / .json</code>（本地檔案）</td>
+        </tr>
+        <tr>
+          <td>結果是否進儀表板</td>
+          <td><span class="badge badge-green">是</span></td>
+          <td><span class="badge badge-gray">否（目前）</span></td>
+        </tr>
+        <tr>
+          <td>驗證方式</td>
+          <td>定性審查 + 回測比較</td>
+          <td>TimeSeriesSplit CV + holdout backtest + 時間切分回測</td>
+        </tr>
+        <tr>
+          <td>主要定位</td>
+          <td>上線產品</td>
+          <td>預測研究 / 批次分析 / 未來整合基礎</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p>ML pipeline 由以下四支腳本組成（詳見後續各節）：</p>
+<ul>
+  <li><code>ml/batch_pipeline.py</code> — 推薦入口，一鍵完成訓練 + 預測 + 產物輸出</li>
+  <li><code>ml/run_forecast.py</code> — 較低階腳本，適合 debug 單一訓練步驟</li>
+  <li><code>ml/backtest.py</code> — holdout 回測 + 時間切分回測</li>
+  <li><code>ml/compare_predictions.py</code> — 比較兩個日期預測差異的驅動因子</li>
+</ul>
+
+<div class="sources">來源：ml/README.md, ml/batch_pipeline.py, ml/run_forecast.py, worker/main.py</div>
+</section>
+
+<section id="s27">
+<h2>27. ML 輸入與資料來源</h2>
+
+<p>ML pipeline 透過 <code>ml/supabase_client.py</code> 以 service-role key 連線 Supabase，完整讀取訓練所需資料。讀取不受 RLS 限制。</p>
+
+<div class="callout callout-current">
+  <strong>Current Behavior — 兩條資料讀取路徑</strong>
+  <code>ml/data.py::fetch_training_dataset()</code> 實作了兩條路徑（優先順序如下）。只要正規化路徑的閘門通過，就不走 legacy fallback。
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>路徑</th><th>條件</th><th>資料表</th><th>row_source 標籤</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>1. 正規化路徑</strong>（優先）</td>
+        <td>target rows ≥ 7、unique stay_dates ≥ 7、comp rows ≥ 30（三者同時滿足）</td>
+        <td><code>target_price_observations</code><br><code>market_comp_observations</code><br>（comp 元資料從 <code>comparable_pool_entries</code> enrichment）</td>
+        <td><code>target_observation</code><br><code>market_comp_observation</code></td>
+      </tr>
+      <tr>
+        <td><strong>2. Legacy fallback</strong></td>
+        <td>正規化閘門未通過，或無 saved_listing_id</td>
+        <td><code>comparable_pool_entries</code>（地理半徑 ~8 km 過濾）<br><code>pricing_reports.result_calendar</code>（最新報表 30 天行事曆）</td>
+        <td><code>pool_snapshot</code><br><code>report_calendar</code></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="callout callout-risk">
+  <strong>Risk — 閘門閥值</strong>
+  正規化路徑閘門定義在 <code>ml/data.py</code> 頂端：<br>
+  <code>_MIN_NORMALIZED_TARGET_ROWS = 7</code><br>
+  <code>_MIN_NORMALIZED_UNIQUE_DATES = 7</code><br>
+  <code>_MIN_NORMALIZED_COMP_ROWS = 30</code><br>
+  新房源觀察資料不足時會自動退回 legacy 路徑，訓練品質較弱。
+</div>
+
+<div class="callout callout-reserved">
+  <strong>Reserved / Future — benchmark 訊號尚未整合</strong>
+  <code>benchmark_price_observations</code> 表已存在（Phase 5A），但目前<em>未</em>作為訓練特徵加入。原因：單純 scalar benchmark 會引起 leakage；正確做法是按 stay_date join，此項延後至 Phase 5B+/5C。見 <code>ml/data.py</code> 中的 TODO 註解。
+</div>
+
+<div class="sources">來源：ml/data.py, ml/supabase_client.py, supabase/migrations/016_observation_tables.sql</div>
+</section>
+
+<section id="s28">
+<h2>28. 訓練資料集建構</h2>
+
+<p><code>_fetch_normalized_training_rows()</code> 是正規化路徑的核心，建立兩類訓練行：</p>
+
+<div class="diagram-box">
+  <div class="diagram-title">正規化路徑資料建構流程</div>
+  <svg width="100%" viewBox="0 0 700 260" font-family="system-ui,sans-serif" font-size="12">
+    <!-- Stage boxes -->
+    <rect x="10" y="30" width="120" height="50" rx="6" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="70" y="52" text-anchor="middle" font-weight="700" fill="#1d5fad">① 拉取</text>
+    <text x="70" y="68" text-anchor="middle" fill="#1d5fad" font-size="11">target_price_obs</text>
+
+    <rect x="160" y="30" width="120" height="50" rx="6" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="220" y="52" text-anchor="middle" font-weight="700" fill="#1d5fad">② 拉取</text>
+    <text x="220" y="68" text-anchor="middle" fill="#1d5fad" font-size="11">market_comp_obs</text>
+
+    <rect x="310" y="30" width="120" height="50" rx="6" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="370" y="52" text-anchor="middle" font-weight="700" fill="#92600a">③ 閘門檢查</text>
+    <text x="370" y="68" text-anchor="middle" fill="#92600a" font-size="11">三條件同時通過</text>
+
+    <rect x="460" y="30" width="120" height="50" rx="6" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="520" y="52" text-anchor="middle" font-weight="700" fill="#1a6b3a">④ Pool enrichment</text>
+    <text x="520" y="68" text-anchor="middle" fill="#1a6b3a" font-size="11">comparable_pool_entries</text>
+
+    <!-- Gate fail box -->
+    <rect x="310" y="130" width="160" height="40" rx="6" fill="#f5f0fb" stroke="#8b52c9" stroke-width="1.5"/>
+    <text x="390" y="148" text-anchor="middle" font-weight="700" fill="#5b2d91" font-size="11">閘門失敗 → legacy fallback</text>
+    <text x="390" y="162" text-anchor="middle" fill="#5b2d91" font-size="10">pool_snapshot + report_calendar</text>
+
+    <!-- Output box -->
+    <rect x="200" y="200" width="300" height="50" rx="6" fill="#f3f3f0" stroke="#aaa" stroke-width="1.5"/>
+    <text x="350" y="222" text-anchor="middle" font-weight="700" fill="#1a1a18">訓練 DataFrame</text>
+    <text x="350" y="240" text-anchor="middle" fill="#6b6b65" font-size="11">target_observation + market_comp_observation rows</text>
+
+    <!-- Arrows -->
+    <line x1="130" y1="55" x2="158" y2="55" stroke="#aaa" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="280" y1="55" x2="308" y2="55" stroke="#aaa" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="430" y1="55" x2="458" y2="55" stroke="#aaa" stroke-width="1.5" marker-end="url(#arr)"/>
+    <line x1="370" y1="80" x2="370" y2="128" stroke="#c47f1a" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arr-amber)"/>
+    <line x1="520" y1="80" x2="350" y2="198" stroke="#2d9956" stroke-width="1.5" marker-end="url(#arr-green)"/>
+
+    <defs>
+      <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#aaa"/>
+      </marker>
+      <marker id="arr-amber" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#c47f1a"/>
+      </marker>
+      <marker id="arr-green" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#2d9956"/>
+      </marker>
+    </defs>
+  </svg>
+</div>
+
+<p>每一筆訓練行都會加上 <strong>時間特徵</strong>（由 <code>_compute_date_features(stay_dt, obs_dt)</code> 統一計算），確保訓練路徑與推論路徑使用完全相同的特徵邏輯。</p>
+
+<p><strong>Legacy fallback 的 source weight 差異：</strong><code>report_calendar</code> 行的 <code>similarity_score</code> 雖設為 5.0，但在 <code>train_model()</code> 中 source weight 設為 0.5，使其有效梯度約為 pool_snapshot 的一半，避免單一報表的 30 天行事曆主導訓練。</p>
+
+<div class="sources">來源：ml/data.py（_fetch_normalized_training_rows, fetch_training_dataset）</div>
+</section>
+
+<section id="s29">
+<h2>29. 特徵工程</h2>
+
+<p>特徵建構由 <code>ml/model.py::_clean_training_frame()</code> 與 <code>_feature_matrix()</code> 負責。最終特徵矩陣分三類：</p>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>類別</th><th>特徵</th><th>說明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td rowspan="11"><strong>數值特徵</strong><br><code>NUMERIC_FEATURES</code></td>
+        <td><code>bedrooms, baths, accommodates, beds</code></td>
+        <td>房源結構特徵</td>
+      </tr>
+      <tr><td><code>similarity_score</code></td><td>競品與目標房源的相似度分數</td></tr>
+      <tr><td><code>pool_score, effective_rank_score</code></td><td>競品在 pool 中的排名分數</td></tr>
+      <tr><td><code>price_reliability_score</code></td><td>競品價格資料可靠度</td></tr>
+      <tr><td><code>rating, reviews, tenure_runs</code></td><td>競品房源品質與曝光歷史</td></tr>
+      <tr><td><code>day_of_week, lead_time_days, day_of_year, month</code></td><td>時間特徵（線性）</td></tr>
+      <tr><td><code>dow_sin, dow_cos</code></td><td>星期幾的 cyclical 正弦/餘弦編碼</td></tr>
+      <tr><td><code>doy_sin, doy_cos</code></td><td>年內第幾天的 cyclical 正弦/餘弦編碼</td></tr>
+      <tr><td><code>is_weekend</code></td><td>1 = 週五或週六（定義與 Live pipeline 一致）</td></tr>
+      <tr><td><code>is_holiday</code></td><td>1 = 公假日（需安裝 <code>holidays</code> 套件，國家由 <code>ML_HOLIDAY_COUNTRY</code> 決定）</td></tr>
+      <tr><td><code>lat, lng</code></td><td>地理位置座標</td></tr>
+      <tr>
+        <td><strong>設施 one-hot</strong></td>
+        <td><code>has_wifi, has_pool, has_kitchen, has_washer, …</code>（共 12 項）</td>
+        <td>從 <code>saved_listings.input_attributes.amenities</code> 陣列展開</td>
+      </tr>
+      <tr>
+        <td><strong>房型 one-hot</strong></td>
+        <td><code>property_type_*</code>（<code>pd.get_dummies</code> 自動展開）</td>
+        <td>從 <code>property_type</code> 欄位建立，含 "unknown" 分類</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="callout callout-current">
+  <strong>Current Behavior — 目標欄位</strong>
+  目標欄位（y）為 <code>last_nightly_price</code>，代表競品的逐日掛牌價。訓練時取 <code>log1p(y)</code>，預測後再 <code>expm1()</code> 還原到原始價格空間。離群值（超出 ±3 個標準差）在 <code>_clean_training_frame()</code> 中被移除。
+</div>
+
+<div class="sources">來源：ml/model.py（NUMERIC_FEATURES, AMENITIES_LIST, _clean_training_frame, _feature_matrix）</div>
+</section>
+
+<section id="s30">
+<h2>30. 模型訓練與驗證</h2>
+
+<p>訓練由 <code>ml/model.py::train_model()</code> 執行，使用 XGBoost（<code>reg:squarederror</code>）在 log1p(price) 空間中訓練。</p>
+
+<h3>樣本權重</h3>
+<p>每筆訓練行的 sample weight = <code>similarity_score × recency_decay × source_weight</code></p>
+<ul>
+  <li><strong>Recency decay</strong>：<code>exp(−0.05 × days_old)</code>，半衰期約 14 天</li>
+  <li><strong>Source weight</strong>：pool_snapshot = 1.0、target_observation = 1.0、market_comp_observation = 1.0、report_calendar = 0.5</li>
+  <li>最終 weight 被 cap 在 5× 平均值，並正規化至 mean = 1</li>
+</ul>
+
+<h3>交叉驗證策略</h3>
+<div class="callout callout-current">
+  <strong>Current Behavior — 兩種 CV 模式</strong>
+  訓練前先計算 <code>price_date</code> 的唯一日期數：<br>
+  <strong>≥ 6 個唯一日期</strong>：使用 <code>TimeSeriesSplit(n_splits=5)</code>，time-safe，指標可信。<br>
+  <strong>&lt; 6 個唯一日期</strong>：退回 <code>KFold(n_splits=5, shuffle=False)</code>（chronological），指標為近似值，模型輸出會印出 warning。
+</div>
+
+<div class="callout callout-risk">
+  <strong>Risk — Degraded 驗證模式</strong>
+  當訓練資料日期多樣性不足（例如 legacy fallback 僅提供單日快照），CV 策略自動降級為 KFold。此時 MAE / Q2 可能<em>過度樂觀</em>，不應作為模型品質的強信號。<code>metrics.cv_time_safe = false</code> 是程式碼層級的警告旗標。
+</div>
+
+<h3>XGBoost 超參數（目前固定值）</h3>
+<div class="formula">
+  <span class="key">objective</span>       = reg:squarederror<br>
+  <span class="key">n_estimators</span>    = <span class="num">1000</span>  (+ early_stopping_rounds=<span class="num">50</span> 於 fold 訓練)<br>
+  <span class="key">max_depth</span>       = <span class="num">6</span><br>
+  <span class="key">learning_rate</span>   = <span class="num">0.05</span><br>
+  <span class="key">subsample</span>       = <span class="num">0.8</span><br>
+  <span class="key">colsample_bytree</span>= <span class="num">0.8</span><br>
+  <span class="key">tree_method</span>     = hist<br>
+  <span class="comment"># 最終模型用全部訓練資料 fit，cross-val 結果只用於診斷</span>
+</div>
+
+<p>訓練結束後，模型用全部訓練資料做最終 fit，並輸出 feature importance、per-fold 指標，以及可解釋性相關產物。</p>
+
+<div class="sources">來源：ml/model.py（train_model）</div>
+</section>
+
+<section id="s31">
+<h2>31. 推論流程</h2>
+
+<div class="diagram-box">
+  <div class="diagram-title">ML 完整 Batch Pipeline 流程</div>
+  <svg width="100%" viewBox="0 0 720 200" font-family="system-ui,sans-serif" font-size="12">
+    <!-- Pipeline stages -->
+    <rect x="10"  y="70" width="110" height="60" rx="6" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="65"  y="97" text-anchor="middle" font-weight="700" fill="#1d5fad">Supabase</text>
+    <text x="65"  y="112" text-anchor="middle" fill="#1d5fad" font-size="11">target_price_obs</text>
+    <text x="65"  y="125" text-anchor="middle" fill="#1d5fad" font-size="11">market_comp_obs</text>
+
+    <rect x="145" y="70" width="110" height="60" rx="6" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="200" y="97" text-anchor="middle" font-weight="700" fill="#1d5fad">訓練資料集</text>
+    <text x="200" y="112" text-anchor="middle" fill="#1d5fad" font-size="11">fetch_training_dataset</text>
+    <text x="200" y="125" text-anchor="middle" fill="#1d5fad" font-size="11">（正規化 / legacy）</text>
+
+    <rect x="280" y="70" width="110" height="60" rx="6" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="335" y="97" text-anchor="middle" font-weight="700" fill="#92600a">特徵矩陣</text>
+    <text x="335" y="112" text-anchor="middle" fill="#92600a" font-size="11">_clean_training_frame</text>
+    <text x="335" y="125" text-anchor="middle" fill="#92600a" font-size="11">_feature_matrix</text>
+
+    <rect x="415" y="70" width="110" height="60" rx="6" fill="#f5f0fb" stroke="#8b52c9" stroke-width="1.5"/>
+    <text x="470" y="97" text-anchor="middle" font-weight="700" fill="#5b2d91">XGBoost 訓練</text>
+    <text x="470" y="112" text-anchor="middle" fill="#5b2d91" font-size="11">log1p(price) 空間</text>
+    <text x="470" y="125" text-anchor="middle" fill="#5b2d91" font-size="11">5-fold CV</text>
+
+    <rect x="550" y="70" width="120" height="60" rx="6" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="610" y="92" text-anchor="middle" font-weight="700" fill="#1a6b3a">30 天預測</text>
+    <text x="610" y="107" text-anchor="middle" fill="#1a6b3a" font-size="11">forecast_prices()</text>
+    <text x="610" y="122" text-anchor="middle" fill="#1a6b3a" font-size="11">guardrail ±30%</text>
+    <text x="610" y="137" text-anchor="middle" fill="#1a6b3a" font-size="11">→ ml/reports/*.csv</text>
+
+    <!-- Arrows -->
+    <line x1="120" y1="100" x2="143" y2="100" stroke="#aaa" stroke-width="1.5" marker-end="url(#arrML)"/>
+    <line x1="255" y1="100" x2="278" y2="100" stroke="#aaa" stroke-width="1.5" marker-end="url(#arrML)"/>
+    <line x1="390" y1="100" x2="413" y2="100" stroke="#aaa" stroke-width="1.5" marker-end="url(#arrML)"/>
+    <line x1="525" y1="100" x2="548" y2="100" stroke="#aaa" stroke-width="1.5" marker-end="url(#arrML)"/>
+
+    <defs>
+      <marker id="arrML" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#aaa"/>
+      </marker>
+    </defs>
+  </svg>
+</div>
+
+<h3>推論細節</h3>
+<ul>
+  <li><code>batch_pipeline.py</code> 是推薦的端對端入口（也可呼叫 <code>execute_batch_workflow()</code> 函式）</li>
+  <li><code>run_forecast.py</code> 是較低階的 debug 腳本，支援更多 CLI 旗標（<code>--dump-training-csv</code>、<code>--save-model</code> 等）</li>
+  <li>推論時，每個未來日期都會對目標房源建構一筆特徵向量（包含 <code>_compute_date_features(current_date, start_date)</code>），再由 XGBoost 預測</li>
+  <li>Forecast guardrail：以 ±30% 的 7 天滾動中位數為上下界，平滑極端波動。原始值（<code>predicted_price_raw</code>）與修剪後值（<code>predicted_price</code>）都會保留，<code>guardrail_applied</code> 旗標標記哪些天被修剪</li>
+  <li>ML 推論結果不寫回 <code>pricing_reports</code>，只輸出至本地 <code>ml/reports/</code></li>
+</ul>
+
+<div class="sources">來源：ml/batch_pipeline.py, ml/run_forecast.py, ml/model.py（forecast_prices, _apply_forecast_guardrail）</div>
+</section>
+
+<section id="s32">
+<h2>32. ML 輸出與產物</h2>
+
+<p>每次執行 <code>ml/batch_pipeline.py</code> 後，輸出至 <code>ml/reports/</code>：</p>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>輸出檔案</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>predictions.csv</code></td><td>未來 30 天建議價格（含 guardrail 前後值、is_weekend、is_holiday）</td></tr>
+      <tr><td><code>metrics_latest.csv</code></td><td>最新訓練指標（MAE、MAPE、Q2、R2、CV strategy）</td></tr>
+      <tr><td><code>training_data_dump.csv</code></td><td>原始訓練資料（特徵工程前，供人工審查）</td></tr>
+      <tr><td><code>training_matrix.csv</code></td><td>特徵工程後的完整訓練矩陣（含 one-hot 展開欄位）</td></tr>
+      <tr><td><code>feature_descriptions.csv</code></td><td>每個特徵欄位的文字說明</td></tr>
+      <tr><td><code>feature_importance.csv</code></td><td>全域 feature importance 摘要（weight-based）</td></tr>
+      <tr><td><code>feature_importance_detailed.csv</code></td><td>importance / gain / cover / weight / total_gain / total_cover 六種指標</td></tr>
+      <tr><td><code>model_tree_dump.txt</code></td><td>每棵樹的 split 規則（供 debug）</td></tr>
+      <tr><td><code>prediction_explanations.csv</code></td><td>每天預測的 top feature drivers（log1p 空間的 contribution）</td></tr>
+      <tr><td><code>prediction_feature_contributions.csv</code></td><td>每天所有特徵的完整 contribution 長表</td></tr>
+      <tr><td><code>batch_pipeline_result.json</code></td><td>前端 / API 消費的 manifest（listing_id、metrics、artifacts 路徑等）</td></tr>
+      <tr><td><code>saved_model.json</code></td><td>序列化的 XGBoost 模型（可重用不重訓）</td></tr>
+      <tr><td><code>metrics_history.csv</code></td><td>每次訓練的歷史指標累積紀錄</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="callout callout-infer">
+  <strong>Inference — contribution 說明</strong>
+  <code>prediction_explanations.csv</code> 的 contribution 值在 <strong>log1p(price) 空間</strong>，正值表示推高價格、負值表示壓低價格。<code>contribution_multiplier = exp(contribution_log)</code> 可作為相對乘數閱讀。
+</div>
+
+<div class="callout callout-infer">
+  <strong>Inference — 前端整合方式</strong>
+  前端不可直接 import Python module。推薦做法：Next.js API route 用 subprocess 觸發 <code>python -m ml.batch_pipeline</code>，完成後讀取 <code>batch_pipeline_result.json</code> manifest 再回傳給前端。
+</div>
+
+<div class="sources">來源：ml/README.md（第 6、10 節）, ml/batch_pipeline.py</div>
+</section>
+
+<section id="s33">
+<h2>33. 回測與評估</h2>
+
+<p><code>ml/backtest.py</code> 提供兩種回測模式，<code>ml/compare_predictions.py</code> 提供日期間差異分析。</p>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>模式</th><th>指令</th><th>方法</th><th>評估目的</th><th>信號強度</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>holdout_comp</strong></td>
+        <td><code>.\run_ml_backtest.cmd</code></td>
+        <td>從訓練資料移除一間競品房，用剩餘資料訓練，預測被移除房的未來價格</td>
+        <td>測試模型對未見房源的泛化能力</td>
+        <td><span class="badge badge-amber">中等</span></td>
+      </tr>
+      <tr>
+        <td><strong>time split</strong></td>
+        <td><code>.\run_ml_backtest_time.cmd</code></td>
+        <td>以較早期資料訓練，用最近 N 天的 <code>observed_at_date</code> 作為驗證集</td>
+        <td>更接近真實上線情境的時間感知評估</td>
+        <td><span class="badge badge-green">較強</span></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h3>回測主要指標</h3>
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>指標</th><th>說明</th><th>判斷閾值</th></tr></thead>
+    <tbody>
+      <tr><td><code>mape_pct</code></td><td>平均絕對百分比誤差（最重要）</td><td>&lt;10 很好、10–15 可接受、15–20 偏弱、≥20 需調整</td></tr>
+      <tr><td><code>mean_signed_pct_error_pct</code></td><td>看模型整體偏高估還是偏低估</td><td>接近 0 為佳</td></tr>
+      <tr><td><code>within_10_pct_ratio</code></td><td>預測落在 ±10% 誤差內的比例</td><td>越高越好</td></tr>
+      <tr><td><code>within_20_pct_ratio</code></td><td>預測落在 ±20% 誤差內的比例</td><td>越高越好</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h3>日期比較分析</h3>
+<p><code>ml/compare_predictions.py</code> 比較同一房源的兩個未來日期預測差異，輸出：</p>
+<ul>
+  <li><code>prediction_date_comparison_summary.csv</code> — 兩天的預測價格與價差比例</li>
+  <li><code>prediction_date_comparison_drivers.csv</code> — 兩天之間每個 feature 的 contribution 差分（說明「為什麼週六比週一貴 $30」）</li>
+</ul>
+
+<div class="sources">來源：ml/backtest.py, ml/compare_predictions.py, ml/README.md（第 8、9 節）</div>
+</section>
+
+<section id="s34">
+<h2>34. Worker 觀察資料與 ML 的關係</h2>
+
+<p>Worker 的夜間 pipeline 是 ML 訓練資料的<strong>主要生產者</strong>。兩者的資料流向如下：</p>
+
+<div class="diagram-box">
+  <div class="diagram-title">Worker 觀察資料 → ML 訓練資料流向</div>
+  <svg width="100%" viewBox="0 0 700 230" font-family="system-ui,sans-serif" font-size="12">
+    <!-- Worker -->
+    <rect x="10" y="20" width="160" height="70" rx="6" fill="#f5f0fb" stroke="#8b52c9" stroke-width="1.5"/>
+    <text x="90" y="42" text-anchor="middle" font-weight="700" fill="#5b2d91">Worker Nightly Job</text>
+    <text x="90" y="58" text-anchor="middle" fill="#5b2d91" font-size="11">live_analysis pipeline</text>
+    <text x="90" y="73" text-anchor="middle" fill="#5b2d91" font-size="11">worker/core/observations.py</text>
+
+    <!-- Observation tables -->
+    <rect x="210" y="10" width="200" height="40" rx="6" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="310" y="28" text-anchor="middle" font-weight="700" fill="#1a6b3a" font-size="11">target_price_observations</text>
+    <text x="310" y="43" text-anchor="middle" fill="#1a6b3a" font-size="10">market median per stay_date</text>
+
+    <rect x="210" y="60" width="200" height="40" rx="6" fill="#edf7f1" stroke="#2d9956" stroke-width="1.5"/>
+    <text x="310" y="78" text-anchor="middle" font-weight="700" fill="#1a6b3a" font-size="11">market_comp_observations</text>
+    <text x="310" y="93" text-anchor="middle" fill="#1a6b3a" font-size="10">per-comp nightly price per stay_date</text>
+
+    <rect x="210" y="110" width="200" height="40" rx="6" fill="#eef4ff" stroke="#4a80d4" stroke-width="1.5"/>
+    <text x="310" y="128" text-anchor="middle" font-weight="700" fill="#1d5fad" font-size="11">benchmark_price_observations</text>
+    <text x="310" y="143" text-anchor="middle" fill="#1d5fad" font-size="10">benchmark vs market（Phase 5A）</text>
+
+    <!-- ML -->
+    <rect x="450" y="50" width="160" height="60" rx="6" fill="#fdf6e3" stroke="#c47f1a" stroke-width="1.5"/>
+    <text x="530" y="72" text-anchor="middle" font-weight="700" fill="#92600a">ML Pipeline</text>
+    <text x="530" y="88" text-anchor="middle" fill="#92600a" font-size="11">ml/data.py</text>
+    <text x="530" y="103" text-anchor="middle" fill="#92600a" font-size="11">fetch_training_dataset()</text>
+
+    <!-- Deferred label -->
+    <text x="390" y="136" text-anchor="middle" fill="#1d5fad" font-size="10" font-style="italic">（尚未 join 至訓練特徵）</text>
+
+    <!-- Arrows -->
+    <line x1="170" y1="40"  x2="208" y2="28"  stroke="#8b52c9" stroke-width="1.5" marker-end="url(#arrML2)"/>
+    <line x1="170" y1="55"  x2="208" y2="78"  stroke="#8b52c9" stroke-width="1.5" marker-end="url(#arrML2)"/>
+    <line x1="170" y1="70"  x2="208" y2="128" stroke="#4a80d4" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrML3)"/>
+    <line x1="410" y1="30"  x2="448" y2="66"  stroke="#2d9956" stroke-width="1.5" marker-end="url(#arrML2)"/>
+    <line x1="410" y1="80"  x2="448" y2="83"  stroke="#2d9956" stroke-width="1.5" marker-end="url(#arrML2)"/>
+    <line x1="410" y1="130" x2="448" y2="100" stroke="#4a80d4" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrML3)"/>
+
+    <!-- Observation reuse note -->
+    <rect x="10" y="170" width="620" height="50" rx="6" fill="#f3f3f0" stroke="#ccc" stroke-width="1"/>
+    <text x="320" y="191" text-anchor="middle" font-weight="700" fill="#1a1a18" font-size="11">📌 觀察資料的雙重用途</text>
+    <text x="320" y="207" text-anchor="middle" fill="#6b6b65" font-size="10">① 夜間 alert 評估（即時性，D0–D3 優先）  ② ML 訓練資料積累（長期歷史廣度）</text>
+    <text x="320" y="220" text-anchor="middle" fill="#6b6b65" font-size="10">兩者共享同一張觀察表，寫入時間點依 nightly_strategy.py 的分層採樣計畫決定</text>
+
+    <defs>
+      <marker id="arrML2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#8b52c9"/>
+      </marker>
+      <marker id="arrML3" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#4a80d4"/>
+      </marker>
+    </defs>
+  </svg>
+</div>
+
+<h3>夜間爬取策略與 ML 資料積累</h3>
+<p><code>worker/core/nightly_strategy.py</code> 將 30 天預報窗口切分為四個 tier，並以不同頻率採樣：</p>
+<ul>
+  <li><strong>near_term (D0–D3)</strong>：每晚觀察，為 alert 評估提供最高鮮度</li>
+  <li><strong>medium (D4–D10)</strong>：每隔 TIER2_STEP 夜觀察</li>
+  <li><strong>far (D11–D21)</strong>：更低頻率</li>
+  <li><strong>sparse (D22–D30)</strong>：僅觀察端點</li>
+</ul>
+<p>這個設計同時服務兩個目標：最小化 Airbnb 請求量，同時在不同日期跨度積累 ML 所需的時間序列多樣性。</p>
+
+<p><code>worker/core/observation_reuse.py</code> 讓互動式報表能重用最近的夜間觀察，避免重複爬取。ML 則直接讀取觀察表，不經過 reuse 快取。</p>
+
+<div class="sources">來源：worker/core/observations.py, worker/core/nightly_strategy.py, worker/core/observation_reuse.py, ml/data.py</div>
+</section>
+
+<section id="s35">
+<h2>35. 現有限制與未來 ML 勾點</h2>
+
+<h3>現有限制</h3>
+
+<div class="callout callout-risk">
+  <strong>Risk — 新房源冷啟動問題</strong>
+  正規化路徑需要至少 7 天 × 3 表的觀察資料，才能通過閘門。新加入的房源觀察資料不足時，會退回 legacy fallback（pool_snapshot），訓練品質較低，特別是時間序列特徵的有效性受限。
+</div>
+
+<div class="callout callout-risk">
+  <strong>Risk — ML 不驅動儀表板</strong>
+  ML 的 30 天預測目前寫至本地 <code>ml/reports/</code>，未整合至 <code>pricing_reports</code> 或任何 UI 路徑。<strong>使用者在儀表板看到的建議價格來自 Worker live_analysis，不是 ML 預測。</strong>這一點需在未來整合前明確溝通，避免預期錯位。
+</div>
+
+<div class="callout callout-risk">
+  <strong>Risk — Degraded CV 驗證</strong>
+  當訓練資料日期多樣性不足時，CV 降級為 KFold，指標可能過度樂觀。這不是 bug，是已知的資料量限制，程式碼有 warning 輸出。
+</div>
+
+<div class="callout callout-risk">
+  <strong>Risk — benchmark_price_observations 尚未作為訓練特徵</strong>
+  Phase 5A 寫入的 benchmark 觀察資料因 leakage 風險（scalar per report 不能直接對應到 comp 行），暫未加入特徵集。Phase 5B+/5C 需設計 stay_date join 方能正確整合。
+</div>
+
+<h3>未來保留勾點</h3>
+
+<div class="callout callout-reserved">
+  <strong>Reserved / Future — nightly_alert_training_refresh</strong>
+  <code>worker/core/report_policy.py</code> 中有一個 <code>nightly_alert_training_refresh</code> policy 勾點，<strong>目前未被 worker 發送</strong>。此勾點保留用於未來的 ML 定期重訓觸發機制，例如每 N 天自動對累積的觀察資料重跑 batch pipeline。
+</div>
+
+<div class="callout callout-reserved">
+  <strong>Reserved / Future — ML 預測整合至定價合約</strong>
+  當 ML 品質達到上線標準後，可以透過以下路徑整合：<br>
+  ① Worker 讀取 <code>batch_pipeline_result.json</code> 作為輔助訊號<br>
+  ② API route 觸發 ML batch 並將結果寫入新的 <code>ml_pricing_suggestions</code> 表<br>
+  ③ UI 在儀表板增加「ML 預測」對比欄，與現有 Worker 建議並排<br>
+  整合前必須確保 <code>report-contract.md</code> 的定義先更新，避免與 <code>recommendedDailyPrice</code> 混淆。
+</div>
+
+<div class="callout callout-reserved">
+  <strong>Reserved / Future — benchmark 特徵整合（Phase 5B+/5C）</strong>
+  按 stay_date 將 <code>benchmark_price_observations</code> join 至 <code>market_comp_observations</code> 訓練行，讓每筆訓練樣本都能帶有時間對齊的 benchmark_price 特徵。join 點在 <code>ml/data.py::_fetch_normalized_training_rows()</code> 中有 TODO 標記。
+</div>
+
+<div class="sources">來源：ml/data.py, ml/model.py, worker/core/nightly_strategy.py, worker/core/report_policy.py, docs/report-contract.md</div>
+</section>
+
+</main>
+</div>
+
+<!-- TOC active state via IntersectionObserver -->
+<script>
+  const sections = document.querySelectorAll('section[id]');
+  const tocLinks = document.querySelectorAll('#toc a');
+
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        tocLinks.forEach(a => {
+          a.classList.toggle('active', a.getAttribute('href') === '#' + e.target.id);
+        });
+      }
+    });
+  }, { rootMargin: '-10% 0px -80% 0px' });
+
+  sections.forEach(s => io.observe(s));
+</script>
+</body>
+</html>
