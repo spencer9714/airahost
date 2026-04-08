@@ -1869,6 +1869,41 @@ def run_benchmark_scrape(
 # ---------------------------------------------------------------------------
 
 
+def _build_structured_search_location(
+    city: Optional[str],
+    state: Optional[str],
+    postal_code: Optional[str],
+) -> tuple:
+    """
+    Build a search-friendly location from structured address fields.
+
+    Priority (most to least precise for Airbnb geo-search):
+      1. city + state + postalCode → "City, ST POSTAL"   (fully-qualified, unambiguous)
+      2. postalCode alone          → "POSTAL"             (ZIP is geo-precise even alone)
+      3. city + state              → "City, ST"           (state disambiguates city name)
+      4. anything else             → ""                   (caller should fall back)
+
+    A city name alone is intentionally not returned here because it may be
+    geographically ambiguous (e.g. "Belmont" exists in CA and in Long Beach).
+    The caller falls back to _extract_search_location() in that case.
+
+    Returns:
+        (location: str, confidence: str)
+        When no structured location can be built, returns ("", "").
+    """
+    city = (city or "").strip() or None
+    state = (state or "").strip() or None
+    postal_code = (postal_code or "").strip() or None
+
+    if city and state and postal_code:
+        return f"{city}, {state} {postal_code}", "high"
+    if postal_code:
+        return postal_code, "high"
+    if city and state:
+        return f"{city}, {state}", "high"
+    return "", ""
+
+
 def _extract_search_location(address: str) -> tuple:
     """
     Extract a search-friendly location string from a full property address.
@@ -1876,6 +1911,11 @@ def _extract_search_location(address: str) -> tuple:
     Airbnb search works best with city/neighborhood names rather than full
     street addresses.  This function strips the street-level detail and
     returns the most useful search token, plus a confidence indicator.
+
+    ZIP preservation rule: when a trailing ZIP is found but no two-letter
+    state code is present among the remaining parts, the city name alone
+    would be geographically ambiguous.  In that case the ZIP is returned
+    as the search term — it is more precise than an unqualified city name.
 
     Returns:
         (search_location: str, confidence: str)  — confidence is "high" | "medium" | "low"
@@ -1892,16 +1932,29 @@ def _extract_search_location(address: str) -> tuple:
     if tw_match:
         return tw_match.group(1), "high"
 
-    # Comma-separated: "123 Main St, New York, NY 10001" → "New York, NY"
+    # Comma-separated: "123 Main St, Belmont, CA 94002" → "Belmont, CA"
+    #                  "Belmont, 94002"                 → "94002"  (no state → use ZIP)
+    #                  "123 Main St, Belmont, 94002"    → "94002"  (no state → use ZIP)
     parts = [p.strip() for p in addr.split(",") if p.strip()]
     if len(parts) >= 2:
         # Skip leading street component (starts with a digit or looks like a house number)
         start = 1 if re.match(r"^\d", parts[0]) else 0
         city_parts = parts[start:]
-        # Drop trailing bare ZIP/postal codes
-        city_parts = [p for p in city_parts if not re.match(r"^\d{3,6}$", p.strip())]
+        # Identify and separate a trailing bare ZIP/postal code
+        trailing_zip: Optional[str] = None
+        if city_parts and re.match(r"^\d{3,6}$", city_parts[-1]):
+            trailing_zip = city_parts[-1]
+            city_parts = city_parts[:-1]
         if city_parts:
+            # If no two-letter state code is present, the city alone may be
+            # geographically ambiguous ("Belmont" is in multiple metro areas).
+            # In that case the ZIP is a stronger disambiguator.
+            has_state = any(re.match(r"^[A-Za-z]{2}$", p) for p in city_parts)
+            if trailing_zip and not has_state:
+                return trailing_zip, "high"
             return ", ".join(city_parts[:2]), "high"
+        if trailing_zip:
+            return trailing_zip, "high"
 
     # Single token or no recognisable structure: use as-is
     return addr, "medium"
@@ -1948,17 +2001,35 @@ def run_criteria_search(
     timings: Dict[str, int] = {}
     base_origin = "https://www.airbnb.com"
 
-    # Extract a search-friendly location from the full address
-    search_location, addr_confidence = _extract_search_location(address)
+    # Prefer structured location fields from attributes to avoid ambiguous city-only searches.
+    # e.g. city="Belmont" + postalCode="94002" → "94002" (precise) not "Belmont" (ambiguous)
+    _city = (attributes.get("city") or "").strip() or None
+    _state = (attributes.get("state") or "").strip() or None
+    _postal = (
+        (attributes.get("postalCode") or attributes.get("postal_code") or "").strip() or None
+    )
+    search_location, addr_confidence = _build_structured_search_location(_city, _state, _postal)
+    if search_location:
+        logger.info(
+            f"[criteria] Structured location: city={_city!r} state={_state!r} "
+            f"postalCode={_postal!r} → {search_location!r} (confidence={addr_confidence})"
+        )
+    else:
+        # Fall back to address-string parsing when no structured fields are available
+        search_location, addr_confidence = _extract_search_location(address)
+        logger.info(
+            f"[criteria] Address-parsed location: address={address!r} "
+            f"→ {search_location!r} (confidence={addr_confidence})"
+        )
+
     is_zip = bool(re.match(r"^\d{3,6}$", search_location))
     search_mode = "zip" if is_zip else "city"
     logger.info(
-        f"[criteria] address={address!r} → search_location={search_location!r} "
-        f"(mode={search_mode}, confidence={addr_confidence})"
+        f"[criteria] search_location={search_location!r} mode={search_mode}"
     )
     if addr_confidence == "low":
         logger.warning(
-            f"[criteria] Low confidence extracting search location from address={address!r}. "
+            f"[criteria] Low confidence location from address={address!r}. "
             "Results may be inaccurate."
         )
 
@@ -1990,6 +2061,11 @@ def run_criteria_search(
         "rawAddress": address,
         "searchMode": search_mode,
         "addressConfidence": addr_confidence,
+        "structuredLocation": {
+            "city": _city,
+            "state": _state,
+            "postalCode": _postal,
+        },
         "searchAdults": adults,
         "checkin": checkin,
         "checkout": checkout,
