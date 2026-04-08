@@ -1878,14 +1878,18 @@ def _build_structured_search_location(
     Build a search-friendly location from structured address fields.
 
     Priority (most to least precise for Airbnb geo-search):
-      1. city + state + postalCode → "City, ST POSTAL"   (fully-qualified, unambiguous)
-      2. postalCode alone          → "POSTAL"             (ZIP is geo-precise even alone)
-      3. city + state              → "City, ST"           (state disambiguates city name)
-      4. anything else             → ""                   (caller should fall back)
+      1. postalCode (any combination) → "POSTAL"   ← HIGHEST PRIORITY
+         ZIP is always the most geographically precise and unambiguous token
+         for Airbnb search in the US/CA context.  Even when city + state are
+         also present, the ZIP alone is preferred — it removes all city-name
+         ambiguity (e.g. "Belmont" exists in CA, NC, and as a Long Beach
+         neighbourhood; "94002" is unambiguously San Mateo County, CA).
+      2. city + state (no postalCode)  → "City, ST"  (state disambiguates)
+      3. anything else                 → ""           (caller should fall back)
 
     A city name alone is intentionally not returned here because it may be
-    geographically ambiguous (e.g. "Belmont" exists in CA and in Long Beach).
-    The caller falls back to _extract_search_location() in that case.
+    geographically ambiguous.  The caller falls back to
+    _extract_search_location() in that case.
 
     Returns:
         (location: str, confidence: str)
@@ -1895,8 +1899,7 @@ def _build_structured_search_location(
     state = (state or "").strip() or None
     postal_code = (postal_code or "").strip() or None
 
-    if city and state and postal_code:
-        return f"{city}, {state} {postal_code}", "high"
+    # postalCode is highest priority — use it regardless of city / state presence.
     if postal_code:
         return postal_code, "high"
     if city and state:
@@ -1932,9 +1935,18 @@ def _extract_search_location(address: str) -> tuple:
     if tw_match:
         return tw_match.group(1), "high"
 
-    # Comma-separated: "123 Main St, Belmont, CA 94002" → "Belmont, CA"
-    #                  "Belmont, 94002"                 → "94002"  (no state → use ZIP)
-    #                  "123 Main St, Belmont, 94002"    → "94002"  (no state → use ZIP)
+    # Comma-separated address parsing.
+    # ZIP is highest priority: whenever a bare ZIP is found anywhere in the
+    # address, return it immediately — even when a state code is also present.
+    # This mirrors the same rule in _build_structured_search_location() and
+    # ensures the fallback path is consistent with the structured path.
+    #
+    # Examples:
+    #   "123 Main St, Belmont, CA, 94002" → "94002"
+    #   "Belmont, CA, 94002"              → "94002"
+    #   "Belmont, 94002"                  → "94002"
+    #   "Belmont, CA"                     → "Belmont, CA"
+    #   "New York, NY 10001"              → "10001"  (ZIP embedded in last part)
     parts = [p.strip() for p in addr.split(",") if p.strip()]
     if len(parts) >= 2:
         # Skip leading street component (starts with a digit or looks like a house number)
@@ -1945,16 +1957,11 @@ def _extract_search_location(address: str) -> tuple:
         if city_parts and re.match(r"^\d{3,6}$", city_parts[-1]):
             trailing_zip = city_parts[-1]
             city_parts = city_parts[:-1]
-        if city_parts:
-            # If no two-letter state code is present, the city alone may be
-            # geographically ambiguous ("Belmont" is in multiple metro areas).
-            # In that case the ZIP is a stronger disambiguator.
-            has_state = any(re.match(r"^[A-Za-z]{2}$", p) for p in city_parts)
-            if trailing_zip and not has_state:
-                return trailing_zip, "high"
-            return ", ".join(city_parts[:2]), "high"
+        # ZIP is highest priority — return it regardless of whether a state is present.
         if trailing_zip:
             return trailing_zip, "high"
+        if city_parts:
+            return ", ".join(city_parts[:2]), "high"
 
     # Single token or no recognisable structure: use as-is
     return addr, "medium"
