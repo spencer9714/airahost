@@ -23,6 +23,7 @@ from worker.scraper.price_estimator import (
     _build_structured_search_location,
     _extract_search_location,
     _geocode_postal_to_canonical,
+    _is_us_zip,
 )
 
 
@@ -430,3 +431,112 @@ class TestCriteriaLocationResolution:
         r = self._resolve("Belmont")
         assert r["search_location"] == "Belmont"
         assert r["addr_confidence"] == "medium"
+
+
+# ---------------------------------------------------------------------------
+# _is_us_zip — unit tests
+# ---------------------------------------------------------------------------
+
+class TestIsUsZip:
+
+    def test_five_digit_zip(self):
+        assert _is_us_zip("94002") is True
+
+    def test_zip_plus_four(self):
+        assert _is_us_zip("94002-1234") is True
+
+    def test_six_digit_not_us_zip(self):
+        assert _is_us_zip("123456") is False
+
+    def test_four_digit_not_us_zip(self):
+        assert _is_us_zip("1234") is False
+
+    def test_taiwan_postal(self):
+        assert _is_us_zip("10650") is True   # 5-digit, matches format (unavoidable)
+
+    def test_alphanumeric_canadian(self):
+        assert _is_us_zip("V6B1A1") is False
+
+    def test_leading_zeros(self):
+        assert _is_us_zip("01234") is True
+
+    def test_empty_string(self):
+        assert _is_us_zip("") is False
+
+    def test_whitespace_stripped(self):
+        assert _is_us_zip("  94002  ") is True
+
+
+# ---------------------------------------------------------------------------
+# _geocode_postal_to_canonical — query construction for US ZIPs
+# ---------------------------------------------------------------------------
+
+class TestGeocodeQueryConstruction:
+    """
+    Verify that _geocode_postal_to_canonical sends the right query strings
+    and countrycodes param to geocode_address_details for US ZIPs.
+    """
+
+    def test_us_zip_with_hint_builds_city_first_query(self):
+        """US ZIP with hint → 'City ZIP, United States'."""
+        received = {}
+
+        def _fake(address, timeout=5, countrycodes=None):
+            received["address"] = address
+            received["countrycodes"] = countrycodes
+            return _BELMONT_CA
+
+        with patch("worker.core.geocode_details.geocode_address_details", side_effect=_fake):
+            _geocode_postal_to_canonical("94002", hint_city="Belmont")
+
+        assert received.get("address") == "Belmont 94002, United States"
+        assert received.get("countrycodes") == "us"
+
+    def test_us_zip_no_hint_query(self):
+        """US ZIP without hint → '94002, United States'."""
+        received = {}
+
+        def _fake(address, timeout=5, countrycodes=None):
+            received["address"] = address
+            received["countrycodes"] = countrycodes
+            return _BELMONT_CA
+
+        with patch("worker.core.geocode_details.geocode_address_details", side_effect=_fake):
+            _geocode_postal_to_canonical("94002")
+
+        assert received.get("address") == "94002, United States"
+        assert received.get("countrycodes") == "us"
+
+    def test_non_us_postal_no_country_restriction(self):
+        """Non-US postal (e.g. Canadian) → no ', United States', no countrycodes."""
+        received = {}
+
+        def _fake(address, timeout=5, countrycodes=None):
+            received["address"] = address
+            received["countrycodes"] = countrycodes
+            return None
+
+        with patch("worker.core.geocode_details.geocode_address_details", side_effect=_fake):
+            _geocode_postal_to_canonical("V6B1A1", hint_city="Vancouver")
+
+        assert "United States" not in received.get("address", "")
+        assert received.get("countrycodes") is None
+
+    def test_retry_uses_same_country_context(self):
+        """When the city-hinted query fails, retry still uses US country context."""
+        calls = []
+
+        def _fake(address, timeout=5, countrycodes=None):
+            calls.append({"address": address, "countrycodes": countrycodes})
+            return None  # always fail → forces retry
+
+        with patch("worker.core.geocode_details.geocode_address_details", side_effect=_fake):
+            _geocode_postal_to_canonical("94002", hint_city="Belmont")
+
+        assert len(calls) == 2
+        # Primary: city-hinted
+        assert calls[0]["address"] == "Belmont 94002, United States"
+        assert calls[0]["countrycodes"] == "us"
+        # Retry: bare ZIP
+        assert calls[1]["address"] == "94002, United States"
+        assert calls[1]["countrycodes"] == "us"

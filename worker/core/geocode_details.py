@@ -45,21 +45,33 @@ def _normalize_country_code(value: Any) -> Optional[str]:
 def geocode_address_details(
     address: str,
     timeout: int = _DEFAULT_TIMEOUT_S,
+    countrycodes: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Geocode a free-text address and return coordinates plus structured fields.
+
+    Args:
+        address:      Free-text address or postal code.
+        timeout:      HTTP timeout in seconds.
+        countrycodes: ISO 3166-1 alpha-2 country code(s) to restrict results
+                      (e.g. "us" or "us,ca").  Passed directly to the
+                      Nominatim ``countrycodes`` parameter.
 
     Returns None on any failure and never raises.
     """
     if not address or not address.strip():
         return None
 
-    params = urlencode({
+    nominatim_params: Dict[str, str] = {
         "q": address.strip(),
         "format": "json",
         "limit": "1",
         "addressdetails": "1",
-    })
+    }
+    if countrycodes:
+        nominatim_params["countrycodes"] = countrycodes.strip().lower()
+
+    params = urlencode(nominatim_params)
     url = f"{_NOMINATIM_URL}?{params}"
     req = Request(url, headers={"User-Agent": _USER_AGENT})
 

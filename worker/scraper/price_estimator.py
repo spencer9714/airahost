@@ -1904,6 +1904,11 @@ def _build_structured_search_location(
     return "", ""
 
 
+def _is_us_zip(postal_code: str) -> bool:
+    """Return True if postal_code looks like a US ZIP (5-digit or ZIP+4)."""
+    return bool(re.match(r"^\d{5}(?:-\d{4})?$", postal_code.strip()))
+
+
 def _geocode_postal_to_canonical(
     postal_code: str,
     hint_city: Optional[str] = None,
@@ -1912,12 +1917,14 @@ def _geocode_postal_to_canonical(
     """
     Resolve a postal code to a canonical city / state / coords via Nominatim.
 
-    Uses geocode_address_details() which returns structured address fields.
-    The hint_city is appended to the query string to improve result quality
-    (e.g. "94002 Belmont" is more accurate than bare "94002").
+    For US ZIPs (5-digit or ZIP+4):
+      - Appends ", United States" to the query so Nominatim restricts search
+        to the US, preventing global misrouting (e.g. "94002" → Mexico).
+      - Passes countrycodes="us" as an additional Nominatim filter.
+      - Primary query:  "Belmont 94002, United States"  (with hint_city)
+      - Fallback query: "94002, United States"           (bare ZIP)
 
-    Returns a dict with at minimum:
-        lat, lng, city, state, postal_code, country, country_code
+    For non-US postal codes the query is sent without country restriction.
 
     Returns None on any failure — geocoding is always best-effort.  Callers
     must handle None and fall back gracefully.
@@ -1928,14 +1935,23 @@ def _geocode_postal_to_canonical(
         logger.warning("[criteria] geocode_details not available; skipping ZIP geocoding")
         return None
 
-    # Prefer "ZIP city" query for better Nominatim disambiguation
-    query = f"{postal_code} {hint_city}".strip() if hint_city else postal_code
-    result = geocode_address_details(query, timeout=timeout)
+    us_zip = _is_us_zip(postal_code)
+    country_suffix = ", United States" if us_zip else ""
+    countrycodes = "us" if us_zip else None
 
-    # If the city-hinted query fails, retry with the bare ZIP
+    if hint_city:
+        query = f"{hint_city} {postal_code}{country_suffix}"
+    else:
+        query = f"{postal_code}{country_suffix}"
+
+    logger.debug(f"[criteria] Geocode query={query!r} countrycodes={countrycodes!r}")
+    result = geocode_address_details(query, timeout=timeout, countrycodes=countrycodes)
+
+    # If the city-hinted query fails, retry with just the ZIP (+ country context)
     if not result and hint_city:
-        logger.debug(f"[criteria] Geocode retry with bare postal: {postal_code!r}")
-        result = geocode_address_details(postal_code, timeout=timeout)
+        retry_query = f"{postal_code}{country_suffix}"
+        logger.debug(f"[criteria] Geocode retry query={retry_query!r}")
+        result = geocode_address_details(retry_query, timeout=timeout, countrycodes=countrycodes)
 
     return result
 
@@ -2051,6 +2067,7 @@ def run_criteria_search(
 
     geocode_result: Optional[Dict[str, Any]] = None
     city_zip_mismatch: Optional[str] = None
+    geocode_query_used: Optional[str] = None  # logged in queryCriteria for debugging
 
     # Detect ZIP anywhere in the address string (for the all-fallback path D)
     _addr_zip_match = re.search(r"\b(\d{5})\b", address)
@@ -2058,6 +2075,11 @@ def run_criteria_search(
 
     if _postal:
         # Path A: geocode the ZIP
+        _postal_us = _is_us_zip(_postal)
+        _postal_suffix = ", United States" if _postal_us else ""
+        geocode_query_used = (
+            f"{_city} {_postal}{_postal_suffix}" if _city else f"{_postal}{_postal_suffix}"
+        )
         logger.info(f"[criteria] Geocoding postalCode={_postal!r} hint_city={_city!r}")
         geocode_result = _geocode_postal_to_canonical(_postal, hint_city=_city)
 
@@ -2131,6 +2153,8 @@ def run_criteria_search(
             logger.info(
                 f"[criteria] Address parser returned ZIP {search_location!r}; geocoding"
             )
+            _raw_us = _is_us_zip(search_location)
+            geocode_query_used = search_location + (", United States" if _raw_us else "")
             geocode_result = _geocode_postal_to_canonical(search_location)
             if geocode_result:
                 gc_city = geocode_result.get("city")
@@ -2202,6 +2226,7 @@ def run_criteria_search(
             "lat": geocode_result.get("lat") if geocode_result else None,
             "lng": geocode_result.get("lng") if geocode_result else None,
         } if geocode_result else None,
+        "geocodeQuery": geocode_query_used,
         "cityZipMismatch": city_zip_mismatch,
         "searchAdults": adults,
         "checkin": checkin,
