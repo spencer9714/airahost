@@ -44,31 +44,31 @@ anchor handoff.
 
 ```mermaid
 flowchart TD
-    A[Tool form input] --> B[POST /api/reports]
-    B --> C[pricing_reports row<br/>input_address + input_attributes]
-    C --> D[worker/main.py]
+    A["Tool form input"] --> B["POST /api/reports"]
+    B --> C["pricing_reports row<br/>input_address + input_attributes"]
+    C --> D["worker/main.py"]
 
     D --> E{inputMode}
-    E -->|criteria| F[run_criteria_search]
-    E -->|url| G[run_scrape]
+    E -->|criteria| F["run_criteria_search"]
+    E -->|url| G["run_scrape"]
 
-    F --> F1[Resolve search_location from city/state/ZIP]
-    F1 --> F2[Search Airbnb results page]
-    F2 --> F3[Parse result cards into candidate ListingSpec items]
-    F3 --> F4[Choose best anchor listing]
+    F --> F1["Resolve search_location from city/state/ZIP"]
+    F1 --> F2["Search Airbnb results page"]
+    F2 --> F3["Parse result cards into candidate ListingSpec items"]
+    F3 --> F4["Choose best anchor listing"]
     F4 --> G
 
-    G --> G1[extract_target_spec(anchor or listing URL)]
-    G1 --> G2[Build targetSpec from scraped Airbnb page]
-    G2 --> G3[Build queryCriteria from scraped target.location and target.accommodates]
-    G3 --> G4[Collect day-by-day comparable listings]
-    G4 --> H[result_summary]
+    G --> G1["extract_target_spec(anchor or listing URL)"]
+    G1 --> G2["Build targetSpec from scraped Airbnb page"]
+    G2 --> G3["Build queryCriteria from scraped target.location and target.accommodates"]
+    G3 --> G4["Collect day-by-day comparable listings"]
+    G4 --> H["result_summary"]
 
-    H --> I[GET /api/r/:shareId]
-    I --> J[Report page]
-    J --> J1[Your listing = targetSpec]
-    J --> J2[Search criteria used = queryCriteria]
-    J --> J3[Comparable listings = comparableListings]
+    H --> I["GET /api/r/:shareId"]
+    I --> J["Report page"]
+    J --> J1["Your listing = targetSpec"]
+    J --> J2["Search criteria used = queryCriteria"]
+    J --> J3["Comparable listings = comparableListings"]
 ```
 
 ## Where Each Report Section Comes From
