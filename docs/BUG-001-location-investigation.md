@@ -3,6 +3,10 @@
 This note documents the current code path behind `BUG-001` before any fix is
 applied.
 
+Update on `2026-04-09`: a fix has now been implemented in
+`worker/scraper/price_estimator.py`, but it still needs live Airbnb rerun
+verification.
+
 ## Case Under Review
 
 User input in `Search by criteria` mode:
@@ -26,6 +30,14 @@ Observed report:
 - `Search criteria used` shows `8` guests instead of `6`
 - Comparable listings are from Charlotte, not Belmont
 
+Additional log observation:
+
+- Worker log line:
+  `https://www.airbnb.com/s/Belmont%2C%20CA/homes?checkin=2026-04-21&checkout=2026-04-23&adults=6`
+- the worker was emitting `Belmont%2C%20CA` in the Airbnb search path
+- user validation showed Airbnb resolves the correct market with `Belmont,CA`
+  instead
+
 ## Short Answer
 
 The bug is very likely caused by a shared pipeline boundary:
@@ -39,6 +51,17 @@ The bug is very likely caused by a shared pipeline boundary:
 
 That means criteria mode can accidentally "become" listing-URL mode after the
 anchor handoff.
+
+The new log observation changed the conclusion slightly:
+
+- there is a real search-URL formatting issue in `build_search_url()`
+- and there is also still a real criteria-to-anchor handoff issue after anchor
+  selection
+
+So `BUG-001` has two contributing causes:
+
+1. incorrect Airbnb search path formatting for criteria location input
+2. anchor listing metadata overwriting criteria-owned target metadata
 
 ## End-To-End Data Flow
 
@@ -97,6 +120,37 @@ Relevant flow:
 
 For the Belmont case, this code path should prefer Belmont because ZIP
 `94002-2216` is present and the city/state are structured.
+
+### 1a. About the logged `Belmont%2C%20CA` URL
+
+The logged URL:
+
+```text
+https://www.airbnb.com/s/Belmont%2C%20CA/homes?checkin=2026-04-21&checkout=2026-04-23&adults=6
+```
+
+is equivalent to:
+
+```text
+https://www.airbnb.com/s/Belmont, CA/homes?...
+```
+
+The code originally produced this by calling `quote(location)` on the full path
+segment. While that is technically valid URL encoding, user testing showed
+Airbnb search resolves the intended market with:
+
+```text
+/s/Belmont,CA/homes
+```
+
+rather than:
+
+```text
+/s/Belmont%2C%20CA/homes
+```
+
+This means the URL format itself is part of the bug, not just the later anchor
+handoff.
 
 ### 2. How `Your listing` is populated
 
@@ -230,6 +284,55 @@ That single design overlap can explain all three observed issues:
 - wrong `Search criteria used`
 - wrong comparable geography
 
+The new log evidence makes the root cause more specific:
+
+- initial criteria-mode location resolution appears correct
+- the later shared scrape handoff is what allowed Belmont to become Charlotte
+
+## Implemented Fix
+
+Implemented in:
+
+- [price_estimator.py](/Users/lambulandllc/Projects/Aira/airahost/worker/scraper/price_estimator.py)
+
+### What changed
+
+1. `build_search_url()` now normalizes `City, State` to `City,State` and keeps
+   the comma unescaped in the Airbnb path segment.
+2. `run_scrape()` now accepts:
+   - `target_spec_override`
+   - `query_criteria_override`
+3. `run_criteria_search()` now passes a synthetic user-owned target built from:
+   - input address
+   - geocoded / structured city and state
+   - user-entered bedrooms / baths / guests / property type
+4. During the second-pass scrape:
+   - the anchor listing URL is still used as the scrape seed
+   - but criteria mode no longer lets the anchor listing replace:
+     - target location
+     - target guest capacity
+     - target structural attributes
+     - final `queryCriteria`
+5. Comparable repair logic that fetches listing-page metadata for incomplete
+   comps is skipped when a criteria override is active, to avoid reintroducing
+   anchor listing data into the criteria-mode target context.
+
+### New behavior after the patch
+
+Criteria mode should now behave like this:
+
+```mermaid
+flowchart TD
+    A[Criteria input: Belmont, CA / 6 guests] --> B[run_criteria_search]
+    B --> C[Search Airbnb and choose anchor URL]
+    C --> D[run_scrape(anchor_url, target_spec_override=user_spec)]
+    D --> E[Use anchor only for scrape seed and exclusion]
+    D --> F[Use user_spec for target metadata, similarity, geo filter, day queries]
+    F --> G[resultSummary.targetSpec stays user-owned]
+    F --> H[resultSummary.queryCriteria stays criteria-owned]
+    F --> I[Comparable search stays around Belmont]
+```
+
 ## Fix Boundary Recommendation
 
 When we fix this, criteria mode and URL mode should continue sharing the heavy
@@ -244,6 +347,8 @@ Suggested boundary:
   comparable discovery
 - URL mode should continue using scraped Airbnb listing data as the target
   source of truth
+
+This is now the implemented design in code for criteria mode.
 
 In practical terms, the safest future fix likely needs to preserve these three
 criteria-mode fields from the pre-anchor stage:
@@ -264,12 +369,15 @@ criteria-mode fields from the pre-anchor stage:
 
 ## Current Conclusion
 
-Before any code change, the evidence points to a mode-conflict bug:
+Current conclusion after code review and patch:
 
-- Criteria mode starts with the user's Belmont inputs
-- The selected Airbnb anchor listing later becomes the de facto target
-- Shared scrape output overwrites criteria-mode reporting fields
+- The initial criteria search URL format was part of the bug and has been
+  patched to emit Airbnb-style city/state paths like `Belmont,CA`
+- The criteria-to-anchor handoff was also part of the bug and has been patched
+- Criteria mode now preserves its own target/search context while still using
+  an anchor listing for scrape mechanics
 
-That is the most coherent explanation for why Belmont became Charlotte, why
-guest count changed from 6 to 8, and why the comparable set came from the
-wrong market.
+Still pending:
+
+- rerun live verification on the Belmont scenario to confirm the report now
+  stays in Belmont and no longer drifts to Charlotte

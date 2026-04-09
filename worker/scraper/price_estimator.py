@@ -710,6 +710,8 @@ def run_scrape(
     nightly_plan: Optional[Any] = None,
     fallback_attributes: Optional[Dict[str, Any]] = None,
     fallback_address: Optional[str] = None,
+    target_spec_override: Optional[ListingSpec] = None,
+    query_criteria_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -723,6 +725,14 @@ def run_scrape(
     maxGuests, propertyType, ...) used to backfill any target spec fields that
     extract_target_spec() could not recover from the Airbnb page. Only fills
     missing fields — never overwrites live-extracted values.
+
+    target_spec_override: when provided, this becomes the source of truth for
+    criteria-mode target metadata and day-query search context. The scraped
+    listing URL still acts as an anchor/exclusion reference, but its location
+    and capacity no longer replace the user-entered criteria.
+
+    query_criteria_override: when provided, this is written into the final
+    transparent result instead of the shared URL-mode query_criteria payload.
 
     Raises ValueError if the date range exceeds MAX_NIGHTS.
     """
@@ -972,6 +982,50 @@ def run_scrape(
                     f"({target.lat:.5f}, {target.lng:.5f})"
                 )
 
+            if target_spec_override is not None:
+                anchor_url = target.url or listing_url
+                anchor_price = target.nightly_price
+                target = ListingSpec(
+                    url=anchor_url,
+                    title=target_spec_override.title or target.title,
+                    location=target_spec_override.location or target.location,
+                    city=target_spec_override.city or "",
+                    state=target_spec_override.state or "",
+                    postal_code=target_spec_override.postal_code or "",
+                    country=target_spec_override.country or "",
+                    country_code=target_spec_override.country_code or "",
+                    accommodates=target_spec_override.accommodates,
+                    bedrooms=target_spec_override.bedrooms,
+                    beds=target_spec_override.beds,
+                    baths=target_spec_override.baths,
+                    property_type=target_spec_override.property_type or "",
+                    nightly_price=None,
+                    currency=target.currency or "USD",
+                    rating=None,
+                    reviews=None,
+                    amenities=list(target_spec_override.amenities or []),
+                    scrape_nights=target.scrape_nights,
+                    price_kind=target.price_kind,
+                    lat=target_spec_override.lat if target_spec_override.lat is not None else target.lat,
+                    lng=target_spec_override.lng if target_spec_override.lng is not None else target.lng,
+                )
+                extraction_warnings.append(
+                    "Criteria override applied: preserved user-entered target metadata and search context; "
+                    f"anchor listing kept only for exclusion/reference ({anchor_url})."
+                )
+                _spec_extraction_meta["criteriaOverrideApplied"] = True
+                _spec_extraction_meta["anchorListingUrl"] = anchor_url
+                _spec_extraction_meta["anchorListingObservedNightlyPrice"] = anchor_price
+                logger.info(
+                    "[run_scrape] Applied criteria override: location=%r accommodates=%r "
+                    "bedrooms=%r baths=%r anchor_url=%s",
+                    target.location,
+                    target.accommodates,
+                    target.bedrooms,
+                    target.baths,
+                    anchor_url,
+                )
+
             # Resolve adaptive radius — use caller-supplied value or fall back to default
             _effective_radius = max_radius_km if max_radius_km is not None else DEFAULT_MAX_RADIUS_KM
 
@@ -1084,6 +1138,13 @@ def run_scrape(
                 "queryMode": "day_by_day",
                 "propertyTypeFilter": target.property_type or None,
             }
+            if query_criteria_override is not None:
+                query_criteria = dict(query_criteria_override)
+                query_criteria["checkin"] = checkin
+                query_criteria["checkout"] = checkout
+                query_criteria.setdefault("totalNights", total_nights)
+                query_criteria.setdefault("sampledNights", len(sample_indices))
+                query_criteria.setdefault("queryMode", "criteria_anchor_assisted")
 
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
@@ -1262,7 +1323,8 @@ def run_scrape(
                     "lng": target.lng,
                     "source": _coord_source,
                 }
-            _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
+            if target_spec_override is None:
+                _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
             _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
 
             logger.info(
@@ -2637,10 +2699,20 @@ def run_criteria_search(
         preferred_comps = raw if isinstance(raw, list) else None
 
     # Build a synthetic target spec from user criteria
+    user_city = (geocode_result.get("city") if geocode_result else None) or _city or ""
+    user_state = (geocode_result.get("state") if geocode_result else None) or _state or ""
+    user_country = (geocode_result.get("country") if geocode_result else None) or ""
+    user_country_code = (geocode_result.get("country_code") if geocode_result else None) or ""
+
     user_spec = ListingSpec(
         url="",
-        title="User property",
+        title=address or "User property",
         location=search_location,
+        city=user_city,
+        state=user_state,
+        postal_code=_postal or "",
+        country=user_country,
+        country_code=user_country_code,
         accommodates=attributes.get("maxGuests"),
         bedrooms=attributes.get("bedrooms"),
         beds=attributes.get("bedrooms"),  # approximate beds = bedrooms
@@ -2906,6 +2978,10 @@ def run_criteria_search(
         max_radius_km=max_radius_km,
         progress_callback=progress_callback,
         nightly_plan=nightly_plan,
+        fallback_attributes=attributes,
+        fallback_address=address,
+        target_spec_override=user_spec,
+        query_criteria_override=query_criteria,
     )
 
     # Merge criteria-specific info into the transparent result

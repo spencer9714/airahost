@@ -71,7 +71,7 @@ Copy this block for each new issue.
 
 ## BUG-001 - Criteria-based analysis fails for some searches
 
-- Status: `investigating`
+- Status: `fix_ready`
 - Priority: `P0`
 - Owner: `Codex session 2026-04-08`
 - Area: `worker/scraper`
@@ -112,10 +112,12 @@ Copy this block for each new issue.
   - `Search criteria used` shows `8` guests instead of `6`
   - comparable listings are from Charlotte rather than Belmont
 - Log snippets:
-  - not captured yet
+  - `2026-04-09 01:04:38 [INFO] worker.scraper: [criteria] Search URL: https://www.airbnb.com/s/Belmont%2C%20CA/homes?checkin=2026-04-21&checkout=2026-04-23&adults=6`
 
 ### Investigation Notes
 - Hypotheses:
+  - Airbnb search path formatting may be too aggressively URL-encoded for
+    city/state searches, causing Airbnb to resolve the wrong market
   - criteria mode selects an Airbnb search-result anchor, then reuses the URL
     mode scrape path in a way that overwrites criteria-mode target metadata
   - `targetSpec` may be populated from the selected anchor listing rather than
@@ -129,6 +131,10 @@ Copy this block for each new issue.
   - UI cards read from `resultSummary.targetSpec` and
     `resultSummary.queryCriteria`, so the bad data is likely produced by the
     worker, not by the frontend display layer
+  - the current `build_search_url()` implementation was encoding the entire
+    location path segment, producing `Belmont%2C%20CA`
+  - per user validation, Airbnb resolves the correct market when the path uses
+    `Belmont,CA` instead
   - `run_criteria_search()` builds an initial criteria-based `query_criteria`
     correctly from the user inputs, then selects an anchor Airbnb listing and
     calls `run_scrape(anchor_url, ...)`
@@ -144,7 +150,34 @@ Copy this block for each new issue.
 
 ### Resolution
 - Root cause:
+  - `build_search_url()` encoded the city/state path as a generic URL-encoded
+    string (`Belmont%2C%20CA`) instead of Airbnb's expected city/state search
+    path style (`Belmont,CA`), which could route the initial search to the
+    wrong market
+  - criteria mode correctly resolves the initial search location, but after
+    anchor selection it reused the shared URL-mode `run_scrape()` pipeline
+  - the shared pipeline treated the anchor listing as the target source of
+    truth for `targetSpec`, `queryCriteria`, and day-query search context
+  - that let a wrong anchor location or capacity overwrite the user-entered
+    Belmont/6-guest criteria and redirect comparable collection to the wrong market
 - Fix summary:
+  - updated `build_search_url()` to normalize `City, State` as `City,State`
+    and preserve the comma in the Airbnb search path
+  - added a criteria-mode override path in `run_scrape()` so the anchor URL is
+    retained only as a scrape seed / exclusion reference
+  - preserved user-entered target metadata and criteria-mode `queryCriteria`
+    during the second-pass scrape
+  - disabled comparable spec repair from replacing criteria-mode target fields
+    with anchor listing data
 - Files changed:
+  - `worker/scraper/comparable_collector.py`
+  - `worker/scraper/price_estimator.py`
 - Verification:
+  - `python3 -m py_compile worker/scraper/price_estimator.py`
+  - URL builder now emits Airbnb-style city/state paths such as `Belmont,CA`
+  - full Airbnb runtime verification still pending
 - Follow-up:
+  - rerun the Belmont report scenario and confirm:
+    - `Your listing` stays on Belmont user input
+    - `Search criteria used` stays `Belmont, CA` and `6`
+    - comparable listings stay near Belmont

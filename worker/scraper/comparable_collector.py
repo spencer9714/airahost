@@ -40,7 +40,11 @@ _SEARCH_CARD_LOCATION_PATTERNS = [
 def build_search_url(
     base_origin: str, location: str, checkin: str, checkout: str, adults: int
 ) -> str:
-    q = quote(location)
+    # Airbnb resolves some city/state markets more reliably when the path keeps
+    # the comma but removes the space: "Belmont,CA" rather than
+    # "Belmont%2C%20CA" (or "Belmont, CA") in the /s/... path segment.
+    normalized_location = re.sub(r"\s*,\s*", ",", clean(location))
+    q = quote(normalized_location, safe=",")
     return (
         f"{base_origin}/s/{q}/homes"
         f"?checkin={checkin}&checkout={checkout}&adults={adults}"
