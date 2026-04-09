@@ -2012,6 +2012,11 @@ def _extract_search_location(address: str) -> tuple:
 # the same neighbourhood as the target property.
 _ANCHOR_RADIUS_TIGHT_KM: float = 20.0
 _ANCHOR_RADIUS_FALLBACK_KM: float = 40.0
+# City-centre proxy radius: smaller than the listing-level tight radius because
+# geocoded city centres are less precise than per-listing map-pin coordinates.
+# 15 km is chosen to keep nearby suburbs (Redwood City ~5 km, San Mateo ~6.5 km)
+# while excluding more distant cities (San Francisco ~30 km, Sonoma ~87 km).
+_ANCHOR_RADIUS_CITY_PROXY_KM: float = 15.0
 # Minimum candidates that must survive the tight filter before we declare it
 # "good enough" and skip the fallback.
 _ANCHOR_MIN_GEO_CANDIDATES: int = 2
@@ -2022,44 +2027,106 @@ def _select_anchor_candidate(
     user_spec: ListingSpec,
     target_lat: Optional[float],
     target_lng: Optional[float],
+    *,
+    target_city: Optional[str] = None,
+    target_state: Optional[str] = None,
+    n_listing_coords: int = 0,
+    addr_confidence: str = "low",
 ) -> Tuple[ListingSpec, float, Dict[str, Any]]:
     """
     Choose the best anchor candidate for criteria pass 2.
 
-    Strategy
-    --------
-    1. If the target has geocoded coordinates, apply a tight geo filter
-       (_ANCHOR_RADIUS_TIGHT_KM) first.  This prevents structurally-similar
-       but geographically-distant listings (e.g. a Sonoma cottage when the
-       target is in Belmont) from winning the anchor slot.
+    Four-phase pipeline
+    -------------------
 
-    2. If the tight filter leaves fewer than _ANCHOR_MIN_GEO_CANDIDATES,
-       widen to _ANCHOR_RADIUS_FALLBACK_KM (resort / sparse markets).
+    Phase 1 — Geo pool (Paths A & B)
+        Path A (``n_listing_coords > 0``): tight (20 km) then fallback (40 km)
+        geo filter on page-embedded listing coordinates.
 
-    3. If *no* candidates survive any geo filter, skip geo entirely so we
-       always produce an anchor (degraded quality, flagged in debug).
+        Path B (``n_listing_coords == 0``, target has coords): geocode unique
+        candidate location strings to city-centre proxies, apply 15 km filter.
 
-    4. Apply structural similarity filter + scoring on the geo-constrained
-       pool.  If the similarity filter empties the pool, fall back to the
-       full geo pool so we always return something.
+        If neither produces a pool, fall through to Phase 2 as "text_bucket".
 
-    5. In all cases, ``distance_to_target_km`` is set on each candidate that
-       has coords (side-effect of ``apply_geo_filter``).
+    Phase 2 — Location bucket classification
+        Classify every candidate in the current pool into five buckets using
+        the metro-cluster mapping:
+          local_match       — same city as target
+          nearby_market     — same metro cluster (approved nearby market)
+          regional_mismatch — same state, different cluster
+          far_mismatch      — different state
+          unknown           — unparseable location (always pass-through)
+
+        This classification is applied to ALL paths so bucket counts are always
+        available for reporting, regardless of which path found the geo pool.
+
+    Phase 3 — Controlled nearby-market expansion
+        Priority 1: if ``local_match`` candidates exist → pool = local + unknown
+        Priority 2: if no local but ``nearby_market`` exists → pool = nearby + unknown
+                    (nearby_expansion_used = True)
+        Priority 3: fallback based on ``addr_confidence``
+          "high"   → fail-safe (use regional/far as last resort, flag degraded)
+          "medium"/"low" → also allow regional_mismatch; far remains last resort
+
+        For Paths A/B, this phase re-ranks the geo-filtered pool by bucket
+        priority without removing candidates that are geo-confirmed nearby.
+        For Path C (text-only), this phase IS the pool selection.
+
+    Phase 4 — Structural similarity ranking
+        ``filter_similar_candidates`` then ``similarity_score`` pick the best
+        structural match within the location-constrained pool.
+
+    Parameters
+    ----------
+    candidates       : pool of ListingSpec objects from the Airbnb search page
+    user_spec        : synthetic target spec built from user criteria
+    target_lat/lng   : geocoded target coordinates (may be None)
+    target_city      : target city name (normalised internally)
+    target_state     : target state, any form (normalised internally)
+    n_listing_coords : how many candidates already have listing-level coords
+    addr_confidence  : location confidence ("high" | "medium" | "low")
 
     Returns
     -------
     (best_match, best_score, anchor_debug)
     """
+    from worker.core.anchor_location import (
+        classify_candidate_location,
+        geocode_candidate_cities,
+        get_city_cluster,
+        get_nearby_cities,
+        normalize_city,
+        normalize_location_text,
+        normalize_state,
+        parse_location_city_state,
+    )
+
+    # Pre-normalise target location once
+    norm_city = normalize_city(target_city) if target_city else ""
+    norm_state = normalize_state(target_state) if target_state else ""
+
     n_before_geo = len(candidates)
     geo_radius_used: Optional[float] = None
     geo_fallback = False
     geo_skipped = False
     n_after_geo = n_before_geo
+    selection_mode = "no_geo"
 
-    pool = candidates  # default: no geo filtering
+    location_bucket_counts: Dict[str, int] = {
+        "local_match": 0, "nearby_market": 0, "regional_mismatch": 0,
+        "far_mismatch": 0, "unknown": 0,
+    }
+    fail_safe_triggered = False
+    nearby_expansion_used = False
+    allowed_nearby_cities: List[str] = []
+    n_proxy_coords = 0
 
-    if target_lat is not None and target_lng is not None:
-        # Try tight radius first
+    pool = candidates  # default: all candidates
+
+    # ── Phase 1A: listing-level coords ────────────────────────────────────────
+    if target_lat is not None and target_lng is not None and n_listing_coords > 0:
+        selection_mode = "listing_coords"
+
         tight_pool, tight_excluded = apply_geo_filter(
             candidates, target_lat, target_lng,
             max_radius_km=_ANCHOR_RADIUS_TIGHT_KM,
@@ -2070,11 +2137,10 @@ def _select_anchor_candidate(
             geo_radius_used = _ANCHOR_RADIUS_TIGHT_KM
             n_after_geo = len(tight_pool)
             logger.info(
-                f"[criteria/anchor] Geo filter {_ANCHOR_RADIUS_TIGHT_KM}km: "
+                f"[criteria/anchor] Path A: geo {_ANCHOR_RADIUS_TIGHT_KM}km: "
                 f"{n_before_geo} → {n_after_geo} candidates"
             )
         else:
-            # Too few in tight radius — widen to fallback
             geo_fallback = True
             geo_radius_used = _ANCHOR_RADIUS_FALLBACK_KM
             fallback_pool, _ = apply_geo_filter(
@@ -2082,28 +2148,163 @@ def _select_anchor_candidate(
                 max_radius_km=_ANCHOR_RADIUS_FALLBACK_KM,
             )
             logger.info(
-                f"[criteria/anchor] Tight radius too sparse ({len(tight_pool)} candidates); "
-                f"falling back to {_ANCHOR_RADIUS_FALLBACK_KM}km → "
-                f"{len(fallback_pool)} candidates"
+                f"[criteria/anchor] Path A: tight radius sparse "
+                f"({len(tight_pool)}); fallback {_ANCHOR_RADIUS_FALLBACK_KM}km"
+                f" → {len(fallback_pool)} candidates"
             )
             if fallback_pool:
                 pool = fallback_pool
                 n_after_geo = len(fallback_pool)
             else:
-                # Nothing within fallback radius either — skip geo entirely
                 geo_skipped = True
                 geo_radius_used = None
+                selection_mode = "text_bucket"
                 logger.warning(
-                    "[criteria/anchor] No candidates within fallback radius; "
-                    "skipping geo filter (degraded quality)"
+                    "[criteria/anchor] Path A: nothing within fallback radius; "
+                    "falling through to text-bucket filter"
                 )
-    else:
-        logger.debug("[criteria/anchor] No target coords — skipping geo filter")
 
-    # Structural similarity filter + scoring on geo-constrained pool
+    # ── Phase 1B: city-proxy geocoding ────────────────────────────────────────
+    elif target_lat is not None and target_lng is not None and n_listing_coords == 0:
+        logger.info(
+            "[criteria/anchor] Path B: no listing coords; "
+            "attempting city-proxy geocoding"
+        )
+        n_proxy_coords = geocode_candidate_cities(
+            candidates, max_unique_cities=10, timeout_per_city=2,
+        )
+        if n_proxy_coords > 0:
+            proxy_pool, proxy_excluded = apply_geo_filter(
+                candidates, target_lat, target_lng,
+                max_radius_km=_ANCHOR_RADIUS_CITY_PROXY_KM,
+            )
+            if len(proxy_pool) >= _ANCHOR_MIN_GEO_CANDIDATES or proxy_excluded == 0:
+                pool = proxy_pool
+                geo_radius_used = _ANCHOR_RADIUS_CITY_PROXY_KM
+                n_after_geo = len(proxy_pool)
+                selection_mode = "city_proxy"
+                logger.info(
+                    f"[criteria/anchor] Path B: city-proxy {_ANCHOR_RADIUS_CITY_PROXY_KM}km: "
+                    f"{n_before_geo} → {n_after_geo} candidates"
+                )
+            else:
+                selection_mode = "text_bucket"
+                logger.info(
+                    f"[criteria/anchor] Path B: proxy pool sparse "
+                    f"({len(proxy_pool)}); falling through to text-bucket"
+                )
+        else:
+            selection_mode = "text_bucket"
+            logger.info(
+                "[criteria/anchor] Path B: city-proxy geocoding yielded no coords; "
+                "falling through to text-bucket"
+            )
+
+    # ── Phase 2: Classify pool members by location bucket (all paths) ─────────
+    # Always computed — gives audit trail regardless of which path was used.
+    if norm_city and norm_state:
+        allowed_nearby_cities = get_nearby_cities(norm_state, norm_city)
+
+        bucketed: Dict[str, List[ListingSpec]] = {
+            "local_match": [], "nearby_market": [], "regional_mismatch": [],
+            "far_mismatch": [], "unknown": [],
+        }
+        for cand in pool:
+            bkt = classify_candidate_location(
+                getattr(cand, "location", "") or "", norm_city, norm_state,
+            )
+            bucketed[bkt].append(cand)
+
+        for k in location_bucket_counts:
+            location_bucket_counts[k] = len(bucketed[k])
+
+        # ── Phase 3: Controlled nearby-market expansion ───────────────────────
+        # For text-based paths (C / no_geo): this phase determines the pool.
+        # For geo-based paths (A / B): pool is already geo-constrained; this
+        # phase applies priority ordering within the geo pool.
+
+        if selection_mode in ("text_bucket", "no_geo"):
+            # Text path: staged expansion is the only location filter.
+            selection_mode = "text_bucket"
+
+            if bucketed["local_match"]:
+                # Priority 1: target-city candidates found — no expansion needed
+                pool = bucketed["local_match"] + bucketed["unknown"]
+                nearby_expansion_used = False
+
+            elif bucketed["nearby_market"]:
+                # Priority 2: expand to approved nearby market
+                pool = bucketed["nearby_market"] + bucketed["unknown"]
+                nearby_expansion_used = True
+
+            else:
+                # Priority 3: no local or nearby → confidence-gated fallback
+                nearby_expansion_used = True  # expansion attempted, nothing found
+
+                if addr_confidence == "high":
+                    # High confidence: refuse regional/far; fail-safe only
+                    fail_safe_triggered = True
+                    fallback = bucketed["regional_mismatch"] + bucketed["far_mismatch"]
+                else:
+                    # Medium/low: accept regional as degraded fallback
+                    fallback = bucketed["regional_mismatch"] + bucketed["unknown"]
+                    if not fallback:
+                        fail_safe_triggered = True
+                        fallback = bucketed["far_mismatch"]
+
+                if fallback:
+                    pool = fallback
+
+            n_after_geo = len(pool)
+
+            logger.info(
+                f"[criteria/anchor] Phase 3 ({addr_confidence} conf, "
+                f"expansion={'yes' if nearby_expansion_used else 'no'}): "
+                f"local={location_bucket_counts['local_match']} "
+                f"nearby={location_bucket_counts['nearby_market']} "
+                f"regional={location_bucket_counts['regional_mismatch']} "
+                f"far={location_bucket_counts['far_mismatch']} "
+                f"unknown={location_bucket_counts['unknown']} "
+                f"→ pool={len(pool)}"
+                + (" FAIL-SAFE" if fail_safe_triggered else "")
+            )
+
+        else:
+            # Geo path (A or B): pool already geo-constrained.
+            # Priority-order within the pool: local > nearby > regional > far.
+            # Prefer local if available; only use full pool if no local candidates.
+            if bucketed["local_match"]:
+                # Local candidates exist in geo pool — restrict to them
+                refined = bucketed["local_match"] + bucketed["unknown"]
+                pool = refined
+                n_after_geo = len(pool)
+                nearby_expansion_used = False
+            elif bucketed["nearby_market"] or bucketed["unknown"]:
+                # No local in geo pool; geo-confirmed nearby candidates compete
+                nearby_expansion_used = True
+                # pool stays as geo-filtered (don't narrow further — trust geo)
+            else:
+                # Geo pool has only regional/far — unusual given geo filter
+                nearby_expansion_used = True
+                # Still trust the geo filter result; just flag expansion
+
+            logger.info(
+                f"[criteria/anchor] Phase 3 geo-path "
+                f"({'expansion' if nearby_expansion_used else 'local-only'}): "
+                f"local={location_bucket_counts['local_match']} "
+                f"nearby={location_bucket_counts['nearby_market']} "
+                f"pool={len(pool)}"
+            )
+
+    else:
+        logger.debug(
+            "[criteria/anchor] No target city/state — skipping bucket "
+            "classification and expansion"
+        )
+
+    # ── Phase 4: Structural similarity ranking ────────────────────────────────
     filtered, _filter_debug = filter_similar_candidates(user_spec, pool)
     if not filtered:
-        # Similarity filter emptied the pool (unusual) — score the raw pool
         logger.warning(
             f"[criteria/anchor] Similarity filter emptied pool of {len(pool)}; "
             "falling back to unfiltered pool"
@@ -2116,12 +2317,37 @@ def _select_anchor_candidate(
     best_match, best_score = scored[0]
     anchor_dist = getattr(best_match, "distance_to_target_km", None)
 
+    # Classify the selected anchor's bucket for reporting
+    anchor_bucket: Optional[str] = None
+    if norm_city and norm_state:
+        anchor_bucket = classify_candidate_location(
+            getattr(best_match, "location", "") or "", norm_city, norm_state,
+        )
+        # For geo paths: finalise nearby_expansion_used from the selected anchor
+        if selection_mode in ("listing_coords", "city_proxy"):
+            nearby_expansion_used = anchor_bucket not in (
+                None, "local_match", "unknown"
+            )
+
+    # Compute location explainability fields for the selected anchor
+    _anchor_raw_loc = (getattr(best_match, "location", "") or "").strip()
+    _anchor_norm_loc, _anchor_norm_notes = normalize_location_text(_anchor_raw_loc)
+    _anchor_city, _anchor_state_code = parse_location_city_state(
+        _anchor_norm_loc if _anchor_norm_loc else _anchor_raw_loc
+    )
+    _anchor_cluster = (
+        get_city_cluster(_anchor_state_code, _anchor_city)
+        if _anchor_state_code and _anchor_city
+        else None
+    )
+
     logger.info(
         f"[criteria/anchor] Selected: {best_match.url} "
         f"score={best_score:.3f} "
-        f"dist={anchor_dist:.1f}km" if anchor_dist is not None else
-        f"[criteria/anchor] Selected: {best_match.url} "
-        f"score={best_score:.3f} dist=unknown"
+        + (f"dist={anchor_dist:.1f}km " if anchor_dist is not None else "dist=unknown ")
+        + f"mode={selection_mode} bucket={anchor_bucket} "
+        + f"expansion={nearby_expansion_used}"
+        + (f" norm={_anchor_norm_notes!r}" if _anchor_norm_notes else "")
     )
 
     return best_match, best_score, {
@@ -2133,6 +2359,22 @@ def _select_anchor_candidate(
         "anchorStructuralScore": round(best_score, 3),
         "anchorDistanceKm": round(anchor_dist, 2) if anchor_dist is not None else None,
         "anchorHasTargetCoords": (target_lat is not None and target_lng is not None),
+        "anchorSelectionMode": selection_mode,
+        "anchorProxyCoordsAssigned": n_proxy_coords,
+        "anchorLocationBuckets": location_bucket_counts,
+        "anchorLocationBucket": anchor_bucket,
+        "anchorFailSafeTriggered": fail_safe_triggered,
+        "anchorNearbyExpansionUsed": nearby_expansion_used,
+        "anchorAllowedNearbyCities": allowed_nearby_cities,
+        "anchorTargetCityOnlyCount": location_bucket_counts["local_match"],
+        "anchorNearbyMarketCount": location_bucket_counts["nearby_market"],
+        "targetLocationConfidence": addr_confidence,
+        "targetCanonicalCity": norm_city or None,
+        "targetCanonicalState": norm_state or None,
+        "anchorRawLocation": _anchor_raw_loc or None,
+        "anchorNormalizedLocation": _anchor_norm_loc or _anchor_raw_loc or None,
+        "anchorNormalizationNotes": _anchor_norm_notes or None,
+        "anchorClusterId": _anchor_cluster,
     }
 
 
@@ -2510,11 +2752,16 @@ def run_criteria_search(
                 }
 
             # Anchor selection: geo-constrained then structural similarity.
-            # _select_anchor_candidate() filters by distance first (if target
-            # coords are available) so geographically-distant listings cannot
-            # win purely on structural similarity.
+            # _select_anchor_candidate() tries three paths in order:
+            #   A. listing-level coords (from coord_map)   → 20 km / 40 km filter
+            #   B. city-proxy geocoding (if coord_map = 0) → 15 km filter
+            #   C. metro-cluster text-bucket filter        → confidence-gated
             best_match, best_score, anchor_debug = _select_anchor_candidate(
-                candidates, user_spec, target_lat, target_lng
+                candidates, user_spec, target_lat, target_lng,
+                target_city=_city,
+                target_state=_state,
+                n_listing_coords=n_coords_assigned,
+                addr_confidence=addr_confidence,
             )
 
             logger.info(
