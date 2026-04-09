@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from worker.scraper.price_estimator import (
+    _abbrev_state_for_search,
     _build_structured_search_location,
     _extract_search_location,
     _geocode_postal_to_canonical,
@@ -266,7 +267,7 @@ class TestCriteriaLocationResolution:
                     city_zip_mismatch = f"{_city!r} ≠ {gc_city!r}"
 
                 if gc_city and gc_state:
-                    search_location = f"{gc_city}, {gc_state}"
+                    search_location = f"{gc_city}, {_abbrev_state_for_search(gc_state)}"
                     addr_confidence = "high"
                 elif gc_city:
                     search_location = gc_city
@@ -280,7 +281,7 @@ class TestCriteriaLocationResolution:
 
             if not search_location:
                 if _city and _state:
-                    search_location = f"{_city}, {_state}"
+                    search_location = f"{_city}, {_abbrev_state_for_search(_state)}"
                     addr_confidence = "medium"
                 elif _city:
                     search_location = _city
@@ -289,7 +290,7 @@ class TestCriteriaLocationResolution:
                     search_location, addr_confidence = _extract_search_location(address)
 
         elif _city and _state:
-            search_location = f"{_city}, {_state}"
+            search_location = f"{_city}, {_abbrev_state_for_search(_state)}"
             addr_confidence = "high"
         elif _city:
             search_location = _city
@@ -307,7 +308,7 @@ class TestCriteriaLocationResolution:
                     if target_lng is None:
                         target_lng = gr.get("lng")
                     if gc_city and gc_state:
-                        search_location = f"{gc_city}, {gc_state}"
+                        search_location = f"{gc_city}, {_abbrev_state_for_search(gc_state)}"
                         addr_confidence = "high"
                     elif gc_city:
                         search_location = gc_city
@@ -325,20 +326,22 @@ class TestCriteriaLocationResolution:
     # ── Path A: postalCode → geocode ──────────────────────────────────────
 
     def test_postal_geocodes_to_canonical_city_state(self):
-        """94002 alone → geocode → Belmont, California."""
+        """94002 alone → geocode returns full state name → search string uses abbreviation."""
         r = self._resolve("94002", postal_code="94002", geocode_return=_BELMONT_CA)
-        assert r["search_location"] == "Belmont, California"
+        assert r["search_location"] == "Belmont, CA"   # not "Belmont, California"
         assert r["addr_confidence"] == "high"
         assert r["geocode_result"] is not None
+        # Metadata is untouched — raw geocoder output still has full state name
+        assert r["geocode_result"]["state"] == "California"
 
     def test_city_and_postal_geocodes_to_canonical(self):
-        """city=Belmont + postal=94002 → geocode → Belmont, California."""
+        """city=Belmont + postal=94002 → geocode → search string uses state abbreviation."""
         r = self._resolve(
             "Belmont, CA 94002",
             city="Belmont", state="CA", postal_code="94002",
             geocode_return=_BELMONT_CA,
         )
-        assert r["search_location"] == "Belmont, California"
+        assert r["search_location"] == "Belmont, CA"   # not "Belmont, California"
         assert r["addr_confidence"] == "high"
 
     def test_postal_geocode_carries_coords(self):
@@ -385,8 +388,8 @@ class TestCriteriaLocationResolution:
         )
         assert r["city_zip_mismatch"] is not None
         assert "Wrong City" in r["city_zip_mismatch"]
-        # Despite mismatch, geocoded city wins
-        assert r["search_location"] == "San Mateo, California"
+        # Despite mismatch, geocoded city wins; state is abbreviated
+        assert r["search_location"] == "San Mateo, CA"
 
     # ── Path B: city + state (no postal) ─────────────────────────────────
 
@@ -416,11 +419,11 @@ class TestCriteriaLocationResolution:
         assert without_state["search_location"] == "Belmont"
         assert without_state["addr_confidence"] == "low"
 
-    def test_city_state_full_name_passed_through(self):
-        """State name (long or short) is passed as-is — the frontend sends
-        what the user typed; normalization happens in enrichListingInputAttributes."""
+    def test_city_state_full_name_abbreviated_for_airbnb(self):
+        """Full US state name is abbreviated to 2-letter code in the Airbnb search
+        string so Airbnb resolves it correctly ('Belmont, CA' not 'Belmont, California')."""
         r = self._resolve("Belmont, California", city="Belmont", state="California")
-        assert r["search_location"] == "Belmont, California"
+        assert r["search_location"] == "Belmont, CA"
         assert r["addr_confidence"] == "high"
 
     def test_city_state_postal_still_geocodes(self):
@@ -433,8 +436,8 @@ class TestCriteriaLocationResolution:
             city="Belmont", state="CA", postal_code="94002",
             geocode_return=_BELMONT_CA,
         )
-        # Geocode canonical result wins (includes full state name from Nominatim)
-        assert r["search_location"] == "Belmont, California"
+        # Geocode canonical result wins; full state name is abbreviated for Airbnb
+        assert r["search_location"] == "Belmont, CA"
         assert r["addr_confidence"] == "high"
         assert r["geocode_result"] is not None
 
@@ -448,9 +451,9 @@ class TestCriteriaLocationResolution:
     # ── Path D: address-string fallback, ZIP geocoded ─────────────────────
 
     def test_address_with_zip_gets_geocoded_in_fallback(self):
-        """No structured fields; address parser returns ZIP; geocoding fires."""
+        """No structured fields; address parser returns ZIP; geocoding fires; state abbreviated."""
         r = self._resolve("Belmont, 94002", geocode_return=_BELMONT_CA)
-        assert r["search_location"] == "Belmont, California"
+        assert r["search_location"] == "Belmont, CA"   # not "Belmont, California"
         assert r["addr_confidence"] == "high"
 
     def test_address_city_state_no_zip_fallback(self):
@@ -577,3 +580,104 @@ class TestGeocodeQueryConstruction:
         # Retry: bare ZIP
         assert calls[1]["address"] == "94002, United States"
         assert calls[1]["countrycodes"] == "us"
+
+
+# ---------------------------------------------------------------------------
+# _abbrev_state_for_search — unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestAbbrevStateForSearch:
+    """
+    _abbrev_state_for_search() converts US full state names to abbreviations
+    for Airbnb search strings.  Non-US or already-abbreviated states are
+    returned unchanged.
+    """
+
+    def _abbrev(self, state):
+        return _abbrev_state_for_search(state)
+
+    # ── US full state names → abbreviation ───────────────────────────────────
+
+    def test_california_to_ca(self):
+        assert self._abbrev("California") == "CA"
+
+    def test_texas_to_tx(self):
+        assert self._abbrev("Texas") == "TX"
+
+    def test_new_york_to_ny(self):
+        assert self._abbrev("New York") == "NY"
+
+    def test_washington_to_wa(self):
+        assert self._abbrev("Washington") == "WA"
+
+    def test_district_of_columbia_to_dc(self):
+        assert self._abbrev("District of Columbia") == "DC"
+
+    # ── already-abbreviated codes unchanged ──────────────────────────────────
+
+    def test_ca_unchanged(self):
+        assert self._abbrev("CA") == "CA"
+
+    def test_tx_unchanged(self):
+        assert self._abbrev("TX") == "TX"
+
+    # ── non-US states preserved as-is ────────────────────────────────────────
+
+    def test_non_us_english_state_unchanged(self):
+        """Non-US state (Queensland, Australia) should not be modified."""
+        assert self._abbrev("Queensland") == "Queensland"
+
+    def test_non_us_province_unchanged(self):
+        """Canadian province name — not in US lookup table, preserved."""
+        assert self._abbrev("British Columbia") == "British Columbia"
+
+    def test_non_ascii_state_unchanged(self):
+        """Non-ASCII state name (e.g. Taiwan) preserved."""
+        assert self._abbrev("台灣") == "台灣"
+
+    # ── edge cases ────────────────────────────────────────────────────────────
+
+    def test_empty_string_unchanged(self):
+        assert self._abbrev("") == ""
+
+    # ── geocode metadata not disturbed ────────────────────────────────────────
+
+    def test_geocode_result_state_field_unmodified(self):
+        """
+        After _resolve() uses _abbrev_state_for_search() for the search string,
+        the geocode_result dict still holds the original full state name.
+        Integration check via TestCriteriaLocationResolution._resolve().
+        """
+        # This is tested via test_postal_geocodes_to_canonical_city_state above,
+        # which asserts geocode_result["state"] == "California" while
+        # search_location == "Belmont, CA".  Here we just verify the helper
+        # itself doesn't modify its input.
+        original = "California"
+        result = self._abbrev(original)
+        assert result == "CA"
+        assert original == "California"  # string is immutable — confirm no mutation
+
+    # ── Path B: user-supplied full state name ─────────────────────────────────
+
+    def test_resolve_city_state_full_name_abbreviates(self):
+        """
+        Path B (city+state, no postal): if user supplies full state name,
+        the Airbnb search string is still abbreviated.
+        """
+        from worker.tests.test_search_location import TestCriteriaLocationResolution
+        r = TestCriteriaLocationResolution._resolve(
+            "Belmont, California",
+            city="Belmont", state="California",
+        )
+        assert r["search_location"] == "Belmont, CA"
+        assert r["addr_confidence"] == "high"
+
+    def test_resolve_city_state_austin_texas(self):
+        """Austin, Texas → Austin, TX in the Airbnb search string."""
+        from worker.tests.test_search_location import TestCriteriaLocationResolution
+        r = TestCriteriaLocationResolution._resolve(
+            "Austin, Texas",
+            city="Austin", state="Texas",
+        )
+        assert r["search_location"] == "Austin, TX"

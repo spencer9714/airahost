@@ -1910,6 +1910,36 @@ def _is_us_zip(postal_code: str) -> bool:
     return bool(re.match(r"^\d{5}(?:-\d{4})?$", postal_code.strip()))
 
 
+def _abbrev_state_for_search(state: str) -> str:
+    """
+    Return the 2-letter US state code suitable for Airbnb search strings.
+
+    Converts full US state names to their abbreviation so the Airbnb search
+    URL uses the compact form (``"Belmont, CA"`` rather than
+    ``"Belmont, California"``).
+
+    * ``"California"`` → ``"CA"``
+    * ``"CA"``         → ``"CA"``   (already abbreviated — unchanged)
+    * ``"Queensland"`` → ``"Queensland"``  (non-US state — preserved as-is)
+    * ``"台灣"``        → ``"台灣"``         (non-ASCII state — preserved as-is)
+    * ``""``           → ``""``
+
+    The geocode_result metadata is **not** touched — only the string returned
+    here is used for building the Airbnb search query.
+    """
+    if not state:
+        return state
+    from worker.core.anchor_location import normalize_state
+    norm = normalize_state(state)
+    # normalize_state returns a 2-letter uppercase ASCII code for US states.
+    # Chinese chars / non-ASCII pass .isalpha() but not .isupper(); ASCII
+    # 2-letter non-US codes (e.g. "BC" for British Columbia) would pass, but
+    # those are already short and acceptable.
+    if len(norm) == 2 and norm.isupper() and norm.isascii():
+        return norm
+    return state  # non-US or unrecognised — preserve original
+
+
 def _geocode_postal_to_canonical(
     postal_code: str,
     hint_city: Optional[str] = None,
@@ -2517,9 +2547,11 @@ def run_criteria_search(
                 )
                 logger.warning(f"[criteria] {city_zip_mismatch}")
 
-            # Build canonical search string from geocoded city + state
+            # Build canonical search string from geocoded city + state.
+            # Abbreviate full state names ("California" → "CA") so the Airbnb
+            # search URL uses the compact form Airbnb resolves most reliably.
             if gc_city and gc_state:
-                search_location = f"{gc_city}, {gc_state}"
+                search_location = f"{gc_city}, {_abbrev_state_for_search(gc_state)}"
                 addr_confidence = "high"
             elif gc_city:
                 search_location = gc_city
@@ -2540,7 +2572,7 @@ def run_criteria_search(
         # Geocode failed or returned no city: try city+state, then address parser
         if not search_location:
             if _city and _state:
-                search_location = f"{_city}, {_state}"
+                search_location = f"{_city}, {_abbrev_state_for_search(_state)}"
                 addr_confidence = "medium"
             elif _city:
                 search_location = _city
@@ -2550,7 +2582,7 @@ def run_criteria_search(
 
     elif _city and _state:
         # Path B: no ZIP, structured city + state
-        search_location = f"{_city}, {_state}"
+        search_location = f"{_city}, {_abbrev_state_for_search(_state)}"
         addr_confidence = "high"
 
     elif _city:
@@ -2579,7 +2611,7 @@ def run_criteria_search(
                 if target_lng is None:
                     target_lng = geocode_result.get("lng")
                 if gc_city and gc_state:
-                    search_location = f"{gc_city}, {gc_state}"
+                    search_location = f"{gc_city}, {_abbrev_state_for_search(gc_state)}"
                     addr_confidence = "high"
                 elif gc_city:
                     search_location = gc_city
