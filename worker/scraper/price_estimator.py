@@ -2379,6 +2379,45 @@ def _select_anchor_candidate(
 
 
 # ---------------------------------------------------------------------------
+# Canonical target resolution helper (used by run_criteria_search)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_canonical_target(
+    candidates,                      # List[ListingSpec]
+    raw_city: Optional[str],
+    raw_state: Optional[str],
+    addr_confidence: str,
+    target_lat: Optional[float] = None,
+    target_lng: Optional[float] = None,
+) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Decide which city/state to use as the canonical target for anchor selection.
+
+    High confidence → trust the structured address fields directly.
+    Low / medium confidence → try to infer from the Airbnb first-page
+    candidates (distance-first, then vote fallback).
+
+    Returns ``(anchor_city, anchor_state, source)`` — safe to pass straight
+    into ``_select_anchor_candidate`` as ``target_city`` / ``target_state``.
+    ``source`` mirrors the ``targetCanonicalCitySource`` debug key.
+    """
+    if addr_confidence == "high":
+        return raw_city, raw_state, "address"
+
+    from worker.core.anchor_location import infer_canonical_target_from_candidates
+    inf_city, inf_state, source = infer_canonical_target_from_candidates(
+        candidates,
+        fallback_city=raw_city,
+        fallback_state=raw_state,
+        target_lat=target_lat,
+        target_lng=target_lng,
+    )
+    # Ensure we always return something, even when inference falls back
+    return (inf_city or raw_city), (inf_state or raw_state), source
+
+
+# ---------------------------------------------------------------------------
 # Criteria-based search (Mode B)
 # ---------------------------------------------------------------------------
 
@@ -2751,6 +2790,20 @@ def run_criteria_search(
                     },
                 }
 
+            # Canonical target inference: when address confidence is low/medium,
+            # vote on the most common city/state from first-page Airbnb candidates
+            # rather than trusting the raw user-supplied _city/_state.  High
+            # confidence (ZIP geocoded, or city+state both provided) always uses
+            # the structured address fields directly.
+            _target_raw_city  = _city
+            _target_raw_state = _state
+            _anchor_target_city, _anchor_target_state, _target_canonical_city_source = \
+                _resolve_canonical_target(
+                    candidates, _city, _state, addr_confidence,
+                    target_lat=target_lat,
+                    target_lng=target_lng,
+                )
+
             # Anchor selection: geo-constrained then structural similarity.
             # _select_anchor_candidate() tries three paths in order:
             #   A. listing-level coords (from coord_map)   → 20 km / 40 km filter
@@ -2758,11 +2811,14 @@ def run_criteria_search(
             #   C. metro-cluster text-bucket filter        → confidence-gated
             best_match, best_score, anchor_debug = _select_anchor_candidate(
                 candidates, user_spec, target_lat, target_lng,
-                target_city=_city,
-                target_state=_state,
+                target_city=_anchor_target_city,
+                target_state=_anchor_target_state,
                 n_listing_coords=n_coords_assigned,
                 addr_confidence=addr_confidence,
             )
+            anchor_debug["targetRawCity"]              = _target_raw_city or None
+            anchor_debug["targetRawState"]             = _target_raw_state or None
+            anchor_debug["targetCanonicalCitySource"]  = _target_canonical_city_source
 
             logger.info(
                 f"[criteria] Anchor selected: {best_match.url} "

@@ -1183,3 +1183,494 @@ class TestLocationNormalisationInPipeline:
         assert best.url == sj.url
         assert debug["anchorLocationBuckets"]["local_match"] == 1
         assert debug["anchorLocationBuckets"]["regional_mismatch"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests for infer_canonical_target_from_candidates()
+# ---------------------------------------------------------------------------
+
+
+class TestInferCanonicalTarget:
+    """Unit tests for anchor_location.infer_canonical_target_from_candidates."""
+
+    def _infer(self, specs, fallback_city=None, fallback_state=None, **kw):
+        from worker.core.anchor_location import infer_canonical_target_from_candidates
+        return infer_canonical_target_from_candidates(
+            specs,
+            fallback_city=fallback_city,
+            fallback_state=fallback_state,
+            **kw,
+        )
+
+    # ── happy path ───────────────────────────────────────────────────────────
+
+    def test_clear_majority_returns_winner(self):
+        """6 SF candidates, no coords → vote stage → airbnb_first_page_vote."""
+        specs = [_spec(i, location="San Francisco, CA") for i in range(60001, 60007)]
+        city, state, source = self._infer(specs)
+        assert city == "san francisco"
+        assert state == "CA"
+        assert source == "airbnb_first_page_vote"
+
+    def test_plurality_above_threshold(self):
+        """5 SF + 2 Oakland, no coords → vote stage → SF wins (5/7 = 71 %)."""
+        sf  = [_spec(i, location="San Francisco, CA") for i in range(60101, 60106)]
+        oak = [_spec(i, location="Oakland, CA")       for i in range(60106, 60108)]
+        city, state, source = self._infer(sf + oak)
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"
+
+    def test_normalisation_applied_before_vote(self):
+        """'Downtown San Francisco, CA' normalises and counts toward san francisco."""
+        specs = [
+            _spec(60201, location="Downtown San Francisco, CA"),
+            _spec(60202, location="San Francisco, CA"),
+            _spec(60203, location="San Francisco, California"),
+        ]
+        city, state, source = self._infer(specs)
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"
+
+    # ── inconclusive vote → fallback ─────────────────────────────────────────
+
+    def test_tie_below_threshold_uses_fallback(self):
+        """2 SF + 2 Oakland = 50 % each — below default 40 % min per winner.
+        Wait, 50 % >= 40 %, so the plurality winner (whichever comes first) wins.
+        Use a 3-way split to go below threshold instead."""
+        specs = [
+            _spec(60301, location="San Francisco, CA"),
+            _spec(60302, location="Oakland, CA"),
+            _spec(60303, location="San Jose, CA"),
+        ]
+        # Each 1/3 ≈ 33 % < 40 % → fallback
+        city, state, source = self._infer(
+            specs, fallback_city="belmont", fallback_state="CA"
+        )
+        assert source == "fallback"
+        assert city == "belmont"
+        assert state == "CA"
+
+    def test_empty_locations_all_fall_back(self):
+        """All candidates have empty location → no non-empty strings → no_candidates."""
+        specs = [_spec(i) for i in range(60401, 60404)]
+        city, state, source = self._infer(
+            specs, fallback_city="belmont", fallback_state="CA"
+        )
+        assert source == "no_candidates"   # distinct from no_parseable_candidates
+        assert city == "belmont"
+        assert state == "CA"
+
+    def test_empty_candidate_list(self):
+        """Empty list → no_candidates, returns fallback values."""
+        city, state, source = self._infer(
+            [], fallback_city="belmont", fallback_state="CA"
+        )
+        assert source == "no_candidates"
+        assert city == "belmont"
+
+    def test_no_parseable_candidates_distinct_from_no_candidates(self):
+        """Non-empty location strings that lack state → no_parseable_candidates,
+        NOT no_candidates — distinguishes 'had data but couldn't parse' from
+        'had no location strings at all'."""
+        specs = [
+            _spec(60450, location="Belmont"),         # city only, no state
+            _spec(60451, location="San Francisco"),    # city only, no state
+        ]
+        city, state, source = self._infer(
+            specs, fallback_city="belmont", fallback_state="CA"
+        )
+        assert source == "no_parseable_candidates"
+        assert city == "belmont"   # fallback returned
+
+    # ── mixed parseable / unparseable ────────────────────────────────────────
+
+    def test_unparseable_locations_skipped(self):
+        """State-less locations don't dilute the vote; parseable ones win."""
+        specs = [
+            _spec(60501, location="San Francisco, CA"),
+            _spec(60502, location="San Francisco, CA"),
+            _spec(60503, location="Lovely downtown views"),   # no state → skip
+            _spec(60504, location=""),                        # empty → skip
+        ]
+        city, state, source = self._infer(specs)
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"
+
+    # ── source set sanity ─────────────────────────────────────────────────────
+
+    def test_valid_source_values(self):
+        """infer_canonical_target_from_candidates always returns a known source string."""
+        from worker.core.anchor_location import infer_canonical_target_from_candidates
+        _VALID_SOURCES = {
+            "airbnb_first_page_nearest",
+            "airbnb_first_page_vote",
+            "fallback",
+            "no_candidates",
+            "no_parseable_candidates",
+        }
+        # vote path
+        specs = [_spec(60601, location="San Francisco, CA")]
+        _, _, source = infer_canonical_target_from_candidates(specs)
+        assert source in _VALID_SOURCES
+        # no_candidates path
+        _, _, source2 = infer_canonical_target_from_candidates([])
+        assert source2 in _VALID_SOURCES
+        # nearest path
+        s = _spec(60602, location="San Francisco, CA")
+        s.lat, s.lng = 37.7749, -122.4194
+        _, _, source3 = infer_canonical_target_from_candidates(
+            [s], target_lat=37.52, target_lng=-122.28
+        )
+        assert source3 in _VALID_SOURCES
+
+
+# ---------------------------------------------------------------------------
+# Distance-based canonical target inference
+# ---------------------------------------------------------------------------
+#
+# Real WGS-84 reference points used in this block:
+#   Belmont, CA      37.5202, -122.2758   ← target in all "distance" tests
+#   San Francisco    37.7749, -122.4194   ← ~37 km from Belmont
+#   Redwood City     37.4849, -122.2364   ←  ~5 km from Belmont  (Peninsula)
+#   San Mateo        37.5630, -122.3255   ←  ~6 km from Belmont  (Peninsula)
+
+
+_TARGET_LAT = 37.5202   # Belmont, CA
+_TARGET_LNG = -122.2758
+
+_SF_LAT,  _SF_LNG  = 37.7749, -122.4194  # ~37 km from Belmont
+_RC_LAT,  _RC_LNG  = 37.4849, -122.2364  # ~5 km  from Belmont
+_SM_LAT,  _SM_LNG  = 37.5630, -122.3255  # ~6 km  from Belmont
+
+
+def _with_coords(spec, lat, lng):
+    """Return spec with lat/lng set (helper to keep test lines short)."""
+    spec.lat, spec.lng = lat, lng
+    return spec
+
+
+class TestInferCanonicalTargetDistance:
+    """
+    Distance-first inference: when target coords are available and candidates
+    carry listing-level coords, the geographically nearest market wins even
+    if a more-distant city has more candidates.
+    """
+
+    def _infer(self, specs, **kw):
+        from worker.core.anchor_location import infer_canonical_target_from_candidates
+        return infer_canonical_target_from_candidates(
+            specs,
+            target_lat=_TARGET_LAT,
+            target_lng=_TARGET_LNG,
+            **kw,
+        )
+
+    # ── distance beats plurality ──────────────────────────────────────────────
+
+    def test_nearest_beats_plurality(self):
+        """
+        5 SF listings (all ~37 km from Belmont, all with coords) +
+        2 Redwood City listings (~5 km, with coords).
+
+        nearest_n=3: nearest-3 → 2 RC + 1 SF → RC wins 2/3 = 67 % > 40 %.
+        Vote alone would give SF (5/7 = 71 %) — distance correctly overrides.
+        """
+        sf  = [_with_coords(_spec(70001 + i, location="San Francisco, CA"),
+                             _SF_LAT, _SF_LNG) for i in range(5)]
+        rc  = [_with_coords(_spec(70006 + i, location="Redwood City, CA"),
+                             _RC_LAT, _RC_LNG) for i in range(2)]
+
+        city, state, source = self._infer(sf + rc, nearest_n=3)
+
+        assert city == "redwood city"
+        assert state == "CA"
+        assert source == "airbnb_first_page_nearest"
+
+    def test_single_coord_candidate_insufficient_uses_vote(self):
+        """
+        Only 1 coord-bearing candidate — fewer than min_nearest_candidates (3).
+        Stage 1 is skipped; Stage 2 vote runs and SF (4 votes) wins.
+
+        This is the key safety guard: a single listing cannot silently override
+        a strong page-wide vote signal.
+        """
+        far_sf   = [_spec(70101 + i, location="San Francisco, CA") for i in range(4)]
+        close_sm = _with_coords(_spec(70105, location="San Mateo, CA"),
+                                _SM_LAT, _SM_LNG)
+
+        # Only close_sm has coords → with_dist has 1 entry < min_nearest_candidates=3
+        # → Stage 1 skipped → vote: SF 4/5 = 80% → vote wins
+        city, state, source = self._infer(far_sf + [close_sm])
+
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"   # not nearest
+
+    def test_two_coord_candidates_insufficient_uses_vote(self):
+        """
+        2 coord-bearing candidates — still fewer than min_nearest_candidates (3).
+        Stage 1 still skipped; vote on all 7 candidates decides.
+        """
+        far_sf  = [_spec(70111 + i, location="San Francisco, CA") for i in range(5)]
+        near    = [
+            _with_coords(_spec(70116, location="San Mateo, CA"), _SM_LAT, _SM_LNG),
+            _with_coords(_spec(70117, location="San Mateo, CA"), _SM_LAT, _SM_LNG),
+        ]
+
+        # 2 coord candidates < 3 → Stage 1 skipped → vote: SF 5/7 = 71% wins
+        city, state, source = self._infer(far_sf + near)
+
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"
+
+    def test_exactly_min_coord_candidates_fires_stage1(self):
+        """
+        Exactly min_nearest_candidates (3) coord-bearing candidates satisfies
+        the guard — Stage 1 fires.  All 3 agree on Redwood City → nearest wins.
+        """
+        rc = [
+            _with_coords(_spec(70121 + i, location="Redwood City, CA"),
+                         _RC_LAT, _RC_LNG) for i in range(3)
+        ]
+        extra_sf = [_spec(70124 + i, location="San Francisco, CA") for i in range(5)]
+
+        # 3 coord candidates == min_nearest_candidates → Stage 1 fires
+        # nearest-5 → all 3 RC (with_dist has 3) → 3/3 = 100% → nearest wins
+        city, state, source = self._infer(rc + extra_sf)
+
+        assert city == "redwood city"
+        assert source == "airbnb_first_page_nearest"
+
+    def test_nearest_n_affects_winner(self):
+        """
+        nearest_n controls the neighbourhood size.  With a smaller window,
+        the 2 very-close RC listings dominate; with a larger window, the 8
+        farther SF listings can swamp them.
+        """
+        sf  = [_with_coords(_spec(70201 + i, location="San Francisco, CA"),
+                             _SF_LAT, _SF_LNG) for i in range(8)]
+        rc  = [_with_coords(_spec(70209 + i, location="Redwood City, CA"),
+                             _RC_LAT, _RC_LNG) for i in range(2)]
+        candidates = sf + rc
+
+        # nearest_n=3 → 2 RC + 1 SF → RC wins
+        city_small, _, _ = self._infer(candidates, nearest_n=3)
+        assert city_small == "redwood city"
+
+        # nearest_n=10 → 2 RC + 8 SF → SF wins (8/10 = 80 %)
+        city_large, _, source_large = self._infer(candidates, nearest_n=10)
+        assert city_large == "san francisco"
+        assert source_large == "airbnb_first_page_nearest"
+
+    # ── distance stage inconclusive → falls through to vote ──────────────────
+
+    def test_distance_inconclusive_falls_to_vote(self):
+        """
+        If the nearest-N set has no clear winner (< min_vote_fraction),
+        Stage 2 vote on all candidates takes over.
+        """
+        # 3 near: 1 RC + 1 SF + 1 SM — all equally split (1/3 < 40 %)
+        near = [
+            _with_coords(_spec(70301, location="Redwood City, CA"), _RC_LAT, _RC_LNG),
+            _with_coords(_spec(70302, location="San Francisco, CA"), _SF_LAT, _SF_LNG),
+            _with_coords(_spec(70303, location="San Mateo, CA"),     _SM_LAT, _SM_LNG),
+        ]
+        # 5 extra SF without coords → drives vote to SF
+        extras = [_spec(70310 + i, location="San Francisco, CA") for i in range(5)]
+
+        city, state, source = self._infer(near + extras, nearest_n=3)
+
+        # Distance stage splits 1/1/1 → inconclusive; vote SF wins (6/8 = 75 %)
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"
+
+    # ── no target coords → vote only ─────────────────────────────────────────
+
+    def test_no_target_coords_uses_vote(self):
+        """When target_lat/lng are None, skip distance stage and use vote."""
+        from worker.core.anchor_location import infer_canonical_target_from_candidates
+
+        specs = [
+            _with_coords(_spec(70401 + i, location="San Francisco, CA"),
+                         _SF_LAT, _SF_LNG) for i in range(4)
+        ]
+        city, state, source = infer_canonical_target_from_candidates(
+            specs,
+            target_lat=None,
+            target_lng=None,
+        )
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"   # not nearest
+
+    # ── candidates lack coords → vote only ───────────────────────────────────
+
+    def test_no_candidate_coords_uses_vote(self):
+        """
+        Target has coords but candidates carry no listing-level coords.
+        Distance stage has nothing to sort → falls back to vote.
+        """
+        specs = [_spec(70501 + i, location="San Francisco, CA") for i in range(4)]
+        # specs have lat=None (default)
+        city, state, source = self._infer(specs)
+
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"
+
+    # ── normalisation integrates with distance stage ──────────────────────────
+
+    def test_normalisation_respected_in_distance_stage(self):
+        """
+        'Downtown Redwood City, CA' normalises to 'Redwood City, CA' before
+        the distance vote; both count toward 'redwood city'.
+        """
+        rc1 = _with_coords(_spec(70601, location="Redwood City, CA"),
+                           _RC_LAT, _RC_LNG)
+        rc2 = _with_coords(_spec(70602, location="Downtown Redwood City, CA"),
+                           _RC_LAT, _RC_LNG)
+        sf  = _with_coords(_spec(70603, location="San Francisco, CA"),
+                           _SF_LAT, _SF_LNG)
+
+        city, state, source = self._infer([rc1, rc2, sf], nearest_n=3)
+
+        assert city == "redwood city"
+        assert source == "airbnb_first_page_nearest"
+
+
+# ---------------------------------------------------------------------------
+# Wiring: _resolve_canonical_target (extracted helper from run_criteria_search)
+# ---------------------------------------------------------------------------
+
+
+class TestCriteriaWiring:
+    """
+    Tests for ``_resolve_canonical_target``, the pure helper that
+    ``run_criteria_search`` calls to decide the canonical city/state before
+    invoking ``_select_anchor_candidate``.
+
+    Testing the helper directly instead of replicating the if/else inline
+    gives better isolation and will catch future wiring regressions.
+    """
+
+    def _resolve(self, candidates, raw_city, raw_state, addr_confidence,
+                 target_lat=None, target_lng=None):
+        from worker.scraper.price_estimator import _resolve_canonical_target
+        return _resolve_canonical_target(
+            candidates, raw_city, raw_state, addr_confidence,
+            target_lat=target_lat, target_lng=target_lng,
+        )
+
+    # ── high confidence → address wins unconditionally ────────────────────────
+
+    def test_high_conf_ignores_first_page(self):
+        """
+        High confidence: _resolve returns raw address regardless of what
+        first-page candidates show — even if they all have coords pointing
+        to a completely different city.
+        """
+        candidates = [
+            _with_coords(_spec(80001 + i, location="San Francisco, CA"),
+                         _SF_LAT, _SF_LNG) for i in range(5)
+        ]
+        city, state, source = self._resolve(
+            candidates, "belmont", "CA", "high",
+            target_lat=_TARGET_LAT, target_lng=_TARGET_LNG,
+        )
+
+        assert city == "belmont"   # raw address, unchanged
+        assert state == "CA"
+        assert source == "address"
+
+    # ── low confidence + ≥ min_nearest coords → nearest wins ─────────────────
+
+    def test_low_conf_sufficient_coords_uses_nearest(self):
+        """
+        Low confidence + 5 SF listings all with coords (≥ min_nearest=3).
+        Stage 1 fires; all 5 point to SF → canonical = SF, NOT raw 'belmont'.
+        """
+        candidates = [
+            _with_coords(_spec(80101 + i, location="San Francisco, CA"),
+                         _SF_LAT, _SF_LNG) for i in range(5)
+        ]
+        city, state, source = self._resolve(
+            candidates, "belmont", "CA", "low",
+            target_lat=_TARGET_LAT, target_lng=_TARGET_LNG,
+        )
+
+        assert city == "san francisco"
+        assert state == "CA"
+        assert source == "airbnb_first_page_nearest"
+
+    # ── low confidence + insufficient coords → vote ───────────────────────────
+
+    def test_low_conf_insufficient_coords_uses_vote(self):
+        """
+        6 SF candidates (no coords) + 1 RC candidate (with coords).
+        Only 1 coord-bearing candidate < min_nearest=3 → Stage 1 skipped.
+        Vote runs: SF 6/7 = 86% → SF wins, source = airbnb_first_page_vote.
+
+        Critical regression guard: a single coord-bearing listing must NOT
+        silently override the dominant page-wide signal.
+        """
+        sf_specs = [_spec(80201 + i, location="San Francisco, CA") for i in range(6)]
+        rc_spec  = _with_coords(_spec(80207, location="Redwood City, CA"),
+                                _RC_LAT, _RC_LNG)
+
+        city, state, source = self._resolve(
+            sf_specs + [rc_spec], "belmont", "CA", "low",
+            target_lat=_TARGET_LAT, target_lng=_TARGET_LNG,
+        )
+
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"   # NOT nearest
+
+    # ── medium confidence + no target coords → vote ───────────────────────────
+
+    def test_medium_conf_no_target_coords_uses_vote(self):
+        """
+        Medium confidence, target has no coords.  Stage 1 is skipped entirely;
+        4 SF candidates → vote → canonical = SF.
+        """
+        candidates = [_spec(80301 + i, location="San Francisco, CA") for i in range(4)]
+        city, state, source = self._resolve(
+            candidates, "belmont", "CA", "medium",
+            target_lat=None, target_lng=None,
+        )
+
+        assert city == "san francisco"
+        assert source == "airbnb_first_page_vote"
+
+    # ── empty first page → fallback to raw address ────────────────────────────
+
+    def test_empty_candidates_fallback(self):
+        """No first-page candidates → inference falls back to raw address."""
+        city, state, source = self._resolve(
+            [], "belmont", "CA", "low",
+            target_lat=_TARGET_LAT, target_lng=_TARGET_LNG,
+        )
+
+        assert city == "belmont"
+        assert source == "no_candidates"
+
+    # ── distance beats plurality when evidence is sufficient ──────────────────
+
+    def test_distance_beats_plurality_with_sufficient_evidence(self):
+        """
+        5 SF candidates with coords (~37 km) + 3 RC candidates with coords
+        (~5 km).  All 8 have coords → Stage 1 fires with nearest_n=5.
+
+        Sorted by distance: 3 RC (~5km) then 2 SF (~37km) fill the nearest-5
+        slot → RC 3/5 = 60% wins.
+
+        Vote alone: SF 5/8 = 63% would win — distance correctly overrides.
+        """
+        sf  = [_with_coords(_spec(80401 + i, location="San Francisco, CA"),
+                             _SF_LAT, _SF_LNG) for i in range(5)]
+        rc  = [_with_coords(_spec(80406 + i, location="Redwood City, CA"),
+                             _RC_LAT, _RC_LNG) for i in range(3)]
+
+        city, state, source = self._resolve(
+            sf + rc, "belmont", "CA", "low",
+            target_lat=_TARGET_LAT, target_lng=_TARGET_LNG,
+        )
+
+        assert city == "redwood city"
+        assert source == "airbnb_first_page_nearest"

@@ -612,6 +612,168 @@ def normalize_location_text(raw: str) -> Tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Canonical target inference from first-page Airbnb candidates
+# ---------------------------------------------------------------------------
+
+
+def infer_canonical_target_from_candidates(
+    candidates,                           # List[ListingSpec] — avoids circular import
+    fallback_city: Optional[str] = None,
+    fallback_state: Optional[str] = None,
+    target_lat: Optional[float] = None,
+    target_lng: Optional[float] = None,
+    min_vote_fraction: float = 0.4,
+    nearest_n: int = 5,
+    min_nearest_candidates: int = 3,
+) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Infer the canonical market (city, state) from Airbnb first-page candidates.
+
+    When ``addr_confidence`` is low or medium the user-supplied city/state may
+    be inaccurate.  The Airbnb search page reflects where supply actually
+    exists; this function extracts that market signal.
+
+    Two-stage strategy
+    ------------------
+    Stage 1 — **Distance-based** (when ``target_lat``/``target_lng`` are
+    provided *and* at least ``min_nearest_candidates`` candidates carry
+    listing-level coords):
+
+      * Sort the coord-bearing parseable candidates by distance to target.
+      * Take the nearest ``nearest_n`` of them and vote on ``(city, state)``.
+      * If the plurality winner reaches ``min_vote_fraction``, return it with
+        source ``"airbnb_first_page_nearest"``.
+      * Otherwise fall through to Stage 2.
+
+      The ``min_nearest_candidates`` guard (default 3) prevents a single
+      outlier listing from silently overriding a strong page-wide vote signal.
+      At least three independent distance readings are required before the
+      nearest-neighbour result is trusted.
+
+    Stage 2 — **Vote-based** (when Stage 1 is unavailable or inconclusive):
+
+      * Vote on ``(city, state)`` across *all* parseable candidates.
+      * If the plurality winner reaches ``min_vote_fraction``, return it with
+        source ``"airbnb_first_page_vote"``.
+      * Otherwise return fallback with source ``"fallback"``.
+
+    Design rationale
+    ----------------
+    Distance beats plurality *when the distance evidence is sufficient*
+    (``min_nearest_candidates`` satisfied).  A single coord-bearing listing
+    is not enough evidence — it could be an outlier result — so we fall back
+    to the page-wide vote in that case.  Only when a genuine neighbourhood of
+    coord-bearing candidates agrees on a market do we use distance as the
+    primary signal.
+
+    Returns
+    -------
+    ``(city, state, source)`` where *source* is one of:
+
+    ``"airbnb_first_page_nearest"``
+        Distance-based winner (Stage 1 succeeded).
+    ``"airbnb_first_page_vote"``
+        Vote-based winner (Stage 2, no coords or Stage 1 inconclusive).
+    ``"fallback"``
+        Had parseable candidates but no winner reached the threshold.
+    ``"no_parseable_candidates"``
+        Had non-empty location strings, but none parsed to ``(city, state)``.
+    ``"no_candidates"``
+        No non-empty ``.location`` strings at all.
+    """
+    from collections import Counter
+    from worker.core.geo_filter import haversine_km
+
+    has_target_coords = target_lat is not None and target_lng is not None
+
+    # ── Collect parseable (city, state, dist_or_None) entries ────────────────
+    # Track whether ANY non-empty location string was seen, to distinguish
+    # "no location data" from "location present but unparseable".
+    raw_locs_seen = False
+    parseable: List[Tuple[str, str, Optional[float]]] = []
+
+    for cand in candidates:
+        raw_loc = (getattr(cand, "location", "") or "").strip()
+        if not raw_loc:
+            continue
+        raw_locs_seen = True
+        norm_loc, _ = normalize_location_text(raw_loc)
+        city, state = parse_location_city_state(norm_loc if norm_loc else raw_loc)
+        if not (city and state):
+            continue
+
+        dist: Optional[float] = None
+        if has_target_coords:
+            cand_lat = getattr(cand, "lat", None)
+            cand_lng = getattr(cand, "lng", None)
+            if cand_lat is not None and cand_lng is not None:
+                dist = haversine_km(target_lat, target_lng, cand_lat, cand_lng)
+
+        parseable.append((city, state, dist))
+
+    if not raw_locs_seen:
+        logger.debug("[anchor_location] infer_canonical_target: no location strings on candidates")
+        return fallback_city, fallback_state, "no_candidates"
+
+    if not parseable:
+        logger.debug("[anchor_location] infer_canonical_target: locations present but none parsed to city+state")
+        return fallback_city, fallback_state, "no_parseable_candidates"
+
+    # ── Stage 1: distance-based ───────────────────────────────────────────────
+    # Guard: require at least min_nearest_candidates coord-bearing parseable
+    # candidates before trusting the distance result.  Fewer than that risks
+    # a single outlier listing silently overriding a strong page-wide vote.
+    if has_target_coords:
+        with_dist = [(c, s, d) for c, s, d in parseable if d is not None]
+        if len(with_dist) >= min_nearest_candidates:
+            with_dist.sort(key=lambda x: x[2])  # type: ignore[index]
+            nearest = with_dist[:nearest_n]
+            vote: Counter = Counter((c, s) for c, s, _ in nearest)
+            total = len(nearest)
+            (winner_city, winner_state), winner_count = vote.most_common(1)[0]
+            fraction = winner_count / total
+            if fraction >= min_vote_fraction:
+                logger.info(
+                    f"[anchor_location] infer_canonical_target (nearest): "
+                    f"{winner_city!r}, {winner_state!r} — "
+                    f"{winner_count}/{total} of nearest-{nearest_n} "
+                    f"({fraction:.0%}), closest={nearest[0][2]:.1f} km"
+                )
+                return winner_city, winner_state, "airbnb_first_page_nearest"
+            logger.debug(
+                f"[anchor_location] infer_canonical_target: distance stage "
+                f"inconclusive ({fraction:.0%} < {min_vote_fraction:.0%}); "
+                "trying vote"
+            )
+        else:
+            logger.debug(
+                f"[anchor_location] infer_canonical_target: only {len(with_dist)} "
+                f"coord-bearing candidate(s) < min_nearest_candidates="
+                f"{min_nearest_candidates}; skipping distance stage"
+            )
+
+    # ── Stage 2: vote-based (all parseable candidates) ───────────────────────
+    vote = Counter((c, s) for c, s, _ in parseable)
+    total = len(parseable)
+    (winner_city, winner_state), winner_count = vote.most_common(1)[0]
+    fraction = winner_count / total
+
+    if fraction >= min_vote_fraction:
+        logger.info(
+            f"[anchor_location] infer_canonical_target (vote): "
+            f"{winner_city!r}, {winner_state!r} — "
+            f"{winner_count}/{total} ({fraction:.0%})"
+        )
+        return winner_city, winner_state, "airbnb_first_page_vote"
+
+    logger.debug(
+        f"[anchor_location] infer_canonical_target: vote inconclusive "
+        f"({fraction:.0%} < {min_vote_fraction:.0%}); fallback"
+    )
+    return fallback_city, fallback_state, "fallback"
+
+
+# ---------------------------------------------------------------------------
 # Text-bucket classification (Path C)
 # ---------------------------------------------------------------------------
 
