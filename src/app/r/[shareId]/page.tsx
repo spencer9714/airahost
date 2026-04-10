@@ -1,10 +1,11 @@
 ﻿"use client";
 
-import { useEffect, useState, useCallback, useRef, use } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo, use } from "react";
 import Link from "next/link";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
 import { HowWeEstimated } from "@/components/report/HowWeEstimated";
+import { ComparableListingsSection } from "@/components/report/ComparableListingsSection";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import type {
@@ -379,6 +380,41 @@ export default function ResultsPage({
   // Auto-Apply status for this listing (null = loading, false = not configured)
   const [autoApplyConfigured, setAutoApplyConfigured] = useState<boolean | null>(null);
   const reportListingId = (report as (typeof report & { listingId?: string | null }))?.listingId ?? null;
+
+  // Date the user clicked on the heatmap (null = no selection).
+  const [clickedDate, setClickedDate] = useState<string | null>(null);
+
+  // Reset the clicked date whenever the report changes.
+  const reportId = report?.id ?? null;
+  useEffect(() => { setClickedDate(null); }, [reportId]);
+
+  // Snap clickedDate to the nearest date that actually has comp price data.
+  // comps are only sampled on a handful of dates across the 30-day window,
+  // so without snapping most tile clicks would show "No data for this date".
+  const snappedDate = useMemo((): string | null => {
+    if (!clickedDate || !report) return clickedDate;
+    const listings =
+      report.comparableListings ?? report.resultSummary?.comparableListings ?? [];
+    const sampledDates = new Set<string>();
+    for (const listing of listings) {
+      if ((listing as { priceByDate?: Record<string, number> }).priceByDate) {
+        for (const d of Object.keys(
+          (listing as { priceByDate: Record<string, number> }).priceByDate
+        )) {
+          sampledDates.add(d);
+        }
+      }
+    }
+    if (sampledDates.size === 0) return clickedDate; // no data at all — pass through
+    const target = new Date(clickedDate + "T00:00:00Z").getTime();
+    let best = clickedDate;
+    let bestDiff = Infinity;
+    for (const d of sampledDates) {
+      const diff = Math.abs(new Date(d + "T00:00:00Z").getTime() - target);
+      if (diff < bestDiff) { bestDiff = diff; best = d; }
+    }
+    return best;
+  }, [clickedDate, report]);
 
   const fetchReport = useCallback(async () => {
     try {
@@ -760,7 +796,58 @@ export default function ResultsPage({
             onApplyDates={() => {
               window.location.href = "/dashboard";
             }}
+            onFocusDate={(date) => setClickedDate(date)}
+            focusedDate={clickedDate}
           />
+
+          {/* Contextual Comparable Listings panel — appears immediately below the
+              heatmap when a date is focused. This is the primary comps experience
+              on the report page; HowWeEstimated will hide its duplicate comps block. */}
+          {(() => {
+            const compsListings =
+              report.comparableListings ??
+              report.resultSummary?.comparableListings ??
+              null;
+            const comps =
+              report.compsSummary ?? report.resultSummary?.compsSummary ?? null;
+            if (!clickedDate || !compsListings || compsListings.length === 0) return null;
+            return (
+              <div className="overflow-hidden rounded-2xl border border-sky-200/70 bg-white">
+                <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-5 py-3">
+                  <div>
+                    <p className="text-sm font-semibold text-foreground/80">
+                      Comparable listings
+                      <span className="ml-1.5 font-normal text-foreground/50">
+                        for {clickedDate}
+                      </span>
+                    </p>
+                    {snappedDate !== clickedDate && (
+                      <p className="mt-0.5 text-xs text-amber-700">
+                        No comp data for {clickedDate} — showing nearest sampled day below.
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setClickedDate(null)}
+                    aria-label="Close comparable listings panel"
+                    className="shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-foreground/35 transition-colors hover:bg-gray-100 hover:text-foreground/65"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="px-5 py-4">
+                  <ComparableListingsSection
+                    listings={compsListings as ComparableListing[]}
+                    comps={comps}
+                    embedded={true}
+                    selectedDate={snappedDate}
+                    clickedDate={clickedDate}
+                  />
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Auto-Apply CTA — only when signed in but not configured */}
           {isSignedIn === true && autoApplyConfigured === false && (
@@ -810,6 +897,9 @@ export default function ResultsPage({
       ) && (
         <HowWeEstimated
           report={report}
+          selectedDate={snappedDate}
+          clickedDate={clickedDate}
+          hideComparableListings={true}
         />
       )}
 

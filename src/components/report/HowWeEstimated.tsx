@@ -347,6 +347,7 @@ export function HowWeEstimated({
   report,
   selectedDate,
   clickedDate,
+  hideComparableListings = false,
 }: {
   report: PricingReport;
   /** Effective price date — the nearest sampled date used for priceByDate lookup. */
@@ -354,6 +355,12 @@ export function HowWeEstimated({
   /** The date the user actually clicked. When this differs from selectedDate a
    *  disclosure banner is shown in the comparable listings section. */
   clickedDate?: string | null;
+  /**
+   * When true, the comparable listings block is omitted from this section.
+   * Use this when the caller renders a contextual comps panel closer to the
+   * heatmap and wants to avoid showing a duplicate large comps section here.
+   */
+  hideComparableListings?: boolean;
 }) {
   const target = report.targetSpec ?? report.resultSummary?.targetSpec;
   const criteria = report.queryCriteria ?? report.resultSummary?.queryCriteria;
@@ -428,7 +435,7 @@ export function HowWeEstimated({
         <CompsDistributionCard comps={comps} distribution={dist} />
       )}
 
-      {shouldShowComparableSection && (
+      {shouldShowComparableSection && !hideComparableListings && (
         <div className="mt-4 overflow-hidden rounded-xl border border-amber-200 bg-amber-50/30">
           <div className="flex items-center justify-between gap-3 border-b border-amber-100 px-4 py-3">
             <div>
