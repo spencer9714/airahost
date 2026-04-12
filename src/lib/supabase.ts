@@ -12,5 +12,13 @@ export function getSupabaseBrowser() {
 
 /** Server client — uses service role key if available, otherwise falls back to anon key */
 export function getSupabaseAdmin() {
-  return createClient(supabaseUrl, supabaseServiceKey || supabaseAnonKey);
+  if (!supabaseUrl) {
+    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL for server Supabase client.");
+  }
+  if (!supabaseServiceKey) {
+    throw new Error(
+      "Missing SUPABASE_SERVICE_ROLE_KEY. Server admin operations require service role key."
+    );
+  }
+  return createClient(supabaseUrl, supabaseServiceKey);
 }

@@ -33,15 +33,40 @@ def claim_job(client: Client, worker_token: uuid.UUID, stale_minutes: int, targe
     Atomically claim one queued (or stale-running) job matching target_env and job_lane.
     Returns the full row dict, or None if no work available.
     """
-    result = client.rpc(
-        "claim_pricing_report",
-        {
-            "p_worker_token": str(worker_token),
-            "p_stale_minutes": stale_minutes,
-            "p_job_lane": job_lane,
-            "p_target_env": target_env,
-        },
-    ).execute()
+    try:
+        # New signature (migration 012): lane + env aware.
+        result = client.rpc(
+            "claim_pricing_report",
+            {
+                "p_worker_token": str(worker_token),
+                "p_stale_minutes": stale_minutes,
+                "p_job_lane": job_lane,
+                "p_target_env": target_env,
+            },
+        ).execute()
+    except Exception as exc:
+        # Backward compatibility with older DBs that only have:
+        # claim_pricing_report(p_worker_token, p_stale_minutes)
+        msg = str(exc)
+        is_signature_mismatch = (
+            "PGRST202" in msg
+            and "claim_pricing_report" in msg
+            and ("p_job_lane" in msg or "p_target_env" in msg)
+        )
+        if not is_signature_mismatch:
+            raise
+
+        logger.warning(
+            "claim_pricing_report lane/env signature not found; "
+            "falling back to legacy 2-arg RPC. Apply migration 012 to enable lane/env isolation."
+        )
+        result = client.rpc(
+            "claim_pricing_report",
+            {
+                "p_worker_token": str(worker_token),
+                "p_stale_minutes": stale_minutes,
+            },
+        ).execute()
 
     rows = result.data
     if rows and len(rows) > 0:
