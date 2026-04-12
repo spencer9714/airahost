@@ -131,7 +131,12 @@ def collect_search_cards(page, stay_nights: int = 1) -> List[Dict[str, Any]]:
               if (!label || label.length < 4) continue;
               const labelIsNightly = isPerNight(label);
               const labelTripNights = detectTripNights(label);
-              if (!labelIsNightly && labelTripNights === 0) continue;
+              // Also accept labels that show a currency-suffix price ("$267 CAD")
+              // without a /night label — common on Airbnb .ca/.au domains.
+              // Exclude labels where the ONLY price is a "CAD total" trip total.
+              const labelHasCurrencySuffix = /\$\s*\d[\d,.]*\s+(?:CAD|AUD|NZD|GBP|EUR)\b/i.test(label) &&
+                !/\$\s*\d[\d,.]*\s+(?:CAD|AUD|NZD|GBP|EUR)\s+total\b/i.test(label);
+              if (!labelIsNightly && labelTripNights === 0 && !labelHasCurrencySuffix) continue;
 
               // Truncate at first mention of "original" or "discounted from"
               // so we only see the current/effective price.
@@ -188,7 +193,9 @@ def collect_search_cards(page, stay_nights: int = 1) -> List[Dict[str, Any]]:
               if (!/(US\$|CA\$|AU\$|NZ\$|\$)/.test(text)) continue;
               const textIsNightly = isPerNight(text);
               const textTripNights = detectTripNights(text);
-              if (!textIsNightly && textTripNights === 0) continue;
+              // Also accept currency-suffix format ("$267 CAD") used on .ca/.au domains.
+              const textHasCurrencySuffix = /\$\s*\d[\d,.]*\s+(?:CAD|AUD|NZD|GBP|EUR)\b/i.test(text);
+              if (!textIsNightly && textTripNights === 0 && !textHasCurrencySuffix) continue;
               if (/(total|tax|fee|cleaning|service|before taxes)/i.test(text)) continue;
 
               const val = parseMoneyValue(text);

@@ -319,3 +319,37 @@ def test_text_combined_widget_extract_last_is_discounted():
 def test_text_usd_night_format():
     """'150 USD /night' format → 150."""
     assert 150.0 in _price_set("150 USD /night")
+
+
+# ---------------------------------------------------------------------------
+# CAD/AUD/NZD currency-suffix format (Airbnb .ca / .com.au regression)
+# ---------------------------------------------------------------------------
+
+def test_text_cad_suffix_nightly():
+    """'$267 CAD' (no /night) is treated as a nightly price on .ca domains."""
+    assert 267.0 in _price_set("$267 CAD")
+
+
+def test_text_cad_suffix_total_excluded():
+    """'$195 CAD total' must NOT match — it is a trip total, not nightly."""
+    assert 195.0 not in _price_set("$195 CAD total")
+
+
+def test_text_cad_widget_first_price_extracted():
+    """Widget text from airbnb.ca: '$267 CAD' extracted, '$195 CAD total' excluded."""
+    matches = _extract_text_price_matches(
+        "$267 CAD \n$195 CAD total\nShow price breakdown\nReserve"
+    )
+    prices = [p for _, p in matches]
+    assert 267.0 in prices
+    assert 195.0 not in prices
+
+
+def test_text_aud_suffix_nightly():
+    """'$180 AUD' without /night → treated as nightly (AUD domain coverage)."""
+    assert 180.0 in _price_set("$180 AUD")
+
+
+def test_text_aud_suffix_total_excluded():
+    """'$360 AUD total' must NOT be treated as nightly."""
+    assert 360.0 not in _price_set("$360 AUD total")

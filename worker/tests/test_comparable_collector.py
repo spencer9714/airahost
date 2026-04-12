@@ -481,3 +481,66 @@ class TestTwoNightSecondaryDetection:
             "parse_card_to_spec faithfully divides trip_total by price_nights — "
             "the fix must be in the JS detectTripNights guard, not here"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: Airbnb .ca CAD-suffix price format (priced=0 across all cards)
+# ---------------------------------------------------------------------------
+
+class TestCADCurrencySuffixCards:
+    """
+    Regression for airbnb.ca listings where search cards display prices as
+    '$267 CAD' without a '/night' label.  Before the fix, isPerNight() returned
+    false for every card → extractFromAriaLabel and extractFromDOM both skipped
+    the price element → price_value=null → priced=0 for all 24 cards → report
+    fails with 'Scrape produced no daily results: No results'.
+
+    After the fix, JS extracts the price and calls it 'nightly_from_currency_suffix'.
+    These tests verify parse_card_to_spec handles that result correctly.
+    """
+
+    def test_cad_suffix_price_passes_through(self):
+        """Card from airbnb.ca with '$267 CAD' nightly — JS now extracts it."""
+        card = {
+            "url": "https://www.airbnb.ca/rooms/700888293266225258",
+            "title": "Luxury condo in Vancouver",
+            "text": "Entire home · 4 guests · 2 bedrooms · 3 beds · 2 baths",
+            "price_text": "267.0",
+            "price_value": 267.0,
+            "price_kind": "nightly_from_currency_suffix",
+            "price_source": "currency_suffix",
+            "rating": 4.95,
+            "reviews": 87,
+        }
+        spec = parse_card_to_spec(card)
+        assert spec.nightly_price == 267.0
+
+    def test_cad_suffix_card_survives_downstream_filter(self):
+        """A CAD-suffix card with a valid price must survive the day_query filter."""
+        card = {
+            "url": "https://www.airbnb.ca/rooms/700888293266225258",
+            "title": "Cozy cabin in Whistler",
+            "text": "Entire home · 6 guests · 3 bedrooms · 4 beds · 2 baths",
+            "price_text": "312.0",
+            "price_value": 312.0,
+            "price_kind": "nightly_from_currency_suffix",
+            "price_source": "currency_suffix",
+        }
+        spec = parse_card_to_spec(card)
+        surviving = [c for c in [spec] if c.url and c.nightly_price and c.nightly_price > 0]
+        assert len(surviving) == 1
+        assert surviving[0].nightly_price == 312.0
+
+    def test_cad_total_only_card_still_excluded(self):
+        """When JS correctly rejects a 'CAD total' element, price_value stays null."""
+        card = {
+            "url": "https://www.airbnb.ca/rooms/111",
+            "title": "Ambiguous card",
+            "text": "Entire home · 2 guests",
+            "price_text": "",
+            "price_value": None,
+            "price_kind": "unknown",
+            "price_source": "none",
+        }
+        spec = parse_card_to_spec(card)
+        assert spec.nightly_price is None
