@@ -689,6 +689,10 @@ _NIGHTLY_PRICE_RES = [
     # \s* (not \s+) before "for" so that adjacent inline spans concatenated without
     # whitespace ("$321for 1 night") are still matched.
     re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s*for\s+1\s+nights?", re.I),
+    # CAD/AUD/NZD/GBP/EUR suffix format used on non-USD Airbnb domains (e.g. .ca, .com.au).
+    # Airbnb displays "$267 CAD" as the nightly price without a "/night" label.
+    # Negative lookahead excludes "$195 CAD total" (trip-total amounts).
+    re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s+(?:CAD|AUD|NZD|GBP|EUR)(?!\s+total\b)", re.I),
 ]
 
 # Matches trip-total format: "$300 for 2 nights" — requires division by N.
