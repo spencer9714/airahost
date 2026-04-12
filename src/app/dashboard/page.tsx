@@ -15,6 +15,7 @@ import { SmartAlerts } from "@/components/dashboard/SmartAlerts";
 import { ListingCard } from "@/components/dashboard/ListingCard";
 import { extractAirbnbListingId } from "@/lib/airbnb-utils";
 import { BenchmarkModal } from "@/components/dashboard/BenchmarkModal";
+import { ComparableListingsSection } from "@/components/report/ComparableListingsSection";
 
 import type {
   PropertyType,
@@ -24,6 +25,7 @@ import type {
   CompsSummary,
   PriceDistribution,
   DateMode,
+  ComparableListing,
 } from "@/lib/schemas";
 
 // latestReport is always status="ready" when non-null — the API now guarantees this.
@@ -51,6 +53,7 @@ type LatestReport = {
     estimatedMonthlyRevenue?: number;
     recommendedPrice?: RecommendedPrice;
     compsSummary?: CompsSummary;
+    comparableListings?: ComparableListing[] | null;
     priceDistribution?: PriceDistribution;
     // Live price intelligence (added by worker)
     observedListingPrice?: number | null;
@@ -171,6 +174,8 @@ export default function DashboardPage() {
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyDates, setApplyDates] = useState<string[]>([]);
   const [showCustomPanel, setShowCustomPanel] = useState(false);
+  // Focused date for the comparable listings context panel (heatmap single-day click).
+  const [focusedDate, setFocusedDate] = useState<string | null>(null);
   // Default to tomorrow — custom analyses are future-only.
   const [customStart, setCustomStart] = useState(() => {
     const d = new Date();
@@ -446,6 +451,48 @@ export default function DashboardPage() {
   }, [activeReport]);
 
   const activeCalendar = activeReport?.result_calendar ?? [];
+
+  // Reset focused date when the active listing changes.
+  useEffect(() => { setFocusedDate(null); }, [activeListingId]);
+
+  // Reset focused date when the active report changes (e.g. nightly refresh produces a
+  // new report ID).  Without this, a focused date from a stale report can linger
+  // after the calendar data underneath it has been replaced.
+  const activeReportId = activeReport?.id ?? null;
+  useEffect(() => { setFocusedDate(null); }, [activeReportId]);
+
+  // Comparable listings for the focused-date context panel.
+  const activeComparableListings = useMemo((): ComparableListing[] | null => {
+    const raw = activeReport?.result_summary?.comparableListings;
+    return Array.isArray(raw) && raw.length > 0 ? (raw as ComparableListing[]) : null;
+  }, [activeReport]);
+
+  const activePinnedUrls = useMemo(() => {
+    const comps = activeListing?.input_attributes.preferredComps;
+    if (!Array.isArray(comps)) return [];
+    return comps.filter((c) => c.enabled !== false && c.listingUrl).map((c) => c.listingUrl!);
+  }, [activeListing]);
+
+  // Snap the focused date to the nearest date that has comp price data.
+  // Most reports only sample a few dates across 30 days, so this is essential.
+  const snappedFocusedDate = useMemo((): string | null => {
+    if (!focusedDate || !activeComparableListings) return focusedDate;
+    const allSampledDates = new Set<string>();
+    for (const listing of activeComparableListings) {
+      if (listing.priceByDate) {
+        for (const d of Object.keys(listing.priceByDate)) allSampledDates.add(d);
+      }
+    }
+    if (allSampledDates.size === 0) return focusedDate;
+    const target = new Date(focusedDate + "T00:00:00Z").getTime();
+    let best = focusedDate;
+    let bestDiff = Infinity;
+    for (const d of allSampledDates) {
+      const diff = Math.abs(new Date(d + "T00:00:00Z").getTime() - target);
+      if (diff < bestDiff) { bestDiff = diff; best = d; }
+    }
+    return best;
+  }, [focusedDate, activeComparableListings]);
 
   // Auto-apply settings for the active listing — used to compute the preview
   // passed to ManualApplyPanel when the user applies from PricingHeatmap.
@@ -735,13 +782,55 @@ export default function DashboardPage() {
                 {/* ── 4. 30-Day Pricing Plan ── */}
                 {activeCalendar.length > 0 && (
                   <PricingHeatmap
+                    key={activeReport?.id ?? "none"}
                     calendar={activeCalendar}
                     selectable={activeAutoApplyConfigured && activeAutoApplyCohostStatus !== "not_started"}
                     onApplyDates={(dates) => {
                       setApplyDates(dates);
                       setApplyOpen(true);
                     }}
+                    onFocusDate={activeComparableListings ? setFocusedDate : undefined}
+                    focusedDate={focusedDate}
                   />
+                )}
+
+                {/* ── 4b. Comparable listings context panel (appears on day click) ── */}
+                {focusedDate && activeComparableListings && (
+                  <div className="overflow-hidden rounded-2xl border border-sky-200/70 bg-white">
+                    <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-5 py-3">
+                      <div>
+                        <p className="text-sm font-semibold text-foreground/80">
+                          Comparable listings
+                          <span className="ml-1.5 font-normal text-foreground/50">
+                            for {focusedDate}
+                          </span>
+                        </p>
+                        {snappedFocusedDate !== focusedDate && (
+                          <p className="mt-0.5 text-xs text-amber-700">
+                            No comp data for {focusedDate} — showing nearest sampled day below.
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFocusedDate(null)}
+                        aria-label="Close comparable listings panel"
+                        className="shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-foreground/35 transition-colors hover:bg-gray-100 hover:text-foreground/65"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="px-5 py-4">
+                      <ComparableListingsSection
+                        listings={activeComparableListings}
+                        comps={activeSummary?.compsSummary ?? null}
+                        embedded={true}
+                        pinnedUrls={activePinnedUrls}
+                        selectedDate={snappedFocusedDate}
+                        clickedDate={focusedDate}
+                      />
+                    </div>
+                  </div>
                 )}
 
                 {/* ── 5. Co-host section ── */}

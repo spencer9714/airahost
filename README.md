@@ -23,6 +23,11 @@ The demo report (`/r/demo`) uses a deterministic pricing engine. Real reports re
 5. In Supabase Auth settings, set Site URL and redirect URL to include `http://localhost:3000/auth/callback`
 6. Restart the dev server
 
+For local development, remember that there are two separate environment settings:
+
+- Worker environment: set `WORKER_ENV=local` in `worker/.env`
+- Next.js app environment: set `WORKER_TARGET_ENV=local` in `.env.local`
+
 ## Setup Worker
 
 The worker scrapes Airbnb via Playwright CDP for real pricing data.

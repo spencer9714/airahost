@@ -5,20 +5,53 @@ import type { CalendarDay } from "@/lib/schemas";
 
 interface Props {
   calendar: CalendarDay[];
-  /** When true, dates are selectable and an apply footer is shown. */
+  /**
+   * When true, the "Select nights" button appears in the header.
+   * Entering that mode lets the user toggle selectedDates via tile clicks.
+   * In the default (inspect) mode, tile clicks only affect focusedDate.
+   */
   selectable?: boolean;
   onApplyDates?: (selectedDates: string[]) => void;
+  /**
+   * When provided, tile clicks in inspect mode (the default) fire this with the
+   * date string, or null when the same date is clicked again (deselect).
+   * Never fires in apply-selection mode.
+   */
+  onFocusDate?: (date: string | null) => void;
+  /** The currently focused date — receives a sky-blue ring in inspect mode. */
+  focusedDate?: string | null;
 }
 
 const TODAY = new Date().toISOString().split("T")[0];
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: Props) {
+export function PricingHeatmap({
+  calendar,
+  selectable = false,
+  onApplyDates,
+  onFocusDate,
+  focusedDate,
+}: Props) {
   const days = calendar;
 
+  // selectedDates: the committed apply selection (all dates by default).
+  // Reset is handled externally via the `key` prop — when key changes React
+  // remounts this component and re-runs useState initializers.
   const [selectedDates, setSelectedDates] = useState<Set<string>>(
     () => new Set(days.map((d) => d.date))
   );
+
+  // Apply-selection mode. When false (default = inspect mode):
+  //   • tile click → onFocusDate → comps panel
+  // When true (apply-selection mode):
+  //   • tile click → toggleDate → selectedDates
+  //   • focusedDate ring is hidden so it doesn't clash with selection visuals
+  const [applyMode, setApplyMode] = useState(false);
+
+  // Snapshot of selectedDates taken when apply mode is entered, used by Cancel
+  // to restore the previous selection without persisting in-mode changes.
+  const [selectionSnapshot, setSelectionSnapshot] = useState<Set<string> | null>(null);
+
   const [view, setView] = useState<"7" | "30">("30");
 
   if (days.length === 0) return null;
@@ -28,9 +61,28 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
   const selectedCount = selectedDates.size;
   const totalCount = days.length;
 
-  const startOffset = view === "30"
-    ? new Date(visibleDays[0].date + "T00:00:00").getDay()
-    : 0;
+  const startOffset =
+    view === "30" ? new Date(visibleDays[0].date + "T00:00:00").getDay() : 0;
+
+  // ── Apply-mode controls ──────────────────────────────────────────────────
+
+  function enterApplyMode() {
+    setSelectionSnapshot(new Set(selectedDates)); // snapshot for Cancel
+    setApplyMode(true);
+  }
+
+  function doneApplyMode() {
+    // Keep selectedDates as-is; just exit apply mode.
+    setSelectionSnapshot(null);
+    setApplyMode(false);
+  }
+
+  function cancelApplyMode() {
+    // Restore the selection that existed before the user entered apply mode.
+    if (selectionSnapshot !== null) setSelectedDates(selectionSnapshot);
+    setSelectionSnapshot(null);
+    setApplyMode(false);
+  }
 
   function toggleDate(date: string) {
     setSelectedDates((prev) => {
@@ -49,33 +101,86 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
 
       {/* ── Header ── */}
       <div className="flex items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
-        <h3 className="text-sm font-semibold text-foreground/80">30-Day Pricing Plan</h3>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center rounded-lg bg-gray-100/70 p-0.5">
-            {(["7", "30"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                onClick={() => setView(v)}
-                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
-                  view === v
-                    ? "bg-white text-foreground/75 shadow-sm"
-                    : "text-foreground/35 hover:text-foreground/55"
-                }`}
-              >
-                {v === "7" ? "7 days" : "30 days"}
-              </button>
-            ))}
-          </div>
-          {selectable && (
-            <div className="flex items-center gap-1.5 text-xs text-foreground/30">
-              <button type="button" onClick={selectAll} className="transition-colors hover:text-foreground/55">All</button>
-              <span>·</span>
-              <button type="button" onClick={selectNone} className="transition-colors hover:text-foreground/55">None</button>
+        {applyMode ? (
+          /* Apply-mode header */
+          <>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-foreground/80">Select nights</h3>
+              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-foreground/45">
+                {selectedCount} of {totalCount}
+              </span>
             </div>
-          )}
-        </div>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 text-xs text-foreground/30">
+                <button type="button" onClick={selectAll} className="transition-colors hover:text-foreground/55">All</button>
+                <span>·</span>
+                <button type="button" onClick={selectNone} className="transition-colors hover:text-foreground/55">None</button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={cancelApplyMode}
+                  className="rounded-lg border border-gray-200 px-2.5 py-1 text-xs font-medium text-foreground/50 transition-colors hover:border-gray-300 hover:text-foreground/70"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={doneApplyMode}
+                  className="rounded-lg bg-gray-900 px-2.5 py-1 text-xs font-semibold text-white transition-colors hover:bg-gray-700"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </>
+        ) : (
+          /* Inspect-mode header (default) */
+          <>
+            <h3 className="text-sm font-semibold text-foreground/80">30-Day Pricing Plan</h3>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center rounded-lg bg-gray-100/70 p-0.5">
+                {(["7", "30"] as const).map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setView(v)}
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
+                      view === v
+                        ? "bg-white text-foreground/75 shadow-sm"
+                        : "text-foreground/35 hover:text-foreground/55"
+                    }`}
+                  >
+                    {v === "7" ? "7 days" : "30 days"}
+                  </button>
+                ))}
+              </div>
+              {selectable && (
+                <button
+                  type="button"
+                  onClick={enterApplyMode}
+                  className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-2.5 py-1 text-xs font-medium text-foreground/45 transition-colors hover:border-gray-300 hover:text-foreground/65"
+                >
+                  Select nights
+                  {/* Show current selection count so users know their state before entering apply mode */}
+                  <span className="rounded-full bg-gray-100 px-1.5 py-px text-[10px] font-semibold text-foreground/40">
+                    {selectedCount}
+                  </span>
+                </button>
+              )}
+            </div>
+          </>
+        )}
       </div>
+
+      {/* ── Apply-mode hint strip ── */}
+      {applyMode && (
+        <div className="border-t border-gray-100 bg-gray-50/60 px-4 py-2 sm:px-6">
+          <p className="text-xs text-foreground/40">
+            Tap a date to add or remove it from your apply selection. Press <strong className="font-semibold text-foreground/55">Done</strong> when finished.
+          </p>
+        </div>
+      )}
 
       {/* ── Weekday headers ── */}
       <div className="grid grid-cols-7 border-t border-gray-100 px-2 sm:px-4">
@@ -92,55 +197,102 @@ export function PricingHeatmap({ calendar, selectable = false, onApplyDates }: P
           <div key={`empty-${i}`} />
         ))}
 
-        {visibleDays.map((day, i) => {
+        {visibleDays.map((day, idx) => {
           const globalIdx = days.indexOf(day);
-          const price = displayPrices[globalIdx >= 0 ? globalIdx : i];
+          const price = displayPrices[globalIdx >= 0 ? globalIdx : idx];
           const d = new Date(day.date + "T00:00:00");
           const dateNum = d.getDate();
           const isToday = day.date === TODAY;
           const isPast = day.date < TODAY;
           const isSelected = selectedDates.has(day.date);
+          // Only show focus ring in inspect mode — apply mode has its own selection ring.
+          const isFocused = !applyMode && !isPast && focusedDate === day.date;
 
-          const tileCls = isSelected && selectable
-            ? "bg-white border border-gray-800/30 ring-1 ring-gray-800/20"
-            : "bg-white border border-gray-200/80";
+          // Tile style priority: apply-selected (black) > focused (sky) > default
+          const tileCls = applyMode && isSelected && !isPast
+            ? "border-gray-900 bg-gray-900"
+            : isFocused
+            ? "border-sky-400/50 bg-sky-50/60 ring-1 ring-sky-300/30"
+            : "border-gray-200/80 bg-white";
+
+          const isApplySelected = applyMode && isSelected && !isPast;
 
           const dateNumEl = isToday ? (
-            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-rose-500 text-[10px] font-semibold text-white sm:h-6 sm:w-6 sm:text-xs">
+            <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-semibold sm:h-6 sm:w-6 sm:text-xs ${isApplySelected ? "bg-white/20 text-white" : "bg-rose-500 text-white"}`}>
               {dateNum}
             </span>
           ) : (
-            <span className={`text-[11px] font-medium sm:text-sm ${isPast ? "text-foreground/25" : "text-foreground/80"}`}>
+            <span className={`text-[11px] font-medium sm:text-sm ${isPast ? "text-foreground/25" : isApplySelected ? "text-white" : "text-foreground/80"}`}>
               {dateNum}
             </span>
           );
 
-          const cell = (
-            <div className={`rounded-xl p-1.5 transition-colors sm:rounded-2xl sm:p-2.5 ${tileCls} ${selectable && !isPast ? "cursor-pointer hover:border-gray-400/50" : ""}`}>
+          const priceEl = !isPast ? (
+            <p className={`mt-1 text-[11px] font-medium sm:mt-3 sm:text-sm ${isApplySelected ? "text-white/80" : "text-foreground/70"}`}>
+              ${price}
+            </p>
+          ) : null;
+
+          // Which action does a click perform?
+          // apply mode + future → toggle selectedDates
+          // inspect mode + future + onFocusDate → toggle focusedDate
+          // past / no handler → no click
+          const clickable = !isPast && (applyMode || !!onFocusDate);
+
+          const tileBody = (
+            <>
               {dateNumEl}
-              {!isPast && (
-                <p className="mt-1 text-[11px] font-medium text-foreground/70 sm:mt-3 sm:text-sm">${price}</p>
-              )}
-            </div>
+              {priceEl}
+            </>
           );
 
-          if (selectable && !isPast) {
+          if (clickable) {
+            // Hover style depends on current tile state to avoid visual jarring:
+            // – black apply-selected tiles stay dark on hover (bg-gray-800)
+            // – other tiles get the standard lighter border on hover
+            const hoverCls = isApplySelected
+              ? "hover:bg-gray-800 hover:border-gray-800"
+              : "hover:border-gray-400/50";
             return (
-              <button key={day.date} type="button" onClick={() => toggleDate(day.date)} className="text-left">
-                {cell}
+              <button
+                key={day.date}
+                type="button"
+                onClick={() => {
+                  if (applyMode) {
+                    toggleDate(day.date);
+                  } else {
+                    // Inspect mode: only focusedDate changes. selectedDates is never touched.
+                    // The Comparable Listings panel will stay visible as long as focusedDate
+                    // is non-null — entering apply mode afterwards does not clear it.
+                    onFocusDate?.(day.date === focusedDate ? null : day.date);
+                  }
+                }}
+                className={`w-full rounded-xl border p-1.5 text-left transition-colors sm:rounded-2xl sm:p-2.5 ${tileCls} cursor-pointer ${hoverCls}`}
+              >
+                {tileBody}
               </button>
             );
           }
-          return <div key={day.date}>{cell}</div>;
+
+          return (
+            <div
+              key={day.date}
+              className={`rounded-xl border p-1.5 sm:rounded-2xl sm:p-2.5 ${tileCls}`}
+            >
+              {tileBody}
+            </div>
+          );
         })}
       </div>
 
-      {/* ── Apply footer ── */}
+      {/* ── Apply footer (always visible when selectable, both modes) ── */}
       {selectable && (
         <div className="border-t border-gray-100 px-3 py-3 sm:px-6 sm:py-4">
           <div className="flex items-center justify-between gap-2">
             <p className="text-xs text-foreground/35">
-              {selectedCount === totalCount ? `All ${totalCount} nights` : `${selectedCount} of ${totalCount} nights`}
+              {selectedCount === totalCount
+                ? `All ${totalCount} nights`
+                : `${selectedCount} of ${totalCount} nights`}
               {" selected"}
             </p>
             <button

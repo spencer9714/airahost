@@ -162,21 +162,28 @@ function LoginContent() {
           </Button>
         </form>
 
-        <div className="mt-4 text-center text-sm text-muted">
+        <div className="mt-4 space-y-2 text-center text-sm text-muted">
           {mode === "signin" ? (
-            <p>
-              Don&apos;t have an account?{" "}
-              <button
-                onClick={() => {
-                  setMode("signup");
-                  setError("");
-                  setMessage("");
-                }}
-                className="font-medium text-accent hover:underline"
-              >
-                Sign up
-              </button>
-            </p>
+            <>
+              <p>
+                Don&apos;t have an account?{" "}
+                <button
+                  onClick={() => {
+                    setMode("signup");
+                    setError("");
+                    setMessage("");
+                  }}
+                  className="font-medium text-accent hover:underline"
+                >
+                  Sign up
+                </button>
+              </p>
+              <p>
+                <a href="/forgot-password" className="font-medium text-accent hover:underline">
+                  Forgot your password?
+                </a>
+              </p>
+            </>
           ) : (
             <p>
               Already have an account?{" "}

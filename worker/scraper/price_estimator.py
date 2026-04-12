@@ -25,7 +25,7 @@ import time
 from datetime import datetime as dt, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM
+from worker.core.geo_filter import apply_geo_filter, haversine_km, DEFAULT_MAX_RADIUS_KM
 from worker.core.similarity import (
     SIMILARITY_FLOOR,
     comp_urls_match,
@@ -34,6 +34,7 @@ from worker.core.similarity import (
 )
 from worker.scraper.comparable_collector import (
     build_search_url,
+    extract_comp_coords,
     parse_card_to_spec,
     scroll_and_collect,
     wait_for_cards,
@@ -709,6 +710,8 @@ def run_scrape(
     nightly_plan: Optional[Any] = None,
     fallback_attributes: Optional[Dict[str, Any]] = None,
     fallback_address: Optional[str] = None,
+    target_spec_override: Optional[ListingSpec] = None,
+    query_criteria_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -722,6 +725,14 @@ def run_scrape(
     maxGuests, propertyType, ...) used to backfill any target spec fields that
     extract_target_spec() could not recover from the Airbnb page. Only fills
     missing fields — never overwrites live-extracted values.
+
+    target_spec_override: when provided, this becomes the source of truth for
+    criteria-mode target metadata and day-query search context. The scraped
+    listing URL still acts as an anchor/exclusion reference, but its location
+    and capacity no longer replace the user-entered criteria.
+
+    query_criteria_override: when provided, this is written into the final
+    transparent result instead of the shared URL-mode query_criteria payload.
 
     Raises ValueError if the date range exceeds MAX_NIGHTS.
     """
@@ -971,6 +982,50 @@ def run_scrape(
                     f"({target.lat:.5f}, {target.lng:.5f})"
                 )
 
+            if target_spec_override is not None:
+                anchor_url = target.url or listing_url
+                anchor_price = target.nightly_price
+                target = ListingSpec(
+                    url=anchor_url,
+                    title=target_spec_override.title or target.title,
+                    location=target_spec_override.location or target.location,
+                    city=target_spec_override.city or "",
+                    state=target_spec_override.state or "",
+                    postal_code=target_spec_override.postal_code or "",
+                    country=target_spec_override.country or "",
+                    country_code=target_spec_override.country_code or "",
+                    accommodates=target_spec_override.accommodates,
+                    bedrooms=target_spec_override.bedrooms,
+                    beds=target_spec_override.beds,
+                    baths=target_spec_override.baths,
+                    property_type=target_spec_override.property_type or "",
+                    nightly_price=None,
+                    currency=target.currency or "USD",
+                    rating=None,
+                    reviews=None,
+                    amenities=list(target_spec_override.amenities or []),
+                    scrape_nights=target.scrape_nights,
+                    price_kind=target.price_kind,
+                    lat=target_spec_override.lat if target_spec_override.lat is not None else target.lat,
+                    lng=target_spec_override.lng if target_spec_override.lng is not None else target.lng,
+                )
+                extraction_warnings.append(
+                    "Criteria override applied: preserved user-entered target metadata and search context; "
+                    f"anchor listing kept only for exclusion/reference ({anchor_url})."
+                )
+                _spec_extraction_meta["criteriaOverrideApplied"] = True
+                _spec_extraction_meta["anchorListingUrl"] = anchor_url
+                _spec_extraction_meta["anchorListingObservedNightlyPrice"] = anchor_price
+                logger.info(
+                    "[run_scrape] Applied criteria override: location=%r accommodates=%r "
+                    "bedrooms=%r baths=%r anchor_url=%s",
+                    target.location,
+                    target.accommodates,
+                    target.bedrooms,
+                    target.baths,
+                    anchor_url,
+                )
+
             # Resolve adaptive radius — use caller-supplied value or fall back to default
             _effective_radius = max_radius_km if max_radius_km is not None else DEFAULT_MAX_RADIUS_KM
 
@@ -1083,6 +1138,13 @@ def run_scrape(
                 "queryMode": "day_by_day",
                 "propertyTypeFilter": target.property_type or None,
             }
+            if query_criteria_override is not None:
+                query_criteria = dict(query_criteria_override)
+                query_criteria["checkin"] = checkin
+                query_criteria["checkout"] = checkout
+                query_criteria.setdefault("totalNights", total_nights)
+                query_criteria.setdefault("sampledNights", len(sample_indices))
+                query_criteria.setdefault("queryMode", "criteria_anchor_assisted")
 
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
@@ -1261,7 +1323,8 @@ def run_scrape(
                     "lng": target.lng,
                     "source": _coord_source,
                 }
-            _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
+            if target_spec_override is None:
+                _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
             _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
 
             logger.info(
@@ -1869,42 +1932,581 @@ def run_benchmark_scrape(
 # ---------------------------------------------------------------------------
 
 
-def _extract_search_location(address: str) -> tuple:
+def _build_structured_search_location(
+    city: Optional[str],
+    state: Optional[str],
+    postal_code: Optional[str],
+) -> tuple:
     """
-    Extract a search-friendly location string from a full property address.
+    Build a search-friendly Airbnb search string from structured fields.
 
-    Airbnb search works best with city/neighborhood names rather than full
-    street addresses.  This function strips the street-level detail and
-    returns the most useful search token, plus a confidence indicator.
+    NOTE: This function is intentionally NOT called when a postalCode is
+    present.  run_criteria_search() geocodes the ZIP to a canonical
+    city/state first (via _geocode_postal_to_canonical), then uses that
+    canonical location as the Airbnb search string.  This function is the
+    fallback for the no-postal path.
+
+    Priority:
+      1. city + state  → "City, ST"   (state disambiguates city name)
+      2. anything else → ""           (caller falls back to address parser)
+
+    A city name alone is not returned here — it may be geographically
+    ambiguous (e.g. "Belmont" in CA vs NC vs Long Beach).
 
     Returns:
-        (search_location: str, confidence: str)  — confidence is "high" | "medium" | "low"
+        (location: str, confidence: str)
+        Returns ("", "") when no unambiguous location can be built.
+    """
+    city = (city or "").strip() or None
+    state = (state or "").strip() or None
+    postal_code = (postal_code or "").strip() or None
+
+    if city and state:
+        return f"{city}, {state}", "high"
+    # postal_code alone: caller should geocode it; don't return raw ZIP here
+    return "", ""
+
+
+def _is_us_zip(postal_code: str) -> bool:
+    """Return True if postal_code looks like a US ZIP (5-digit or ZIP+4)."""
+    return bool(re.match(r"^\d{5}(?:-\d{4})?$", postal_code.strip()))
+
+
+def _abbrev_state_for_search(state: str) -> str:
+    """
+    Return the 2-letter US state code suitable for Airbnb search strings.
+
+    Converts full US state names to their abbreviation so the Airbnb search
+    URL uses the compact form (``"Belmont, CA"`` rather than
+    ``"Belmont, California"``).
+
+    * ``"California"`` → ``"CA"``
+    * ``"CA"``         → ``"CA"``   (already abbreviated — unchanged)
+    * ``"Queensland"`` → ``"Queensland"``  (non-US state — preserved as-is)
+    * ``"台灣"``        → ``"台灣"``         (non-ASCII state — preserved as-is)
+    * ``""``           → ``""``
+
+    The geocode_result metadata is **not** touched — only the string returned
+    here is used for building the Airbnb search query.
+    """
+    if not state:
+        return state
+    from worker.core.anchor_location import normalize_state
+    norm = normalize_state(state)
+    # normalize_state returns a 2-letter uppercase ASCII code for US states.
+    # Chinese chars / non-ASCII pass .isalpha() but not .isupper(); ASCII
+    # 2-letter non-US codes (e.g. "BC" for British Columbia) would pass, but
+    # those are already short and acceptable.
+    if len(norm) == 2 and norm.isupper() and norm.isascii():
+        return norm
+    return state  # non-US or unrecognised — preserve original
+
+
+def _geocode_postal_to_canonical(
+    postal_code: str,
+    hint_city: Optional[str] = None,
+    timeout: int = 3,
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a postal code to a canonical city / state / coords via Nominatim.
+
+    For US ZIPs (5-digit or ZIP+4):
+      - Appends ", United States" to the query so Nominatim restricts search
+        to the US, preventing global misrouting (e.g. "94002" → Mexico).
+      - Passes countrycodes="us" as an additional Nominatim filter.
+      - Primary query:  "Belmont 94002, United States"  (with hint_city)
+      - Fallback query: "94002, United States"           (bare ZIP)
+
+    For non-US postal codes the query is sent without country restriction.
+
+    Returns None on any failure — geocoding is always best-effort.  Callers
+    must handle None and fall back gracefully.
+    """
+    try:
+        from worker.core.geocode_details import geocode_address_details
+    except ImportError:
+        logger.warning("[criteria] geocode_details not available; skipping ZIP geocoding")
+        return None
+
+    us_zip = _is_us_zip(postal_code)
+    country_suffix = ", United States" if us_zip else ""
+    countrycodes = "us" if us_zip else None
+
+    if hint_city:
+        query = f"{hint_city} {postal_code}{country_suffix}"
+    else:
+        query = f"{postal_code}{country_suffix}"
+
+    logger.debug(f"[criteria] Geocode query={query!r} countrycodes={countrycodes!r}")
+    result = geocode_address_details(query, timeout=timeout, countrycodes=countrycodes)
+
+    # If the city-hinted query fails, retry with just the ZIP (+ country context)
+    if not result and hint_city:
+        retry_query = f"{postal_code}{country_suffix}"
+        logger.debug(f"[criteria] Geocode retry query={retry_query!r}")
+        result = geocode_address_details(retry_query, timeout=timeout, countrycodes=countrycodes)
+
+    return result
+
+
+def _extract_search_location(address: str) -> tuple:
+    """
+    Extract the most useful location token from a free-text address string.
+
+    This is the FALLBACK used only when no structured location fields (city,
+    state, postalCode) are available.  run_criteria_search() will geocode
+    any ZIP code returned here before using it as an Airbnb search query —
+    so it is safe to return a bare ZIP; callers handle the geocoding step.
+
+    Rules (in priority order):
+      1. Bare ZIP (digits only, 3–6 chars)   → return ZIP  (caller geocodes)
+      2. Taiwanese address                   → extract city+district
+      3. Comma-separated with trailing ZIP   → return ZIP  (caller geocodes)
+      4. Comma-separated, city + state       → "City, ST"
+      5. Anything else                       → as-is, medium confidence
+
+    Returns:
+        (search_location: str, confidence: str)  — "high" | "medium" | "low"
     """
     addr = address.strip()
 
-    # ZIP / postal code (digits only, 3–6 chars): use directly
+    # 1. Bare ZIP / postal code
     if re.match(r"^\d{3,6}$", addr):
         return addr, "high"
 
-    # Taiwanese address: extract city + district
-    # e.g. "台北市信義區松山路123號" → "台北市信義區"
+    # 2. Taiwanese address: e.g. "台北市信義區松山路123號" → "台北市信義區"
     tw_match = re.search(r"([^\s,]+?(?:市|縣)(?:[^\s,]+?(?:區|鄉|鎮|市))?)", addr)
     if tw_match:
         return tw_match.group(1), "high"
 
-    # Comma-separated: "123 Main St, New York, NY 10001" → "New York, NY"
+    # 3 & 4. Comma-separated address
     parts = [p.strip() for p in addr.split(",") if p.strip()]
     if len(parts) >= 2:
-        # Skip leading street component (starts with a digit or looks like a house number)
+        # Skip leading street component (starts with a digit)
         start = 1 if re.match(r"^\d", parts[0]) else 0
         city_parts = parts[start:]
-        # Drop trailing bare ZIP/postal codes
-        city_parts = [p for p in city_parts if not re.match(r"^\d{3,6}$", p.strip())]
+        # Trailing bare ZIP wins — caller will geocode it
+        if city_parts and re.match(r"^\d{3,6}$", city_parts[-1]):
+            return city_parts[-1], "high"
         if city_parts:
             return ", ".join(city_parts[:2]), "high"
 
-    # Single token or no recognisable structure: use as-is
+    # 5. Single token or unrecognised structure
     return addr, "medium"
+
+
+# ---------------------------------------------------------------------------
+# Anchor selection helper (criteria pass 1)
+# ---------------------------------------------------------------------------
+
+# Geo-filter radii used when selecting the anchor listing in criteria pass 1.
+# Tighter than the default comp radius (30 km) because the anchor must be in
+# the same neighbourhood as the target property.
+_ANCHOR_RADIUS_TIGHT_KM: float = 20.0
+_ANCHOR_RADIUS_FALLBACK_KM: float = 40.0
+# City-centre proxy radius: smaller than the listing-level tight radius because
+# geocoded city centres are less precise than per-listing map-pin coordinates.
+# 15 km is chosen to keep nearby suburbs (Redwood City ~5 km, San Mateo ~6.5 km)
+# while excluding more distant cities (San Francisco ~30 km, Sonoma ~87 km).
+_ANCHOR_RADIUS_CITY_PROXY_KM: float = 15.0
+# Minimum candidates that must survive the tight filter before we declare it
+# "good enough" and skip the fallback.
+_ANCHOR_MIN_GEO_CANDIDATES: int = 2
+
+
+def _select_anchor_candidate(
+    candidates: List[ListingSpec],
+    user_spec: ListingSpec,
+    target_lat: Optional[float],
+    target_lng: Optional[float],
+    *,
+    target_city: Optional[str] = None,
+    target_state: Optional[str] = None,
+    n_listing_coords: int = 0,
+    addr_confidence: str = "low",
+) -> Tuple[ListingSpec, float, Dict[str, Any]]:
+    """
+    Choose the best anchor candidate for criteria pass 2.
+
+    Four-phase pipeline
+    -------------------
+
+    Phase 1 — Geo pool (Paths A & B)
+        Path A (``n_listing_coords > 0``): tight (20 km) then fallback (40 km)
+        geo filter on page-embedded listing coordinates.
+
+        Path B (``n_listing_coords == 0``, target has coords): geocode unique
+        candidate location strings to city-centre proxies, apply 15 km filter.
+
+        If neither produces a pool, fall through to Phase 2 as "text_bucket".
+
+    Phase 2 — Location bucket classification
+        Classify every candidate in the current pool into five buckets using
+        the metro-cluster mapping:
+          local_match       — same city as target
+          nearby_market     — same metro cluster (approved nearby market)
+          regional_mismatch — same state, different cluster
+          far_mismatch      — different state
+          unknown           — unparseable location (always pass-through)
+
+        This classification is applied to ALL paths so bucket counts are always
+        available for reporting, regardless of which path found the geo pool.
+
+    Phase 3 — Controlled nearby-market expansion
+        Priority 1: if ``local_match`` candidates exist → pool = local + unknown
+        Priority 2: if no local but ``nearby_market`` exists → pool = nearby + unknown
+                    (nearby_expansion_used = True)
+        Priority 3: fallback based on ``addr_confidence``
+          "high"   → fail-safe (use regional/far as last resort, flag degraded)
+          "medium"/"low" → also allow regional_mismatch; far remains last resort
+
+        For Paths A/B, this phase re-ranks the geo-filtered pool by bucket
+        priority without removing candidates that are geo-confirmed nearby.
+        For Path C (text-only), this phase IS the pool selection.
+
+    Phase 4 — Structural similarity ranking
+        ``filter_similar_candidates`` then ``similarity_score`` pick the best
+        structural match within the location-constrained pool.
+
+    Parameters
+    ----------
+    candidates       : pool of ListingSpec objects from the Airbnb search page
+    user_spec        : synthetic target spec built from user criteria
+    target_lat/lng   : geocoded target coordinates (may be None)
+    target_city      : target city name (normalised internally)
+    target_state     : target state, any form (normalised internally)
+    n_listing_coords : how many candidates already have listing-level coords
+    addr_confidence  : location confidence ("high" | "medium" | "low")
+
+    Returns
+    -------
+    (best_match, best_score, anchor_debug)
+    """
+    from worker.core.anchor_location import (
+        classify_candidate_location,
+        geocode_candidate_cities,
+        get_city_cluster,
+        get_nearby_cities,
+        normalize_city,
+        normalize_location_text,
+        normalize_state,
+        parse_location_city_state,
+    )
+
+    # Pre-normalise target location once
+    norm_city = normalize_city(target_city) if target_city else ""
+    norm_state = normalize_state(target_state) if target_state else ""
+
+    n_before_geo = len(candidates)
+    geo_radius_used: Optional[float] = None
+    geo_fallback = False
+    geo_skipped = False
+    n_after_geo = n_before_geo
+    selection_mode = "no_geo"
+
+    location_bucket_counts: Dict[str, int] = {
+        "local_match": 0, "nearby_market": 0, "regional_mismatch": 0,
+        "far_mismatch": 0, "unknown": 0,
+    }
+    fail_safe_triggered = False
+    nearby_expansion_used = False
+    allowed_nearby_cities: List[str] = []
+    n_proxy_coords = 0
+
+    pool = candidates  # default: all candidates
+
+    # ── Phase 1A: listing-level coords ────────────────────────────────────────
+    if target_lat is not None and target_lng is not None and n_listing_coords > 0:
+        selection_mode = "listing_coords"
+
+        tight_pool, tight_excluded = apply_geo_filter(
+            candidates, target_lat, target_lng,
+            max_radius_km=_ANCHOR_RADIUS_TIGHT_KM,
+        )
+
+        if len(tight_pool) >= _ANCHOR_MIN_GEO_CANDIDATES or tight_excluded == 0:
+            pool = tight_pool
+            geo_radius_used = _ANCHOR_RADIUS_TIGHT_KM
+            n_after_geo = len(tight_pool)
+            logger.info(
+                f"[criteria/anchor] Path A: geo {_ANCHOR_RADIUS_TIGHT_KM}km: "
+                f"{n_before_geo} → {n_after_geo} candidates"
+            )
+        else:
+            geo_fallback = True
+            geo_radius_used = _ANCHOR_RADIUS_FALLBACK_KM
+            fallback_pool, _ = apply_geo_filter(
+                candidates, target_lat, target_lng,
+                max_radius_km=_ANCHOR_RADIUS_FALLBACK_KM,
+            )
+            logger.info(
+                f"[criteria/anchor] Path A: tight radius sparse "
+                f"({len(tight_pool)}); fallback {_ANCHOR_RADIUS_FALLBACK_KM}km"
+                f" → {len(fallback_pool)} candidates"
+            )
+            if fallback_pool:
+                pool = fallback_pool
+                n_after_geo = len(fallback_pool)
+            else:
+                geo_skipped = True
+                geo_radius_used = None
+                selection_mode = "text_bucket"
+                logger.warning(
+                    "[criteria/anchor] Path A: nothing within fallback radius; "
+                    "falling through to text-bucket filter"
+                )
+
+    # ── Phase 1B: city-proxy geocoding ────────────────────────────────────────
+    elif target_lat is not None and target_lng is not None and n_listing_coords == 0:
+        logger.info(
+            "[criteria/anchor] Path B: no listing coords; "
+            "attempting city-proxy geocoding"
+        )
+        n_proxy_coords = geocode_candidate_cities(
+            candidates, max_unique_cities=10, timeout_per_city=2,
+        )
+        if n_proxy_coords > 0:
+            proxy_pool, proxy_excluded = apply_geo_filter(
+                candidates, target_lat, target_lng,
+                max_radius_km=_ANCHOR_RADIUS_CITY_PROXY_KM,
+            )
+            if len(proxy_pool) >= _ANCHOR_MIN_GEO_CANDIDATES or proxy_excluded == 0:
+                pool = proxy_pool
+                geo_radius_used = _ANCHOR_RADIUS_CITY_PROXY_KM
+                n_after_geo = len(proxy_pool)
+                selection_mode = "city_proxy"
+                logger.info(
+                    f"[criteria/anchor] Path B: city-proxy {_ANCHOR_RADIUS_CITY_PROXY_KM}km: "
+                    f"{n_before_geo} → {n_after_geo} candidates"
+                )
+            else:
+                selection_mode = "text_bucket"
+                logger.info(
+                    f"[criteria/anchor] Path B: proxy pool sparse "
+                    f"({len(proxy_pool)}); falling through to text-bucket"
+                )
+        else:
+            selection_mode = "text_bucket"
+            logger.info(
+                "[criteria/anchor] Path B: city-proxy geocoding yielded no coords; "
+                "falling through to text-bucket"
+            )
+
+    # ── Phase 2: Classify pool members by location bucket (all paths) ─────────
+    # Always computed — gives audit trail regardless of which path was used.
+    if norm_city and norm_state:
+        allowed_nearby_cities = get_nearby_cities(norm_state, norm_city)
+
+        bucketed: Dict[str, List[ListingSpec]] = {
+            "local_match": [], "nearby_market": [], "regional_mismatch": [],
+            "far_mismatch": [], "unknown": [],
+        }
+        for cand in pool:
+            bkt = classify_candidate_location(
+                getattr(cand, "location", "") or "", norm_city, norm_state,
+            )
+            bucketed[bkt].append(cand)
+
+        for k in location_bucket_counts:
+            location_bucket_counts[k] = len(bucketed[k])
+
+        # ── Phase 3: Controlled nearby-market expansion ───────────────────────
+        # For text-based paths (C / no_geo): this phase determines the pool.
+        # For geo-based paths (A / B): pool is already geo-constrained; this
+        # phase applies priority ordering within the geo pool.
+
+        if selection_mode in ("text_bucket", "no_geo"):
+            # Text path: staged expansion is the only location filter.
+            selection_mode = "text_bucket"
+
+            if bucketed["local_match"]:
+                # Priority 1: target-city candidates found — no expansion needed
+                pool = bucketed["local_match"] + bucketed["unknown"]
+                nearby_expansion_used = False
+
+            elif bucketed["nearby_market"]:
+                # Priority 2: expand to approved nearby market
+                pool = bucketed["nearby_market"] + bucketed["unknown"]
+                nearby_expansion_used = True
+
+            else:
+                # Priority 3: no local or nearby → confidence-gated fallback
+                nearby_expansion_used = True  # expansion attempted, nothing found
+
+                if addr_confidence == "high":
+                    # High confidence: refuse regional/far; fail-safe only
+                    fail_safe_triggered = True
+                    fallback = bucketed["regional_mismatch"] + bucketed["far_mismatch"]
+                else:
+                    # Medium/low: accept regional as degraded fallback
+                    fallback = bucketed["regional_mismatch"] + bucketed["unknown"]
+                    if not fallback:
+                        fail_safe_triggered = True
+                        fallback = bucketed["far_mismatch"]
+
+                if fallback:
+                    pool = fallback
+
+            n_after_geo = len(pool)
+
+            logger.info(
+                f"[criteria/anchor] Phase 3 ({addr_confidence} conf, "
+                f"expansion={'yes' if nearby_expansion_used else 'no'}): "
+                f"local={location_bucket_counts['local_match']} "
+                f"nearby={location_bucket_counts['nearby_market']} "
+                f"regional={location_bucket_counts['regional_mismatch']} "
+                f"far={location_bucket_counts['far_mismatch']} "
+                f"unknown={location_bucket_counts['unknown']} "
+                f"→ pool={len(pool)}"
+                + (" FAIL-SAFE" if fail_safe_triggered else "")
+            )
+
+        else:
+            # Geo path (A or B): pool already geo-constrained.
+            # Priority-order within the pool: local > nearby > regional > far.
+            # Prefer local if available; only use full pool if no local candidates.
+            if bucketed["local_match"]:
+                # Local candidates exist in geo pool — restrict to them
+                refined = bucketed["local_match"] + bucketed["unknown"]
+                pool = refined
+                n_after_geo = len(pool)
+                nearby_expansion_used = False
+            elif bucketed["nearby_market"] or bucketed["unknown"]:
+                # No local in geo pool; geo-confirmed nearby candidates compete
+                nearby_expansion_used = True
+                # pool stays as geo-filtered (don't narrow further — trust geo)
+            else:
+                # Geo pool has only regional/far — unusual given geo filter
+                nearby_expansion_used = True
+                # Still trust the geo filter result; just flag expansion
+
+            logger.info(
+                f"[criteria/anchor] Phase 3 geo-path "
+                f"({'expansion' if nearby_expansion_used else 'local-only'}): "
+                f"local={location_bucket_counts['local_match']} "
+                f"nearby={location_bucket_counts['nearby_market']} "
+                f"pool={len(pool)}"
+            )
+
+    else:
+        logger.debug(
+            "[criteria/anchor] No target city/state — skipping bucket "
+            "classification and expansion"
+        )
+
+    # ── Phase 4: Structural similarity ranking ────────────────────────────────
+    filtered, _filter_debug = filter_similar_candidates(user_spec, pool)
+    if not filtered:
+        logger.warning(
+            f"[criteria/anchor] Similarity filter emptied pool of {len(pool)}; "
+            "falling back to unfiltered pool"
+        )
+        filtered = pool
+
+    scored = [(c, similarity_score(user_spec, c)) for c in filtered]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    best_match, best_score = scored[0]
+    anchor_dist = getattr(best_match, "distance_to_target_km", None)
+
+    # Classify the selected anchor's bucket for reporting
+    anchor_bucket: Optional[str] = None
+    if norm_city and norm_state:
+        anchor_bucket = classify_candidate_location(
+            getattr(best_match, "location", "") or "", norm_city, norm_state,
+        )
+        # For geo paths: finalise nearby_expansion_used from the selected anchor
+        if selection_mode in ("listing_coords", "city_proxy"):
+            nearby_expansion_used = anchor_bucket not in (
+                None, "local_match", "unknown"
+            )
+
+    # Compute location explainability fields for the selected anchor
+    _anchor_raw_loc = (getattr(best_match, "location", "") or "").strip()
+    _anchor_norm_loc, _anchor_norm_notes = normalize_location_text(_anchor_raw_loc)
+    _anchor_city, _anchor_state_code = parse_location_city_state(
+        _anchor_norm_loc if _anchor_norm_loc else _anchor_raw_loc
+    )
+    _anchor_cluster = (
+        get_city_cluster(_anchor_state_code, _anchor_city)
+        if _anchor_state_code and _anchor_city
+        else None
+    )
+
+    logger.info(
+        f"[criteria/anchor] Selected: {best_match.url} "
+        f"score={best_score:.3f} "
+        + (f"dist={anchor_dist:.1f}km " if anchor_dist is not None else "dist=unknown ")
+        + f"mode={selection_mode} bucket={anchor_bucket} "
+        + f"expansion={nearby_expansion_used}"
+        + (f" norm={_anchor_norm_notes!r}" if _anchor_norm_notes else "")
+    )
+
+    return best_match, best_score, {
+        "anchorCandidatesBeforeGeo": n_before_geo,
+        "anchorCandidatesAfterGeo": n_after_geo,
+        "anchorGeoRadiusKm": geo_radius_used,
+        "anchorGeoFallback": geo_fallback,
+        "anchorGeoSkipped": geo_skipped,
+        "anchorStructuralScore": round(best_score, 3),
+        "anchorDistanceKm": round(anchor_dist, 2) if anchor_dist is not None else None,
+        "anchorHasTargetCoords": (target_lat is not None and target_lng is not None),
+        "anchorSelectionMode": selection_mode,
+        "anchorProxyCoordsAssigned": n_proxy_coords,
+        "anchorLocationBuckets": location_bucket_counts,
+        "anchorLocationBucket": anchor_bucket,
+        "anchorFailSafeTriggered": fail_safe_triggered,
+        "anchorNearbyExpansionUsed": nearby_expansion_used,
+        "anchorAllowedNearbyCities": allowed_nearby_cities,
+        "anchorTargetCityOnlyCount": location_bucket_counts["local_match"],
+        "anchorNearbyMarketCount": location_bucket_counts["nearby_market"],
+        "targetLocationConfidence": addr_confidence,
+        "targetCanonicalCity": norm_city or None,
+        "targetCanonicalState": norm_state or None,
+        "anchorRawLocation": _anchor_raw_loc or None,
+        "anchorNormalizedLocation": _anchor_norm_loc or _anchor_raw_loc or None,
+        "anchorNormalizationNotes": _anchor_norm_notes or None,
+        "anchorClusterId": _anchor_cluster,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Canonical target resolution helper (used by run_criteria_search)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_canonical_target(
+    candidates,                      # List[ListingSpec]
+    raw_city: Optional[str],
+    raw_state: Optional[str],
+    addr_confidence: str,
+    target_lat: Optional[float] = None,
+    target_lng: Optional[float] = None,
+) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Decide which city/state to use as the canonical target for anchor selection.
+
+    High confidence → trust the structured address fields directly.
+    Low / medium confidence → try to infer from the Airbnb first-page
+    candidates (distance-first, then vote fallback).
+
+    Returns ``(anchor_city, anchor_state, source)`` — safe to pass straight
+    into ``_select_anchor_candidate`` as ``target_city`` / ``target_state``.
+    ``source`` mirrors the ``targetCanonicalCitySource`` debug key.
+    """
+    if addr_confidence == "high":
+        return raw_city, raw_state, "address"
+
+    from worker.core.anchor_location import infer_canonical_target_from_candidates
+    inf_city, inf_state, source = infer_canonical_target_from_candidates(
+        candidates,
+        fallback_city=raw_city,
+        fallback_state=raw_state,
+        target_lat=target_lat,
+        target_lng=target_lng,
+    )
+    # Ensure we always return something, even when inference falls back
+    return (inf_city or raw_city), (inf_state or raw_state), source
 
 
 # ---------------------------------------------------------------------------
@@ -1948,19 +2550,148 @@ def run_criteria_search(
     timings: Dict[str, int] = {}
     base_origin = "https://www.airbnb.com"
 
-    # Extract a search-friendly location from the full address
-    search_location, addr_confidence = _extract_search_location(address)
-    is_zip = bool(re.match(r"^\d{3,6}$", search_location))
-    search_mode = "zip" if is_zip else "city"
+    # ── Step 1: read structured location fields from attributes ──────────────
+    _city = (attributes.get("city") or "").strip() or None
+    _state = (attributes.get("state") or "").strip() or None
+    _postal = (
+        (attributes.get("postalCode") or attributes.get("postal_code") or "").strip() or None
+    )
+
+    # ── Step 2: resolve location to a canonical city/state for Airbnb search ─
+    #
+    # Strategy:
+    #   A. postalCode present → geocode ZIP to canonical city/state/coords.
+    #      Using raw ZIP as the Airbnb search query is unreliable — Airbnb
+    #      may misroute bare ZIP codes to unrelated places (e.g. "94002" has
+    #      matched San Carlos, Mexico in some sessions).  Geocoding the ZIP
+    #      produces a canonical city/state that Airbnb resolves correctly.
+    #   B. no postalCode, city + state → use "city, state" directly.
+    #   C. no postalCode, city only   → address-string fallback (medium conf).
+    #   D. nothing structured         → address-string fallback.
+    #
+    # In all cases where the fallback parser returns a bare ZIP, we also
+    # geocode it so the Airbnb search is always city/state-based.
+
+    geocode_result: Optional[Dict[str, Any]] = None
+    city_zip_mismatch: Optional[str] = None
+    geocode_query_used: Optional[str] = None  # logged in queryCriteria for debugging
+
+    # Detect ZIP anywhere in the address string (for the all-fallback path D)
+    _addr_zip_match = re.search(r"\b(\d{5})\b", address)
+    _addr_zip = _addr_zip_match.group(1) if _addr_zip_match else None
+
+    if _postal:
+        # Path A: geocode the ZIP
+        _postal_us = _is_us_zip(_postal)
+        _postal_suffix = ", United States" if _postal_us else ""
+        geocode_query_used = (
+            f"{_city} {_postal}{_postal_suffix}" if _city else f"{_postal}{_postal_suffix}"
+        )
+        logger.info(f"[criteria] Geocoding postalCode={_postal!r} hint_city={_city!r}")
+        geocode_result = _geocode_postal_to_canonical(_postal, hint_city=_city)
+
+        if geocode_result:
+            gc_city = geocode_result.get("city")
+            gc_state = geocode_result.get("state")
+            gc_lat = geocode_result.get("lat")
+            gc_lng = geocode_result.get("lng")
+
+            # Carry geocoded coords forward as target coords if not already set
+            if target_lat is None and gc_lat is not None:
+                target_lat = gc_lat
+            if target_lng is None and gc_lng is not None:
+                target_lng = gc_lng
+
+            # Warn if user-supplied city disagrees with geocoded city
+            if _city and gc_city and _city.lower() != gc_city.lower():
+                city_zip_mismatch = (
+                    f"User city {_city!r} ≠ geocoded city {gc_city!r} for ZIP {_postal!r}"
+                )
+                logger.warning(f"[criteria] {city_zip_mismatch}")
+
+            # Build canonical search string from geocoded city + state.
+            # Abbreviate full state names ("California" → "CA") so the Airbnb
+            # search URL uses the compact form Airbnb resolves most reliably.
+            if gc_city and gc_state:
+                search_location = f"{gc_city}, {_abbrev_state_for_search(gc_state)}"
+                addr_confidence = "high"
+            elif gc_city:
+                search_location = gc_city
+                addr_confidence = "medium"
+            else:
+                # Geocode returned coords but no city — fall through to city+state
+                search_location = ""
+                addr_confidence = "low"
+        else:
+            logger.warning(
+                f"[criteria] ZIP geocode failed for {_postal!r}; falling back to "
+                "structured city/state or address parser"
+            )
+            geocode_result = None
+            search_location = ""
+            addr_confidence = "low"
+
+        # Geocode failed or returned no city: try city+state, then address parser
+        if not search_location:
+            if _city and _state:
+                search_location = f"{_city}, {_abbrev_state_for_search(_state)}"
+                addr_confidence = "medium"
+            elif _city:
+                search_location = _city
+                addr_confidence = "low"
+            else:
+                search_location, addr_confidence = _extract_search_location(address)
+
+    elif _city and _state:
+        # Path B: no ZIP, structured city + state
+        search_location = f"{_city}, {_abbrev_state_for_search(_state)}"
+        addr_confidence = "high"
+
+    elif _city:
+        # Path C: city only — low confidence, ambiguous
+        search_location = _city
+        addr_confidence = "low"
+
+    else:
+        # Path D: no structured fields — parse address string
+        search_location, addr_confidence = _extract_search_location(address)
+
+        # If the fallback parser returned a bare ZIP, geocode it too
+        raw_is_zip = bool(re.match(r"^\d{3,6}$", search_location))
+        if raw_is_zip:
+            logger.info(
+                f"[criteria] Address parser returned ZIP {search_location!r}; geocoding"
+            )
+            _raw_us = _is_us_zip(search_location)
+            geocode_query_used = search_location + (", United States" if _raw_us else "")
+            geocode_result = _geocode_postal_to_canonical(search_location)
+            if geocode_result:
+                gc_city = geocode_result.get("city")
+                gc_state = geocode_result.get("state")
+                if target_lat is None:
+                    target_lat = geocode_result.get("lat")
+                if target_lng is None:
+                    target_lng = geocode_result.get("lng")
+                if gc_city and gc_state:
+                    search_location = f"{gc_city}, {_abbrev_state_for_search(gc_state)}"
+                    addr_confidence = "high"
+                elif gc_city:
+                    search_location = gc_city
+                    addr_confidence = "medium"
+            # If geocode fails, search_location stays as the raw ZIP (best-effort)
+
     logger.info(
-        f"[criteria] address={address!r} → search_location={search_location!r} "
-        f"(mode={search_mode}, confidence={addr_confidence})"
+        f"[criteria] Final search_location={search_location!r} "
+        f"confidence={addr_confidence} geocoded={geocode_result is not None}"
     )
     if addr_confidence == "low":
         logger.warning(
-            f"[criteria] Low confidence extracting search location from address={address!r}. "
+            f"[criteria] Low confidence location for address={address!r}. "
             "Results may be inaccurate."
         )
+
+    is_zip = bool(re.match(r"^\d{3,6}$", search_location))
+    search_mode = "zip" if is_zip else "city"
 
     # Extract preferred comps from attributes if not explicitly passed
     if preferred_comps is None:
@@ -1968,10 +2699,20 @@ def run_criteria_search(
         preferred_comps = raw if isinstance(raw, list) else None
 
     # Build a synthetic target spec from user criteria
+    user_city = (geocode_result.get("city") if geocode_result else None) or _city or ""
+    user_state = (geocode_result.get("state") if geocode_result else None) or _state or ""
+    user_country = (geocode_result.get("country") if geocode_result else None) or ""
+    user_country_code = (geocode_result.get("country_code") if geocode_result else None) or ""
+
     user_spec = ListingSpec(
         url="",
-        title="User property",
+        title=address or "User property",
         location=search_location,
+        city=user_city,
+        state=user_state,
+        postal_code=_postal or "",
+        country=user_country,
+        country_code=user_country_code,
         accommodates=attributes.get("maxGuests"),
         bedrooms=attributes.get("bedrooms"),
         beds=attributes.get("bedrooms"),  # approximate beds = bedrooms
@@ -1990,6 +2731,22 @@ def run_criteria_search(
         "rawAddress": address,
         "searchMode": search_mode,
         "addressConfidence": addr_confidence,
+        "structuredLocation": {
+            "city": _city,
+            "state": _state,
+            "postalCode": _postal,
+        },
+        "geocodeResult": {
+            "city": geocode_result.get("city") if geocode_result else None,
+            "state": geocode_result.get("state") if geocode_result else None,
+            "postalCode": geocode_result.get("postal_code") if geocode_result else None,
+            "country": geocode_result.get("country") if geocode_result else None,
+            "countryCode": geocode_result.get("country_code") if geocode_result else None,
+            "lat": geocode_result.get("lat") if geocode_result else None,
+            "lng": geocode_result.get("lng") if geocode_result else None,
+        } if geocode_result else None,
+        "geocodeQuery": geocode_query_used,
+        "cityZipMismatch": city_zip_mismatch,
         "searchAdults": adults,
         "checkin": checkin,
         "checkout": checkout,
@@ -2037,6 +2794,12 @@ def run_criteria_search(
                 "timingsMs": {},
             },
         }
+
+    # Initialised before the playwright block so they're in scope for
+    # the debug metadata section that runs after pass 2.
+    coord_map: Dict[str, tuple] = {}
+    n_coords_assigned = 0
+    anchor_debug: Dict[str, Any] = {}
 
     with sync_playwright() as p:
         browser = p.chromium.connect_over_cdp(
@@ -2091,6 +2854,23 @@ def run_criteria_search(
             candidates = [parse_card_to_spec(c) for c in raw_cards]
             candidates = [c for c in candidates if c.url and c.nightly_price]
 
+            # Enrich candidates with page-embedded coordinates (map pin data).
+            # extract_comp_coords() scans __NEXT_DATA__ for room_id → (lat, lng).
+            # Candidates that lack a room-id match keep lat=None (pass-through in geo filter).
+            coord_map = extract_comp_coords(page)
+            if coord_map:
+                for spec in candidates:
+                    m = ROOM_ID_RE.search(spec.url or "")
+                    if m:
+                        pair = coord_map.get(m.group(1))
+                        if pair:
+                            spec.lat, spec.lng = pair[0], pair[1]
+                            n_coords_assigned += 1
+            logger.info(
+                f"[criteria] Coord map: {len(coord_map)} entries, "
+                f"coords assigned to {n_coords_assigned}/{len(candidates)} candidates"
+            )
+
             if not candidates:
                 no_results_hint = (
                     f"No listings found for ZIP code '{search_location}'. "
@@ -2114,17 +2894,40 @@ def run_criteria_search(
                     },
                 }
 
-            # Rank by similarity to user's spec
-            filtered_candidates, _filter_debug = filter_similar_candidates(user_spec, candidates)
-            scored = [(c, similarity_score(user_spec, c)) for c in filtered_candidates]
-            scored.sort(key=lambda x: x[1], reverse=True)
+            # Canonical target inference: when address confidence is low/medium,
+            # vote on the most common city/state from first-page Airbnb candidates
+            # rather than trusting the raw user-supplied _city/_state.  High
+            # confidence (ZIP geocoded, or city+state both provided) always uses
+            # the structured address fields directly.
+            _target_raw_city  = _city
+            _target_raw_state = _state
+            _anchor_target_city, _anchor_target_state, _target_canonical_city_source = \
+                _resolve_canonical_target(
+                    candidates, _city, _state, addr_confidence,
+                    target_lat=target_lat,
+                    target_lng=target_lng,
+                )
 
-            best_match = scored[0][0]
-            best_score = scored[0][1]
+            # Anchor selection: geo-constrained then structural similarity.
+            # _select_anchor_candidate() tries three paths in order:
+            #   A. listing-level coords (from coord_map)   → 20 km / 40 km filter
+            #   B. city-proxy geocoding (if coord_map = 0) → 15 km filter
+            #   C. metro-cluster text-bucket filter        → confidence-gated
+            best_match, best_score, anchor_debug = _select_anchor_candidate(
+                candidates, user_spec, target_lat, target_lng,
+                target_city=_anchor_target_city,
+                target_state=_anchor_target_state,
+                n_listing_coords=n_coords_assigned,
+                addr_confidence=addr_confidence,
+            )
+            anchor_debug["targetRawCity"]              = _target_raw_city or None
+            anchor_debug["targetRawState"]             = _target_raw_state or None
+            anchor_debug["targetCanonicalCitySource"]  = _target_canonical_city_source
 
             logger.info(
-                f"[criteria] Best match: {best_match.url} "
+                f"[criteria] Anchor selected: {best_match.url} "
                 f"(score={best_score:.3f}, "
+                f"dist={anchor_debug.get('anchorDistanceKm')!r} km, "
                 f"bedrooms={best_match.bedrooms}, "
                 f"price=${best_match.nightly_price})"
             )
@@ -2175,6 +2978,10 @@ def run_criteria_search(
         max_radius_km=max_radius_km,
         progress_callback=progress_callback,
         nightly_plan=nightly_plan,
+        fallback_attributes=attributes,
+        fallback_address=address,
+        target_spec_override=user_spec,
+        query_criteria_override=query_criteria,
     )
 
     # Merge criteria-specific info into the transparent result
@@ -2183,6 +2990,10 @@ def run_criteria_search(
     scrape_transparent["debug"]["anchor_url"] = best_match.url
     scrape_transparent["debug"]["anchor_score"] = round(best_score, 3)
     scrape_transparent["debug"]["initial_candidates"] = len(candidates)
+    # Anchor geo-selection metadata (filled by _select_anchor_candidate)
+    scrape_transparent["debug"]["anchorCoordMapSize"] = len(coord_map)
+    scrape_transparent["debug"]["anchorCoordsAssigned"] = n_coords_assigned
+    scrape_transparent["debug"].update(anchor_debug)
 
     return daily_results, scrape_transparent
 

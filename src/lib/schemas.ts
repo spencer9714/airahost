@@ -117,21 +117,46 @@ export type PreferredComps = z.infer<typeof preferredCompsSchema>;
 
 // ── Full Report Request ─────────────────────────────────────────
 
-export const createReportRequestSchema = z.object({
-  inputMode: inputModeEnum.default("criteria"),
-  listing: listingInputSchema,
-  dates: dateInputSchema,
-  discountPolicy: discountPolicySchema,
-  lastMinuteStrategy: lastMinuteStrategyPreferenceSchema.optional(),
-  listingUrl: z.string().url().optional(),
-  preferredComps: preferredCompsSchema.optional(),
-  saveToListings: z
-    .object({
-      enabled: z.boolean().default(false),
-      name: z.string().min(1).max(100).optional(),
-    })
-    .optional(),
-});
+export const createReportRequestSchema = z
+  .object({
+    inputMode: inputModeEnum.default("criteria"),
+    listing: listingInputSchema,
+    dates: dateInputSchema,
+    discountPolicy: discountPolicySchema,
+    lastMinuteStrategy: lastMinuteStrategyPreferenceSchema.optional(),
+    listingUrl: z.string().url().optional(),
+    preferredComps: preferredCompsSchema.optional(),
+    saveToListings: z
+      .object({
+        enabled: z.boolean().default(false),
+        name: z.string().min(1).max(100).optional(),
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    // For criteria-based input modes, city and state are required.
+    // URL mode populates location from the scraped listing instead.
+    const isCriteria =
+      data.inputMode === "criteria" ||
+      data.inputMode === "criteria-by-city" ||
+      data.inputMode === "criteria-by-zip";
+    if (isCriteria) {
+      if (!data.listing.city?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["listing", "city"],
+          message: "City is required for criteria search",
+        });
+      }
+      if (!data.listing.state?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["listing", "state"],
+          message: "State is required for criteria search",
+        });
+      }
+    }
+  });
 
 export type CreateReportRequest = z.infer<typeof createReportRequestSchema>;
 export type InputMode = z.infer<typeof inputModeEnum>;

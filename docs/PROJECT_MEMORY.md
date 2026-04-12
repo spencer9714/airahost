@@ -3,6 +3,8 @@
 > This file is the source of truth for any future developer or AI session
 > continuing work on this project. Read it fully before making changes.
 
+Active bug triage and investigation queue lives in `docs/BUG_TASKS.md`.
+
 ---
 
 ## 1. North Star

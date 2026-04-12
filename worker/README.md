@@ -21,11 +21,31 @@ Vercel (frontend)                    Local Machine (worker)
 
 ### 1. Install dependencies
 
+We recommend using the provided Conda environment file to keep dependencies cleanly isolated:
+
 ```powershell
-cd worker
-pip install -r requirements.txt
+conda env create -f ../conda_environment_mac.yml
+conda activate airahost
 playwright install chromium
 ```
+
+On some macOS setups, Homebrew Python stays ahead of the Conda env in `PATH`
+even after activation. If that happens, verify:
+
+```powershell
+which python
+python -c "import sys; print(sys.executable)"
+```
+
+Expected output should point at:
+
+```powershell
+/opt/miniconda3/envs/airahost/bin/python
+```
+
+The `airahost` env now includes an activation hook that prepends
+`$CONDA_PREFIX/bin` so the env Python wins consistently after
+`conda activate airahost`.
 
 ### 2. Configure environment
 

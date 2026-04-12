@@ -105,6 +105,7 @@ export default function ToolPage() {
   // Step 1 — Listing
   const [street, setStreet] = useState("");
   const [city, setCity] = useState("");
+  const [state, setStateField] = useState("");
   const [zip, setZip] = useState("");
   const [propertyType, setPropertyType] = useState<PropertyType>("entire_home");
   const [bedrooms, setBedrooms] = useState(1);
@@ -203,6 +204,7 @@ export default function ToolPage() {
             sizeSqFt: sizeSqFt || undefined,
             amenities,
             city: city.trim() || undefined,
+            state: state.trim() || undefined,
             postalCode: zip.trim() || undefined,
           },
           dates: { startDate, endDate },
@@ -279,15 +281,16 @@ export default function ToolPage() {
       (1000 * 60 * 60 * 24)
   );
   const criteriaInvalid =
-    (!city.trim() && !zip.trim()) ||
+    !city.trim() ||
+    !state.trim() ||
     (street.trim().length > 0 && street.trim().length < 3);
 
   const resolvedListingAddress = useMemo(
     () =>
       inputMode === "url"
         ? buildListingAddressFromUrl(listingUrl, propertyType)
-        : [street.trim(), city.trim(), zip.trim()].filter(Boolean).join(", "),
-    [inputMode, listingUrl, propertyType, street, city, zip]
+        : [street.trim(), city.trim(), state.trim(), zip.trim()].filter(Boolean).join(", "),
+    [inputMode, listingUrl, propertyType, street, city, state, zip]
   );
 
   return (
@@ -358,7 +361,7 @@ export default function ToolPage() {
                 ) : (
                   /* Mode B: Criteria input */
                   <>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                       <Field label="City *">
                         <input
                           type="text"
@@ -368,7 +371,17 @@ export default function ToolPage() {
                           className="input"
                         />
                       </Field>
-                      <Field label="ZIP / Postal code *">
+                      <Field label="State *">
+                        <input
+                          type="text"
+                          placeholder="e.g. CA"
+                          value={state}
+                          onChange={(e) => setStateField(e.target.value)}
+                          className="input"
+                          maxLength={50}
+                        />
+                      </Field>
+                      <Field label="ZIP / Postal code">
                         <input
                           type="text"
                           placeholder="e.g. 10001, 100"
@@ -378,10 +391,18 @@ export default function ToolPage() {
                         />
                       </Field>
                     </div>
-                    {!city.trim() && !zip.trim() && (
-                      <p className="text-xs text-warning">
-                        Please enter at least a city or ZIP code.
-                      </p>
+                    {/* Show per-field hints only after the user has touched any location field */}
+                    {(city.trim() || state.trim() || zip.trim()) && (!city.trim() || !state.trim()) && (
+                      <div className="space-y-1">
+                        {!city.trim() && (
+                          <p className="text-xs text-warning">City is required.</p>
+                        )}
+                        {!state.trim() && (
+                          <p className="text-xs text-warning">
+                            State / region is required (e.g. CA, New York, 台北市).
+                          </p>
+                        )}
+                      </div>
                     )}
                     <Field label="Street address (optional)">
                       <input
@@ -784,6 +805,12 @@ export default function ToolPage() {
                       label="City"
                       value={city || "—"}
                     />
+                    {state && (
+                      <SummaryRow
+                        label="State"
+                        value={state}
+                      />
+                    )}
                     <SummaryRow
                       label="ZIP"
                       value={zip || "—"}
