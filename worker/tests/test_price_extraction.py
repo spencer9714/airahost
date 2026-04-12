@@ -353,3 +353,26 @@ def test_text_aud_suffix_nightly():
 def test_text_aud_suffix_total_excluded():
     """'$360 AUD total' must NOT be treated as nightly."""
     assert 360.0 not in _price_set("$360 AUD total")
+
+
+def test_text_cad_trip_total_divided():
+    """'$267 CAD for 2 nights' → 133.50 per night (trip total divided)."""
+    matches = _extract_text_price_matches("$267 CAD for 2 nights")
+    prices = [p for _, p in matches]
+    assert 133.50 in prices
+    assert 267.0 not in prices  # raw total must NOT appear as nightly
+
+
+def test_text_cad_trip_total_3_nights():
+    """'$450 CAD for 3 nights' → 150.0 per night."""
+    matches = _extract_text_price_matches("$450 CAD for 3 nights")
+    prices = [p for _, p in matches]
+    assert 150.0 in prices
+    assert 450.0 not in prices
+
+
+def test_text_plain_trip_total_still_works():
+    """'$300 for 2 nights' (no currency suffix) still divides correctly."""
+    matches = _extract_text_price_matches("$300 for 2 nights")
+    prices = [p for _, p in matches]
+    assert 150.0 in prices

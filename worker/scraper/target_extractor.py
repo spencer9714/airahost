@@ -691,15 +691,19 @@ _NIGHTLY_PRICE_RES = [
     re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s*for\s+1\s+nights?", re.I),
     # CAD/AUD/NZD/GBP/EUR suffix format used on non-USD Airbnb domains (e.g. .ca, .com.au).
     # Airbnb displays "$267 CAD" as the nightly price without a "/night" label.
-    # Negative lookahead excludes "$195 CAD total" (trip-total amounts).
-    re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s+(?:CAD|AUD|NZD|GBP|EUR)(?!\s+total\b)", re.I),
+    # Negative lookahead excludes:
+    #   "$195 CAD total"       — explicit trip-total label
+    #   "$267 CAD for 2 nights" — multi-night trip total (handled by _TRIP_TOTAL_RE instead)
+    re.compile(r"\$\s*(\d{1,4}(?:,\d{3})?)\s+(?:CAD|AUD|NZD|GBP|EUR)(?!\s+(?:total\b|for\s+\d))", re.I),
 ]
 
 # Matches trip-total format: "$300 for 2 nights" — requires division by N.
 # Group 1 = price digits, Group 2 = night count (N ≥ 2).
 # \s* (not \s+) before "for" — same inline-span concatenation reason as above.
+# Optional non-capturing group allows currency suffix between amount and "for":
+#   "$267 CAD for 2 nights" (Airbnb .ca trip-total widget format).
 _TRIP_TOTAL_RE = re.compile(
-    r"\$\s*(\d{1,4}(?:,\d{3})?)\s*for\s+([2-9]|\d{2,})\s+nights?",
+    r"\$\s*(\d{1,4}(?:,\d{3})?)(?:\s+(?:CAD|AUD|NZD|GBP|EUR))?\s*for\s+([2-9]|\d{2,})\s+nights?",
     re.I,
 )
 
