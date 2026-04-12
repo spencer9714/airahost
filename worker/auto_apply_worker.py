@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import threading
 import time
@@ -59,18 +60,56 @@ def _normalize_calendar(raw_calendar: Any) -> Dict[str, int]:
     return normalized
 
 
+def _extract_airbnb_listing_id_from_url(listing_url: str | None) -> str | None:
+    if not listing_url:
+        return None
+    m = re.search(r"/rooms/(\d+)", str(listing_url))
+    return m.group(1) if m else None
+
+
+def _resolve_airbnb_listing_id(client, saved_listing_id: str) -> str | None:
+    try:
+        row = (
+            client.table("saved_listings")
+            .select("input_attributes")
+            .eq("id", saved_listing_id)
+            .single()
+            .execute()
+        )
+        data = row.data or {}
+        attrs = data.get("input_attributes") or {}
+        listing_url = attrs.get("listingUrl") or attrs.get("listing_url")
+        return _extract_airbnb_listing_id_from_url(listing_url)
+    except Exception:
+        return None
+
+
 def process_job(job: Dict[str, Any], worker_token: uuid.UUID, client) -> None:
     job_id = str(job["id"])
-    listing_id = str(job.get("listing_id") or "")
+    saved_listing_id = str(job.get("listing_id") or "")
     attempts = int(job.get("worker_attempts") or 0)
 
-    if not listing_id:
+    if not saved_listing_id:
         db_helpers.fail_price_update_job(
             client,
             job_id,
             worker_token,
             error_message="Missing listing_id on queued job.",
             result_payload={"ok": False, "error": "missing listing_id"},
+        )
+        return
+
+    listing_id = _resolve_airbnb_listing_id(client, saved_listing_id)
+    if not listing_id:
+        db_helpers.fail_price_update_job(
+            client,
+            job_id,
+            worker_token,
+            error_message=(
+                "Unable to resolve Airbnb listing id from saved listing URL. "
+                "Ensure input_attributes.listingUrl is a valid airbnb.com/rooms/{id} URL."
+            ),
+            result_payload={"ok": False, "error": "missing_airbnb_listing_id"},
         )
         return
 
@@ -96,7 +135,13 @@ def process_job(job: Dict[str, Any], worker_token: uuid.UUID, client) -> None:
             )
             return
 
-        logger.info("[%s] Applying %s prices for listing %s", job_id, len(calendar), listing_id)
+        logger.info(
+            "[%s] Applying %s prices for saved_listing=%s (airbnb_listing_id=%s)",
+            job_id,
+            len(calendar),
+            saved_listing_id,
+            listing_id,
+        )
         result = assign_prices_calendar(
             listing_id=listing_id,
             calendar=calendar,

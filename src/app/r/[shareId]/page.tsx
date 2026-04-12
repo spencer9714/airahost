@@ -379,6 +379,10 @@ export default function ResultsPage({
 
   // Auto-Apply status for this listing (null = loading, false = not configured)
   const [autoApplyConfigured, setAutoApplyConfigured] = useState<boolean | null>(null);
+  const [cohostVerified, setCohostVerified] = useState<boolean>(false);
+  const [autoApplySubmitting, setAutoApplySubmitting] = useState(false);
+  const [autoApplyError, setAutoApplyError] = useState("");
+  const [autoApplySuccess, setAutoApplySuccess] = useState("");
   const reportListingId = (report as (typeof report & { listingId?: string | null }))?.listingId ?? null;
 
   // Date the user clicked on the heatmap (null = no selection).
@@ -534,20 +538,88 @@ export default function ResultsPage({
     async function checkAutoApply() {
       if (!reportListingId || isSignedIn !== true) {
         setAutoApplyConfigured(false);
+        setCohostVerified(false);
         return;
       }
       try {
         const res = await fetch(`/api/listings/${reportListingId}`, { cache: "no-store" });
-        if (!res.ok) { if (!cancelled) setAutoApplyConfigured(false); return; }
+        if (!res.ok) {
+          if (!cancelled) {
+            setAutoApplyConfigured(false);
+            setCohostVerified(false);
+          }
+          return;
+        }
         const data = await res.json();
-        if (!cancelled) setAutoApplyConfigured(!!data?.auto_apply_last_updated_at);
+        const listing = (data?.listing ?? data) as
+          | {
+              auto_apply_last_updated_at?: string | null;
+              auto_apply_cohost_status?: string | null;
+            }
+          | null;
+        if (!cancelled) {
+          setAutoApplyConfigured(!!listing?.auto_apply_last_updated_at);
+          setCohostVerified((listing?.auto_apply_cohost_status ?? null) === "verified");
+        }
       } catch {
-        if (!cancelled) setAutoApplyConfigured(false);
+        if (!cancelled) {
+          setAutoApplyConfigured(false);
+          setCohostVerified(false);
+        }
       }
     }
     checkAutoApply();
     return () => { cancelled = true; };
   }, [reportListingId, isSignedIn]);
+
+  async function queueManualApply(selectedDates: string[]) {
+    if (!reportListingId) {
+      window.location.href = "/dashboard";
+      return;
+    }
+    setAutoApplySubmitting(true);
+    setAutoApplyError("");
+    setAutoApplySuccess("");
+    try {
+      const res = await fetch(`/api/listings/${reportListingId}/manual-apply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          selectedDates,
+          sourceReportId: report?.id ?? null,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to queue Auto-Apply.");
+      }
+      const nightsQueued = Number(data?.nightsQueued ?? 0);
+      setAutoApplySuccess(
+        nightsQueued > 0
+          ? `Auto-Apply queued for ${nightsQueued} night${nightsQueued === 1 ? "" : "s"}.`
+          : "Auto-Apply queued successfully."
+      );
+    } catch (err) {
+      setAutoApplyError((err as Error).message);
+    } finally {
+      setAutoApplySubmitting(false);
+    }
+  }
+
+  async function handleAutoApplyNow() {
+    const selectedDates = (report?.resultCalendar ?? []).map((d) => d.date);
+    await queueManualApply(selectedDates);
+  }
+
+  async function handleHeatmapApply(selectedDates: string[]) {
+    // If user reaches this path from report heatmap, attempt to queue directly.
+    // Fallback to dashboard when context is incomplete.
+    if (isSignedIn !== true || !reportListingId) {
+      window.location.href = "/dashboard";
+      return;
+    }
+    await queueManualApply(selectedDates);
+  }
 
 
   // Queued / Running state
@@ -793,12 +865,22 @@ export default function ResultsPage({
           <PricingHeatmap
             calendar={report.resultCalendar ?? []}
             selectable={isSignedIn === true && autoApplyConfigured === true}
-            onApplyDates={() => {
-              window.location.href = "/dashboard";
+            onApplyDates={(selectedDates) => {
+              void handleHeatmapApply(selectedDates);
             }}
             onFocusDate={(date) => setClickedDate(date)}
             focusedDate={clickedDate}
           />
+          {(autoApplyError || autoApplySuccess) && (
+            <div className="rounded-xl border border-gray-200 bg-white px-4 py-3">
+              {autoApplyError && (
+                <p className="text-xs text-rose-600">{autoApplyError}</p>
+              )}
+              {autoApplySuccess && (
+                <p className="text-xs text-emerald-700">{autoApplySuccess}</p>
+              )}
+            </div>
+          )}
 
           {/* Contextual Comparable Listings panel — appears immediately below the
               heatmap when a date is focused. This is the primary comps experience
@@ -864,15 +946,29 @@ export default function ResultsPage({
                   <p className="mt-0.5 text-xs leading-snug text-foreground/45">
                     Configure Auto-Apply in your dashboard to select nights and apply pricing recommendations directly to Airbnb.
                   </p>
-                  <a
-                    href="/dashboard"
-                    className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80"
-                  >
-                    Go to dashboard
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                      <path d="M5 12h14M12 5l7 7-7 7" />
-                    </svg>
-                  </a>
+                  {cohostVerified ? (
+                    <button
+                      type="button"
+                      onClick={handleAutoApplyNow}
+                      disabled={autoApplySubmitting}
+                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {autoApplySubmitting ? "Queueing Auto-Apply..." : "Auto-Apply now"}
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M5 12h14M12 5l7 7-7 7" />
+                      </svg>
+                    </button>
+                  ) : (
+                    <a
+                      href="/dashboard"
+                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80"
+                    >
+                      Go to dashboard
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M5 12h14M12 5l7 7-7 7" />
+                      </svg>
+                    </a>
+                  )}
                 </div>
               </div>
             </div>

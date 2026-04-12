@@ -15,18 +15,21 @@ interface NightApplyResult {
 
 interface ManualApplyResponse {
   runId: string;
-  executionMode: "stub" | "live";
-  executionModeNote: string;
-  nightsTotal: number;
-  nightsSimulatedSuccess: number;
-  nightsSimulatedFailed: number;
-  nightsSkipped: number;
+  executionMode?: "stub" | "live";
+  executionModeNote?: string;
+  nightsTotal?: number;
+  nightsSimulatedSuccess?: number;
+  nightsSimulatedFailed?: number;
+  nightsSkipped?: number;
+  nightsQueued?: number;
   nightsFloored: number;
   nightsCapped: number;
   rangeStart: string;
   rangeEnd: string;
-  completedAt: string;
-  nights: NightApplyResult[];
+  completedAt?: string;
+  queuedAt?: string;
+  status?: string;
+  nights?: NightApplyResult[];
 }
 
 type Phase = "confirm" | "applying" | "result";
@@ -34,6 +37,7 @@ type Phase = "confirm" | "applying" | "result";
 interface ManualApplyPanelProps {
   listingId: string;
   listingName: string;
+  sourceReportId?: string | null;
   /** Preview that was shown to the user before they clicked Apply. */
   preview: AutoApplyPreviewResult;
   /** Subset of night dates the user selected in the preview panel. */
@@ -248,9 +252,15 @@ function ResultPhase({
   result: ManualApplyResponse;
   onClose: () => void;
 }) {
-  const successNights = result.nights.filter(
+  const nights = result.nights ?? [];
+  const successNights = nights.filter(
     (n) => n.applyStatus === "simulated_success"
   );
+  const preparedCount = result.nightsSimulatedSuccess ?? result.nightsQueued ?? successNights.length;
+  const skippedCount = result.nightsSkipped ?? 0;
+  const executionModeNote =
+    result.executionModeNote ??
+    "Run queued. The worker will apply prices asynchronously.";
 
   return (
     <>
@@ -261,7 +271,7 @@ function ResultPhase({
             Nights prepared
           </p>
           <p className="mt-0.5 text-sm font-semibold text-foreground/70">
-            {result.nightsSimulatedSuccess}
+            {preparedCount}
           </p>
           <p className="mt-0.5 text-xs text-foreground/40">would be applied</p>
         </div>
@@ -271,7 +281,7 @@ function ResultPhase({
             Skipped
           </p>
           <p className="mt-0.5 text-sm font-semibold text-foreground/70">
-            {result.nightsSkipped}
+            {skippedCount}
           </p>
           <p className="mt-0.5 text-xs text-foreground/40">
             {result.nightsFloored > 0
@@ -306,17 +316,22 @@ function ResultPhase({
       </div>
 
       {/* ── Stub mode banner ── */}
-      <StubBanner note={result.executionModeNote} />
+      <StubBanner note={executionModeNote} />
 
       {/* ── Execution mode badge ── */}
       <div className="flex items-center gap-2 rounded-xl border border-gray-100 bg-gray-50/60 px-4 py-2.5">
-        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
-        <p className="text-xs text-foreground/50">
-          <span className="font-semibold">Execution mode:</span> preview-only stub
-          {" · "}
-          <span className="font-mono text-[10px] text-foreground/35">{result.runId.slice(0, 8)}</span>
-        </p>
-      </div>
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
+          <p className="text-xs text-foreground/50">
+            <span className="font-semibold">Execution mode:</span>{" "}
+            {result.executionMode === "live"
+              ? "live"
+              : result.executionMode === "stub"
+              ? "preview-only stub"
+              : "queued job"}
+            {" · "}
+            <span className="font-mono text-[10px] text-foreground/35">{result.runId.slice(0, 8)}</span>
+          </p>
+        </div>
 
       {/* ── Per-night results ── */}
       {successNights.length > 0 && (
@@ -380,6 +395,7 @@ function ResultPhase({
 export function ManualApplyPanel({
   listingId,
   listingName,
+  sourceReportId = null,
   preview,
   selectedDates,
   onClose,
@@ -407,7 +423,10 @@ export function ManualApplyPanel({
       const res = await fetch(`/api/listings/${listingId}/manual-apply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selectedDates: selectedDates ?? null }),
+        body: JSON.stringify({
+          selectedDates: selectedDates ?? null,
+          sourceReportId,
+        }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));

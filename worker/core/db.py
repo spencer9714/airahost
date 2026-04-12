@@ -19,12 +19,13 @@ logger = logging.getLogger("worker.core.db")
 
 def get_client() -> Client:
     """Create a Supabase client using the service role key."""
-    try:
-        url = os.environ["SUPABASE_URL"]
-        key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-    except:
-        url = "https://mtwummnephmqxyuxjkgu.supabase.co"
-        key = "sb_publishable_2zuVxrcxIbJCIA5LZFRy2g_GwVH5dw9"
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not url or not key:
+        raise RuntimeError(
+            "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY for worker. "
+            "Refusing to start without service-role credentials."
+        )
     return create_client(url, key)
 
 

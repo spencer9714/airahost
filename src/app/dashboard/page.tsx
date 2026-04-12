@@ -893,6 +893,7 @@ export default function DashboardPage() {
                   <ManualApplyPanel
                     listingId={activeListing.id}
                     listingName={activeListing.name}
+                    sourceReportId={activeReport?.id ?? null}
                     preview={computeAutoApplyPreview(activeCalendar, activeAutoApplySettings)}
                     selectedDates={applyDates}
                     onClose={() => setApplyOpen(false)}

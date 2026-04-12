@@ -16,12 +16,17 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const todayStr = new Date().toISOString().split("T")[0];
 
   let selectedDates: string[] | null = null;
+  let sourceReportId: string | null = null;
   try {
     const body = await request.json().catch(() => ({}));
     if (Array.isArray((body as { selectedDates?: unknown }).selectedDates)) {
       selectedDates = (body as { selectedDates: string[] }).selectedDates;
+    }
+    if (typeof (body as { sourceReportId?: unknown }).sourceReportId === "string") {
+      sourceReportId = (body as { sourceReportId: string }).sourceReportId;
     }
   } catch {
     // Keep selectedDates as null when the request body is empty/invalid.
@@ -90,6 +95,31 @@ export async function POST(
     );
   }
 
+  const adminClient = getSupabaseAdmin();
+  let explicitSourceReport: ReportRow = null;
+  if (sourceReportId) {
+    const { data: requestedReport } = await adminClient
+      .from("pricing_reports")
+      .select("id, status, result_calendar")
+      .eq("id", sourceReportId)
+      .eq("listing_id", id)
+      .maybeSingle();
+
+    if (!requestedReport) {
+      return NextResponse.json(
+        { error: "Selected report was not found for this listing." },
+        { status: 400 }
+      );
+    }
+    if ((requestedReport as { status?: string }).status !== "ready") {
+      return NextResponse.json(
+        { error: "Selected report is not ready yet. Please wait and try again." },
+        { status: 400 }
+      );
+    }
+    explicitSourceReport = requestedReport as ReportRow;
+  }
+
   const { data: latestLink } = await supabase
     .from("listing_reports")
     .select("pricing_report_id, pricing_reports:pricing_report_id(id, status, result_calendar)")
@@ -110,23 +140,64 @@ export async function POST(
       ? (readyLink.pricing_reports[0] as ReportRow)
       : (readyLink.pricing_reports as ReportRow)
     : null;
+  let fallbackReport: ReportRow = null;
+  if (!explicitSourceReport && !linkedReport) {
+    const { data: latestReady } = await adminClient
+      .from("pricing_reports")
+      .select("id, status, result_calendar")
+      .eq("listing_id", id)
+      .eq("status", "ready")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    fallbackReport = (latestReady as ReportRow) ?? null;
+  }
 
-  const reportCalendar: CalendarDay[] = (linkedReport?.result_calendar as CalendarDay[]) ?? [];
+  const sourceReport = explicitSourceReport ?? linkedReport ?? fallbackReport;
+  const reportCalendar: CalendarDay[] = (sourceReport?.result_calendar as CalendarDay[]) ?? [];
+
+  const normalizedWindowEndDays = Math.max(
+    1,
+    Math.min(30, listing.auto_apply_window_end_days ?? 30)
+  );
+  const normalizedMinNoticeDays = Math.max(0, listing.auto_apply_min_notice_days ?? 1);
 
   const settings: AutoApplySettings = {
     enabled: listing.auto_apply_enabled ?? false,
-    windowEndDays: listing.auto_apply_window_end_days ?? 30,
+    windowEndDays: normalizedWindowEndDays,
     applyScope: listing.auto_apply_scope ?? "actionable",
     minPriceFloor: listing.auto_apply_min_price_floor ?? null,
-    minNoticeDays: listing.auto_apply_min_notice_days ?? 1,
+    minNoticeDays: normalizedMinNoticeDays,
     maxIncreasePct: listing.auto_apply_max_increase_pct ?? null,
     maxDecreasePct: listing.auto_apply_max_decrease_pct ?? null,
     skipUnavailableNights: listing.auto_apply_skip_unavailable ?? true,
     lastUpdatedAt: listing.auto_apply_last_updated_at ?? null,
   };
 
-  const preview = computeAutoApplyPreview(reportCalendar, settings);
-  const plan = buildManualApplyPlan(preview, id, linkedReport?.id ?? null);
+  // Ensure selected dates from UI are representable in the preview window.
+  // Without this, a tiny persisted window (e.g. 0/1 days) can exclude every selected date.
+  let effectiveWindowEndDays = settings.windowEndDays;
+  if (selectedDates && selectedDates.length > 0) {
+    let maxOffset = -1;
+    const startMs = new Date(todayStr + "T00:00:00Z").getTime();
+    for (const d of selectedDates) {
+      const ms = new Date(d + "T00:00:00Z").getTime();
+      if (Number.isNaN(ms)) continue;
+      const offset = Math.floor((ms - startMs) / 86_400_000);
+      if (offset > maxOffset) maxOffset = offset;
+    }
+    if (maxOffset >= 0) {
+      effectiveWindowEndDays = Math.min(30, Math.max(effectiveWindowEndDays, maxOffset + 1));
+    }
+  }
+
+  const settingsForPreview: AutoApplySettings = {
+    ...settings,
+    windowEndDays: effectiveWindowEndDays,
+  };
+
+  const preview = computeAutoApplyPreview(reportCalendar, settingsForPreview);
+  const plan = buildManualApplyPlan(preview, id, sourceReport?.id ?? null);
 
   if (selectedDates && selectedDates.length > 0) {
     const selectedSet = new Set(selectedDates);
@@ -163,13 +234,46 @@ export async function POST(
   }
 
   if (Object.keys(calendarPayload).length === 0) {
+    const selectedSet = new Set(selectedDates ?? []);
+    const consideredNights =
+      selectedSet.size > 0
+        ? plan.nights.filter((n) => selectedSet.has(n.date))
+        : plan.nights;
+    const skippedByNoticeWindow = consideredNights.filter(
+      (n) => !n.included && n.skipReason === "notice_window"
+    ).length;
+    const skippedByNoData = consideredNights.filter(
+      (n) => !n.included && n.skipReason === "no_data"
+    ).length;
+
+    let reason =
+      "No eligible nights to apply for the selected range.";
+    if (consideredNights.length === 0) {
+      reason = "Selected nights are outside the Auto-Apply window.";
+    } else if (skippedByNoticeWindow === consideredNights.length) {
+      reason = `All selected nights were skipped by minimum notice days (${settings.minNoticeDays}).`;
+    } else if (skippedByNoData === consideredNights.length) {
+      reason = "No recommendation data was available for the selected nights.";
+    }
+
     return NextResponse.json(
-      { error: "No eligible nights to apply for the selected range." },
+      {
+        error: reason,
+        debug: {
+          reportId: sourceReport?.id ?? null,
+          calendarDays: reportCalendar.length,
+          nightsIncluded: plan.nightsIncluded,
+          selectedDatesCount: selectedDates?.length ?? 0,
+          minNoticeDays: settings.minNoticeDays,
+          windowEndDays: settings.windowEndDays,
+          effectiveWindowEndDays,
+          skippedByNoticeWindow,
+          skippedByNoData,
+        },
+      },
       { status: 400 }
     );
   }
-
-  const adminClient = getSupabaseAdmin();
   const { data: jobRow, error: jobError } = await adminClient
     .from("price_update_jobs")
     .insert({

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import re
 import signal
 import socket
 import sys
@@ -43,6 +44,7 @@ from worker.core.report_policy import (
     resolve_execution_policy,
     NIGHTLY_POLICIES,
 )
+from worker.core.auto_price_assignment import assign_prices_calendar
 # mock_core removed — scrape failures now mark jobs as error
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,11 @@ WORKER_LANE = os.getenv("WORKER_LANE", "interactive")
 MAX_SCROLL_ROUNDS = int(os.getenv("MAX_SCROLL_ROUNDS", "12"))
 MAX_CARDS = int(os.getenv("MAX_CARDS", "80"))
 RATE_LIMIT_SECONDS = float(os.getenv("SCRAPE_RATE_LIMIT_SECONDS", "1.0"))
+
+# Auto-apply queue settings (single-process mode via worker.main)
+AUTO_APPLY_STALE_MINUTES = int(os.getenv("AUTO_APPLY_STALE_MINUTES", "15"))
+AUTO_APPLY_MAX_ATTEMPTS = int(os.getenv("AUTO_APPLY_MAX_ATTEMPTS", "3"))
+AUTO_APPLY_CDP_URL = os.getenv("AUTO_APPLY_CDP_URL", CDP_URL)
 
 # ---------------------------------------------------------------------------
 # Logging — console + rotating file (logs/worker.log)
@@ -537,6 +544,144 @@ def run_interactive_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     from saved_listings at execution time.
     """
     _execute_analysis(job, worker_token, is_nightly=False)
+
+
+def _normalize_auto_apply_calendar(raw_calendar: Any) -> Dict[str, int]:
+    if not isinstance(raw_calendar, dict):
+        raise ValueError("calendar payload is not an object")
+
+    normalized: Dict[str, int] = {}
+    for date, price in raw_calendar.items():
+        if not isinstance(date, str):
+            raise ValueError("calendar date keys must be strings")
+        if price is None:
+            continue
+        normalized[date] = int(round(float(price)))
+    return normalized
+
+
+def _extract_airbnb_listing_id_from_url(listing_url: Optional[str]) -> Optional[str]:
+    if not listing_url:
+        return None
+    m = re.search(r"/rooms/(\d+)", str(listing_url))
+    return m.group(1) if m else None
+
+
+def _resolve_airbnb_listing_id_for_price_update(client, saved_listing_id: str) -> Optional[str]:
+    """
+    price_update_jobs.listing_id stores saved_listings.id (UUID), but Airbnb mutation
+    requires numeric Airbnb room/listing id. Resolve via saved_listings.input_attributes.
+    """
+    try:
+        row = (
+            client.table("saved_listings")
+            .select("input_attributes")
+            .eq("id", saved_listing_id)
+            .single()
+            .execute()
+        )
+        data = row.data or {}
+        attrs = data.get("input_attributes") or {}
+        listing_url = attrs.get("listingUrl") or attrs.get("listing_url")
+        return _extract_airbnb_listing_id_from_url(listing_url)
+    except Exception:
+        return None
+
+
+def process_price_update_job(
+    job: Dict[str, Any],
+    worker_token: uuid.UUID,
+    client,
+) -> None:
+    """Process one queued price_update_jobs record (auto-apply writeback)."""
+    job_id = str(job["id"])
+    saved_listing_id = str(job.get("listing_id") or "")
+    attempts = int(job.get("worker_attempts") or 0)
+
+    if not saved_listing_id:
+        db_helpers.fail_price_update_job(
+            client,
+            job_id,
+            worker_token,
+            error_message="Missing listing_id on queued job.",
+            result_payload={"ok": False, "error": "missing listing_id"},
+        )
+        return
+
+    airbnb_listing_id = _resolve_airbnb_listing_id_for_price_update(client, saved_listing_id)
+    if not airbnb_listing_id:
+        db_helpers.fail_price_update_job(
+            client,
+            job_id,
+            worker_token,
+            error_message=(
+                "Unable to resolve Airbnb listing id from saved listing URL. "
+                "Ensure input_attributes.listingUrl is a valid airbnb.com/rooms/{id} URL."
+            ),
+            result_payload={"ok": False, "error": "missing_airbnb_listing_id"},
+        )
+        return
+
+    if attempts > AUTO_APPLY_MAX_ATTEMPTS:
+        db_helpers.fail_price_update_job(
+            client,
+            job_id,
+            worker_token,
+            error_message=f"Job exceeded max attempts ({attempts}).",
+            result_payload={"ok": False, "error": "max attempts exceeded"},
+        )
+        return
+
+    try:
+        calendar = _normalize_auto_apply_calendar(job.get("calendar"))
+        if not calendar:
+            db_helpers.fail_price_update_job(
+                client,
+                job_id,
+                worker_token,
+                error_message="No calendar prices found in queued job.",
+                result_payload={"ok": False, "error": "empty calendar"},
+            )
+            return
+
+        logger.info(
+            f"[{job_id}] Applying {len(calendar)} prices for saved_listing={saved_listing_id} "
+            f"(airbnb_listing_id={airbnb_listing_id})"
+        )
+        result = assign_prices_calendar(
+            listing_id=airbnb_listing_id,
+            calendar=calendar,
+            cdp_url=AUTO_APPLY_CDP_URL,
+        )
+
+        if result.get("ok"):
+            db_helpers.complete_price_update_job(
+                client,
+                job_id,
+                worker_token,
+                result_payload=result,
+            )
+            logger.info(f"[{job_id}] Auto-apply completed successfully")
+            return
+
+        error_message = str(result.get("error") or "Price assignment failed.")
+        db_helpers.fail_price_update_job(
+            client,
+            job_id,
+            worker_token,
+            error_message=error_message[:500],
+            result_payload=result,
+        )
+        logger.error(f"[{job_id}] Auto-apply failed: {error_message}")
+    except Exception as exc:
+        db_helpers.fail_price_update_job(
+            client,
+            job_id,
+            worker_token,
+            error_message=f"Worker exception: {str(exc)[:400]}",
+            result_payload={"ok": False, "error": str(exc)},
+        )
+        logger.exception(f"[{job_id}] Auto-apply unexpected worker error")
 
 
 def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightly: bool) -> None:
@@ -1612,6 +1757,10 @@ def main():
     logger.info(f"  env={WORKER_ENV}, lane={WORKER_LANE}, poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
     logger.info(f"  heartbeat={HEARTBEAT_SECONDS}s, max_runtime={MAX_RUNTIME_SECONDS}s")
     logger.info(f"  CDP={CDP_URL}, connect_timeout={CDP_CONNECT_TIMEOUT_MS}ms")
+    logger.info(
+        f"  auto_apply: stale={AUTO_APPLY_STALE_MINUTES}min, "
+        f"max_attempts={AUTO_APPLY_MAX_ATTEMPTS}, cdp={AUTO_APPLY_CDP_URL}"
+    )
 
     client = db_helpers.get_client()
     backoff = POLL_SECONDS
@@ -1623,10 +1772,23 @@ def main():
             job = db_helpers.claim_job(client, worker_token, STALE_MINUTES, WORKER_ENV, WORKER_LANE)
 
             if job is None:
-                # No work — wait with current backoff
-                logger.debug(f"[poll] idle (env={WORKER_ENV}, lane={WORKER_LANE}, backoff={backoff:.0f}s)")
-                _shutdown_event.wait(backoff)
-                backoff = min(backoff * 1.5, max_backoff)
+                # No pricing_reports work for this lane/env. Try auto-apply queue.
+                auto_job = db_helpers.claim_price_update_job(
+                    client, worker_token, AUTO_APPLY_STALE_MINUTES
+                )
+                if auto_job is None:
+                    # No work — wait with current backoff
+                    logger.debug(
+                        f"[poll] idle (env={WORKER_ENV}, lane={WORKER_LANE}, backoff={backoff:.0f}s)"
+                    )
+                    _shutdown_event.wait(backoff)
+                    backoff = min(backoff * 1.5, max_backoff)
+                    continue
+
+                # Got auto-apply work — reset backoff and process.
+                backoff = POLL_SECONDS
+                logger.info(f"[{auto_job['id']}] Claimed auto-apply price update job")
+                process_price_update_job(auto_job, worker_token, client)
                 continue
 
             # Got work — reset backoff
