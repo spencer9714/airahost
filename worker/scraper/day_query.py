@@ -192,19 +192,6 @@ def estimate_base_price_for_date(
                 logger.warning(f"[day_query] Geo filter failed (non-fatal): {_geo_exc}")
 
         comps_collected = len(comps)
-        logger.warning(
-            "[PRICE_TRACE][day_query] %s collected_prices=%s",
-            checkin_str,
-            [
-                {
-                    "url": c.url,
-                    "nightly": c.nightly_price,
-                    "kind": c.price_kind,
-                    "nights": c.scrape_nights,
-                }
-                for c in comps
-            ],
-        )
 
         # Build full comp_prices map (all priced comps, not just top_k).
         # This populates priceByDate for every comp in comparable listings.

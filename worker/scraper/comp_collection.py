@@ -3,34 +3,12 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote, urlencode
 
 from worker.core.similarity import comp_urls_match
 from worker.scraper.parsers import parse_search_listing_context, parse_search_response
 from worker.scraper.target_extractor import ListingSpec
 
 logger = logging.getLogger("worker.scraper.comp_collection")
-
-
-def _build_debug_search_url(
-    *,
-    base_origin: str,
-    query: str,
-    checkin: str,
-    checkout: str,
-    adults: int,
-) -> str:
-    # Mirrors the human-readable Airbnb URL for quick inspection in logs.
-    query_path = quote((query or "").strip(), safe="").replace("%2C", "--")
-    params = urlencode(
-        {
-            "checkin": checkin,
-            "checkout": checkout,
-            "adults": adults,
-            "search_type": "AUTOSUGGEST",
-        }
-    )
-    return f"{base_origin.rstrip('/')}/s/{query_path}/homes?{params}"
 
 
 def _map_search_row_to_spec(
@@ -102,29 +80,6 @@ def collect_search_comps(
     # (commonly because of minimum-stay constraints).
     for query_nights in (1, 2):
         checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
-        debug_search_url = _build_debug_search_url(
-            base_origin=base_origin,
-            query=search_location,
-            checkin=checkin_str,
-            checkout=checkout_str,
-            adults=adults,
-        )
-        logger.warning(
-            "[SEARCH_URL][%s] %s: %s",
-            log_prefix,
-            checkin_str,
-            debug_search_url,
-        )
-        logger.warning(
-            "[SEARCH_PARAMS][%s] %s: query=%r checkin=%s checkout=%s adults=%s itemsPerGrid=%s",
-            log_prefix,
-            checkin_str,
-            search_location,
-            checkin_str,
-            checkout_str,
-            adults,
-            max_cards,
-        )
         status, search_data = client.search_listings_with_overrides(
             {
                 "checkin": checkin_str,
@@ -144,18 +99,6 @@ def collect_search_comps(
         for listing_id in listing_ids:
             row = context.get(str(listing_id), {})
             spec = _map_search_row_to_spec(str(listing_id), row, base_origin, query_nights)
-            logger.warning(
-                "[PRICE_TRACE][%s] %s listing=%s nightly_raw=%s total_raw=%s price_nights=%s nightly_effective=%s kind=%s nights=%s",
-                log_prefix,
-                checkin_str,
-                listing_id,
-                row.get("nightly_price"),
-                row.get("total_price"),
-                row.get("price_nights"),
-                spec.nightly_price,
-                spec.price_kind,
-                spec.scrape_nights,
-            )
             parsed_comps.append(spec)
 
         comps = parsed_comps
@@ -180,17 +123,6 @@ def collect_search_comps(
             if c.url and c.nightly_price and c.nightly_price > 0 and is_available:
                 priced.append(c)
 
-        logger.warning(
-            "[PRICE_TRACE][%s] %s: query_nights=%d parsed=%d%s priced=%d unavailable=%d min_stay_blocked=%d",
-            log_prefix,
-            checkin_str,
-            query_nights,
-            len(parsed_comps),
-            f" self_excluded={self_excluded}" if self_excluded else "",
-            len(priced),
-            unavailable_count,
-            min_stay_blocked_count,
-        )
         if priced:
             return priced, query_nights
         if query_nights == 1:
@@ -199,8 +131,8 @@ def collect_search_comps(
                 reason = "minimum_night_requirement_likely"
             elif unavailable_count > 0:
                 reason = "sold_out_or_unavailable_likely"
-            logger.warning(
-                "[PRICE_TRACE][%s] %s: no priced comps from 1-night query; retrying 2-night fallback (reason=%s)",
+            logger.info(
+                "[%s] %s: no priced comps from 1-night query; retrying 2-night fallback (reason=%s)",
                 log_prefix,
                 checkin_str,
                 reason,

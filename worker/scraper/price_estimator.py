@@ -795,12 +795,6 @@ def run_scrape(
             target, warnings = extract_target_spec(client, listing_url)
             extraction_warnings.extend(warnings)
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
-            logger.info(
-                f"[run_scrape] Target spec (raw): type={target.property_type!r} "
-                f"bedrooms={target.bedrooms} accommodates={target.accommodates} "
-                f"baths={target.baths} beds={target.beds} "
-                f"location={target.location!r}"
-            )
 
             # Degraded-page detection + one retry.
             # If the page returned suspiciously incomplete fields (e.g. bot-challenge
@@ -1035,7 +1029,6 @@ def run_scrape(
                     if target.location:
                         _spec_location_source = "title"
                 extraction_warnings.append(f"Location fallback from title: '{target.location}'")
-                logger.warning(f"Location fallback from title: '{target.location}'")
 
             # Last-resort: use the saved property address when title fallback also failed.
             if not target.location and fallback_address:
@@ -1446,11 +1439,6 @@ def run_benchmark_scrape(
                 logger.info(f"[benchmark] Extracting spec from: {benchmark_url}")
                 target, warnings = extract_target_spec(client, benchmark_url)
                 extraction_warnings.extend(warnings)
-                logger.info(
-                    f"[benchmark] Target spec (raw): type={target.property_type!r} "
-                    f"bedrooms={target.bedrooms} accommodates={target.accommodates} "
-                    f"baths={target.baths} location={target.location!r}"
-                )
 
                 # Degraded-page detection + one retry (mirrors run_scrape).
                 _bm_retry_attempted = False
