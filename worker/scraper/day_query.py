@@ -70,6 +70,9 @@ PER_DAY_TIMEOUT_S = 15
 PER_DAY_MAX_RETRIES = 2
 DAY_SCROLL_ROUNDS = int(os.getenv("DAY_QUERY_SCROLL_ROUNDS", "2"))
 DAY_MAX_CARDS = int(os.getenv("DAY_QUERY_MAX_CARDS", "30"))
+FIXED_COMP_DEEP_PAGES = int(os.getenv("FIXED_COMP_DEEP_PAGES", "3"))
+FIXED_COMP_DEEP_MIN_HITS = int(os.getenv("FIXED_COMP_DEEP_MIN_HITS", "4"))
+FIXED_COMP_MIN_PRICED = int(os.getenv("FIXED_COMP_MIN_PRICED", "4"))
 
 # Relaxed similarity floor — used when the strict floor yields zero comps for a day.
 # Comps in range [SIMILARITY_FLOOR_FALLBACK, SIMILARITY_FLOOR) are accepted only when
@@ -199,6 +202,49 @@ def estimate_base_price_for_date(
                 c for c in comps
                 if build_comp_id(c.url or "") in fixed_comp_pool
             ]
+            min_hits = max(1, FIXED_COMP_DEEP_MIN_HITS)
+            deep_pages = max(1, FIXED_COMP_DEEP_PAGES)
+            if len(comps) < min_hits and deep_pages > 1:
+                offsets = [i * max(1, int(max_cards)) for i in range(deep_pages)]
+                logger.info(
+                    f"[day_query] {checkin_str}: fixed-pool hits={len(comps)} < {min_hits}; "
+                    f"retrying deep search with offsets={offsets}"
+                )
+                deep_comps, deep_query_nights = collect_search_comps(
+                    client,
+                    target.location,
+                    base_origin,
+                    date_i,
+                    adults,
+                    max_scroll_rounds=max_scroll_rounds,
+                    max_cards=max_cards,
+                    rate_limit_seconds=rate_limit_seconds,
+                    timeout_ms=PER_DAY_TIMEOUT_S * 1000,
+                    exclude_url=target.url,
+                    log_prefix="day_query_deep",
+                    page_offsets=offsets,
+                )
+                if target.lat is not None and target.lng is not None and deep_comps:
+                    try:
+                        deep_comps, _geo_excl_deep = apply_geo_filter(
+                            deep_comps, target.lat, target.lng, max_radius_km
+                        )
+                        geo_excluded_count += _geo_excl_deep
+                    except Exception as _geo_exc:
+                        logger.warning(
+                            f"[day_query] Deep geo filter failed (non-fatal): {_geo_exc}"
+                        )
+                deep_comps = [
+                    c for c in deep_comps
+                    if build_comp_id(c.url or "") in fixed_comp_pool
+                ]
+                if len(deep_comps) > len(comps):
+                    comps = deep_comps
+                    query_nights_used = deep_query_nights
+                    logger.info(
+                        f"[day_query] {checkin_str}: deep search improved fixed-pool hits "
+                        f"to {len(comps)}"
+                    )
 
         comps_collected = len(comps)
 
@@ -272,6 +318,31 @@ def estimate_base_price_for_date(
             if raw_sim_scores.get(id(c), 0.0) >= SIMILARITY_FLOOR
         ]
         below_floor_count = len(comps_scored) - len(above_floor)
+        selection_mode = "strict"
+        _using_fallback = False
+
+        # In fixed-comp mode, if strict-floor priced comps are too few for stable
+        # pricing, top up from lower similarity (down to fallback floor), preserving
+        # ranked order. This lets lower-sim comps contribute when higher-sim comps
+        # have no price for this day.
+        if fixed_comp_pool and 0 < len(above_floor) < max(1, FIXED_COMP_MIN_PRICED):
+            need = max(1, FIXED_COMP_MIN_PRICED) - len(above_floor)
+            relaxed_candidates = [
+                (c, s)
+                for c, s in comps_scored
+                if SIMILARITY_FLOOR_FALLBACK <= raw_sim_scores.get(id(c), 0.0) < SIMILARITY_FLOOR
+            ]
+            if relaxed_candidates:
+                added = relaxed_candidates[:need]
+                above_floor = above_floor + added
+                below_floor_count = len(comps_scored) - len(above_floor)
+                selection_mode = "fallback_relaxed"
+                _using_fallback = True
+                logger.info(
+                    f"[day_query] {checkin_str}: strict-floor comps={len(above_floor)-len(added)} "
+                    f"< min_priced={FIXED_COMP_MIN_PRICED}; added {len(added)} relaxed comps "
+                    f"(floor={SIMILARITY_FLOOR_FALLBACK})"
+                )
 
         if below_floor_count > 0:
             all_scores = [s for _, s in comps_scored]
@@ -300,8 +371,6 @@ def estimate_base_price_for_date(
         # "strict"          — normal path, used when strict floor has ≥1 comp
         # "fallback_relaxed"— strict floor empty, fallback floor has ≥1 comp
         # "strict_empty"    — both floors empty, day will have no price
-        selection_mode = "strict"
-        _using_fallback = False
         if not above_floor and comps_scored:
             fallback_pool = [
                 (c, s) for c, s in comps_scored

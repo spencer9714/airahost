@@ -155,6 +155,42 @@ def test_parse_search_context_does_not_apply_structured_primary_price_when_unava
     assert row["currency"] is None
 
 
+def test_parse_search_context_uses_discounted_primary_price_when_available():
+    payload = {
+        "data": {
+            "presentation": {
+                "staysSearch": {
+                    "results": {
+                        "searchResults": [
+                            {
+                                "demandStayListing": {
+                                    "id": "RGVtYW5kU3RheUxpc3Rpbmc6MTY1NjY0MjU2NDc5MTI1Njc0NQ=="
+                                },
+                                "available": True,
+                                "structuredDisplayPrice": {
+                                    "primaryLine": {
+                                        "__typename": "DiscountedDisplayPriceLine",
+                                        "accessibilityLabel": "$316 CAD total, originally $402 CAD",
+                                        "discountedPrice": "$316 CAD",
+                                        "originalPrice": "$402 CAD",
+                                        "qualifier": "total",
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    ctx = parse_search_listing_context(payload)
+    row = ctx["1656642564791256745"]
+    assert row["is_available"] is True
+    assert row["total_price"] == 316.0
+    assert row["currency"] == "CAD"
+
+
 def test_parse_pdp_response_uses_book_it_floating_footer_structure_only():
     payload = {
         "data": {

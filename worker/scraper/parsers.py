@@ -468,12 +468,12 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
             row["min_nights"] = int(avail["min_nights"])
 
         # Price source from search payload (strict path only):
-        # available=true + structuredDisplayPrice.primaryLine.price
+        # available=true + structuredDisplayPrice.primaryLine.{price|discountedPrice}
         sdp = r.get("structuredDisplayPrice", {})
         if isinstance(sdp, dict):
             primary = sdp.get("primaryLine", {})
             if isinstance(primary, dict):
-                price_text = primary.get("price")
+                price_text = primary.get("price") or primary.get("discountedPrice")
                 qualifier = str(primary.get("qualifier") or "").lower()
 
                 # Exact payload rule:
@@ -487,7 +487,7 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                         if "night" in qualifier:
                             row["nightly_price"] = strict_val
                             row["price_nights"] = 1
-                        else:
+                        elif "total" in qualifier:
                             row["total_price"] = strict_val
                             row["price_nights"] = 1
 

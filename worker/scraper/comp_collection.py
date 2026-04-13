@@ -73,29 +73,79 @@ def collect_search_comps(
     timeout_ms: int = 15000,
     exclude_url: Optional[str] = None,
     log_prefix: str = "search",
+    page_offsets: Optional[List[int]] = None,
 ) -> Tuple[List[ListingSpec], int]:
     checkin_str = date_i.isoformat()
+    offsets = page_offsets or [0]
 
     # 1-night primary keeps prices aligned with nightly card pricing.
     # 2-night fallback is used only when 1-night has no usable priced listings
     # (commonly because of minimum-stay constraints).
     for query_nights in (1, 2):
         checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
-        status, search_data = client.search_listings_with_overrides(
-            {
+        listing_ids: List[str] = []
+        context: Dict[str, Dict[str, Any]] = {}
+        seen_ids: set[str] = set()
+        page_ok = False
+
+        for offset in offsets:
+            overrides = {
                 "checkin": checkin_str,
                 "checkout": checkout_str,
                 "adults": adults,
                 "query": search_location,
                 "itemsPerGrid": max_cards,
             }
-        )
-        if status < 200 or status >= 300:
-            logger.warning("[%s] %s: search status=%s", log_prefix, checkin_str, status)
+            if offset > 0:
+                overrides["itemsOffset"] = offset
+            status, search_data = client.search_listings_with_overrides(overrides)
+            if status < 200 or status >= 300:
+                logger.warning(
+                    "[%s] %s: search status=%s offset=%s",
+                    log_prefix,
+                    checkin_str,
+                    status,
+                    offset,
+                )
+                continue
+            page_ok = True
+
+            page_ids = parse_search_response(search_data)
+            page_ctx = parse_search_listing_context(search_data)
+            for lid in page_ids:
+                sid = str(lid)
+                if sid not in seen_ids:
+                    listing_ids.append(sid)
+                    seen_ids.add(sid)
+                row = page_ctx.get(sid, {})
+                existing = context.get(sid)
+                if existing is None:
+                    context[sid] = row
+                else:
+                    existing_has_price = bool(
+                        (existing.get("nightly_price") or 0) > 0
+                        or (existing.get("total_price") or 0) > 0
+                    )
+                    row_has_price = bool(
+                        (row.get("nightly_price") or 0) > 0
+                        or (row.get("total_price") or 0) > 0
+                    )
+                    if row_has_price and not existing_has_price:
+                        context[sid] = row
+
+        if not page_ok:
             continue
 
-        listing_ids = parse_search_response(search_data)
-        context = parse_search_listing_context(search_data)
+        if len(offsets) > 1:
+            logger.info(
+                "[%s] %s: merged %s search results across %s offsets (query_nights=%s)",
+                log_prefix,
+                checkin_str,
+                len(listing_ids),
+                len(offsets),
+                query_nights,
+            )
+
         parsed_comps: List[ListingSpec] = []
         for listing_id in listing_ids:
             row = context.get(str(listing_id), {})

@@ -1215,7 +1215,9 @@ def run_scrape(
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
 
-            fixed_pool_size = max(1, int(os.getenv("FIXED_COMP_POOL_SIZE", "20")))
+            # Build a broader fixed comparable pool so later dates can still price
+            # from lower-ranked but still-relevant comps when top-ranked comps drop out.
+            fixed_pool_size = max(1, int(os.getenv("FIXED_COMP_POOL_SIZE", "60")))
             fixed_comp_pool = _build_fixed_comp_pool(
                 client,
                 target,

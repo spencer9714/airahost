@@ -398,7 +398,8 @@ class AirbnbClient:
     ) -> Tuple[int, Dict[str, Any]]:
         """
         Replay captured StaysSearch with selected rawParams overridden.
-        Supported keys: checkin, checkout, adults, centerLat, centerLng, placeId, query.
+        Supported keys: checkin, checkout, adults, centerLat, centerLng, placeId,
+        query, itemsPerGrid, itemsOffset.
         """
         logger.info("Replaying captured StaysSearch with overrides...")
         payload = copy.deepcopy(self.captured_search_req["post_data"])
@@ -424,6 +425,8 @@ class AirbnbClient:
 
             if "itemsPerGrid" in overrides and req_key == "staysSearchRequest":
                 self._set_raw_param(raw_params, "itemsPerGrid", [str(overrides["itemsPerGrid"])])
+            if "itemsOffset" in overrides and req_key == "staysSearchRequest":
+                self._set_raw_param(raw_params, "itemsOffset", [str(overrides["itemsOffset"])])
 
         status_code, response_data = self._replay_request(self.captured_search_req, payload)
         if response_data.get("errors"):
