@@ -25,6 +25,7 @@ import time
 from datetime import datetime as dt, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from worker.core.concurrent_runner import execute_day_queries_concurrently
 from worker.core.geo_filter import apply_geo_filter, haversine_km, DEFAULT_MAX_RADIUS_KM
 from worker.core.similarity import (
     SIMILARITY_FLOOR,
@@ -249,11 +250,15 @@ def _build_daily_transparent_result(
             return candidate if not cur else current
         return candidate if current is None else current
 
+    day_comp_price_rows: List[Tuple[str, Dict[str, float]]] = []
+
     for day_result in all_day_results:
         day_date = day_result.get("date")
         # comp_prices holds prices for ALL scraped comps (not just top_k).
         # Use it to fill priceByDate for any comp already in the index.
         day_comp_prices: Dict[str, float] = day_result.get("comp_prices") or {}
+        if day_date and day_comp_prices:
+            day_comp_price_rows.append((day_date, day_comp_prices))
 
         for comp in day_result.get("top_comps", []) or []:
             comp_id = str(comp.get("id") or comp.get("url") or "").strip()
@@ -293,17 +298,24 @@ def _build_daily_transparent_result(
                     # Only fill expanded nights when not already set by a direct query.
                     comparable_index[comp_id]["price_by_date"].setdefault(night, _price_rounded)
 
-        # Second pass: fill priceByDate for comps already in the index that
-        # appeared in this day's full results but not in top_comps.
-        if day_date and day_comp_prices:
-            for comp_id, price in day_comp_prices.items():
-                if comp_id in comparable_index and day_date not in comparable_index[comp_id]["price_by_date"]:
-                    comparable_index[comp_id]["price_by_date"][day_date] = price
-                    # Also expand to covered nights using the stored max_query_nights.
-                    qn = comparable_index[comp_id].get("max_query_nights", 1)
-                    for i in range(1, qn):
-                        night = _date_add(day_date, i)
-                        comparable_index[comp_id]["price_by_date"].setdefault(night, price)
+    # Second pass (global): fill priceByDate for comps that appeared in full-day
+    # results but were not in that day's top_comps. This must run after the
+    # top_comps pass for all days so comp creation order cannot drop early-day
+    # prices for comps that become top-comps on later days.
+    for day_date, day_comp_prices in day_comp_price_rows:
+        for comp_id, price in day_comp_prices.items():
+            if comp_id not in comparable_index:
+                continue
+            if not isinstance(price, (int, float)) or price <= 0:
+                continue
+            price_by_date = comparable_index[comp_id]["price_by_date"]
+            if day_date not in price_by_date:
+                price_by_date[day_date] = round(float(price), 2)
+            # Also expand to covered nights using the stored max_query_nights.
+            qn = comparable_index[comp_id].get("max_query_nights", 1)
+            for i in range(1, qn):
+                night = _date_add(day_date, i)
+                price_by_date.setdefault(night, round(float(price), 2))
 
     comparable_listings: List[Dict[str, Any]] = []
     for state in comparable_index.values():
@@ -337,7 +349,7 @@ def _build_daily_transparent_result(
     # Price distribution from aggregated daily medians
     price_dist: Dict[str, Any] = {
         "min": None, "p25": None, "median": None, "p75": None, "max": None,
-        "currency": "USD",
+        "currency": target.currency or "USD",
     }
 
     if valid_prices:
@@ -1128,27 +1140,8 @@ def run_scrape(
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
 
-            sampled_results: List[DayResult] = []
-            _queried_night_indices: List[int] = []
-            day_loop_start = time.time()
-            _consecutive_empty = 0
-            _consecutive_empty_peak = 0
-            _early_stop_triggered = False
-
-            for idx_pos, night_idx in enumerate(sample_indices):
-                # Check global timeout
-                elapsed = time.time() - start_time
-                remaining = max_runtime_seconds - elapsed
-                if remaining < 15:
-                    logger.warning(
-                        f"Global timeout approaching ({remaining:.0f}s left), "
-                        f"stopping after {idx_pos}/{len(sample_indices)} day-queries"
-                    )
-                    break
-
+            def _run_day_query(night_idx: int) -> DayResult:
                 date_i = all_nights[night_idx]
-
-                # Retry logic
                 result: Optional[DayResult] = None
                 for attempt in range(1, PER_DAY_MAX_RETRIES + 1):
                     time.sleep(rate_limit_seconds)
@@ -1171,34 +1164,32 @@ def run_scrape(
                         logger.info(
                             f"[day_query] {date_i.isoformat()}: retry {attempt+1}/{PER_DAY_MAX_RETRIES}"
                         )
-
-                if result is not None:
-                    sampled_results.append(result)
-                    _queried_night_indices.append(night_idx)
-                    if result.median_price is None:
-                        _consecutive_empty += 1
-                        _consecutive_empty_peak = max(_consecutive_empty_peak, _consecutive_empty)
-                    else:
-                        _consecutive_empty = 0
-
-                # Circuit-breaker: nightly only — stop if too many consecutive empties.
-                # Preserves already-collected observations; unqueried dates are interpolated.
-                if (
-                    _early_stop_threshold is not None
-                    and _consecutive_empty >= _early_stop_threshold
-                ):
-                    logger.warning(
-                        f"[nightly] Circuit-breaker: {_consecutive_empty} consecutive empty results "
-                        f"at day {idx_pos + 1}/{len(sample_indices)} — stopping deeper crawl"
+                if result is None:
+                    return DayResult(
+                        date=date_i.isoformat(),
+                        median_price=None,
+                        error="Day query returned no result",
                     )
-                    _early_stop_triggered = True
-                    break
+                return result
 
-                if progress_callback is not None:
-                    try:
-                        progress_callback(idx_pos + 1, len(sample_indices))
-                    except Exception:
-                        pass
+            day_loop_start = time.time()
+            sampled_results, _runner_state = execute_day_queries_concurrently(
+                query_func=_run_day_query,
+                args_list=sample_indices,
+                max_workers=2,
+                early_stop_threshold=_early_stop_threshold,
+                progress_callback=progress_callback,
+            )
+            _queried_night_indices = [
+                sample_indices[i] for i in _runner_state.completed_indices
+            ]
+            _consecutive_empty_peak = _runner_state.consecutive_empty_peak
+            _early_stop_triggered = _runner_state.early_stop_triggered
+            if _early_stop_triggered and _early_stop_threshold is not None:
+                logger.warning(
+                    f"[nightly] Circuit-breaker: reached {_early_stop_threshold} consecutive "
+                    f"empty results - stopping deeper crawl"
+                )
 
             timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
             # Record nightly crawl metadata for debug visibility.
@@ -1634,25 +1625,10 @@ def run_benchmark_scrape(
             # Step 2: Benchmark day-by-day queries
             from worker.core.benchmark import BENCHMARK_TOP_K
             sampled_results: List[BenchmarkDayResult] = []
-            _bm_queried_night_indices: List[int] = []
-            day_loop_start = time.time()
-            _bm_consecutive_empty = 0
-            _bm_consecutive_empty_peak = 0
-            _bm_early_stop_triggered = False
-
-            for idx_pos, night_idx in enumerate(sample_indices):
-                elapsed = time.time() - start_time
-                remaining = max_runtime_seconds - elapsed
-                if remaining < 15:
-                    logger.warning(
-                        f"[benchmark] Timeout approaching, stopping after "
-                        f"{idx_pos}/{len(sample_indices)} queries"
-                    )
-                    break
-
+            def _run_benchmark_day_query(night_idx: int) -> BenchmarkDayResult:
                 date_i = all_nights[night_idx]
                 time.sleep(rate_limit_seconds)
-                result = estimate_benchmark_price_for_date(
+                return estimate_benchmark_price_for_date(
                     client,
                     target,
                     benchmark_url,
@@ -1667,31 +1643,25 @@ def run_benchmark_scrape(
                     top_k=BENCHMARK_TOP_K,
                     max_radius_km=_effective_radius,
                 )
-                sampled_results.append(result)
-                _bm_queried_night_indices.append(night_idx)
 
-                if result.median_price is None:
-                    _bm_consecutive_empty += 1
-                    _bm_consecutive_empty_peak = max(_bm_consecutive_empty_peak, _bm_consecutive_empty)
-                else:
-                    _bm_consecutive_empty = 0
-
-                if (
-                    _bm_early_stop_threshold is not None
-                    and _bm_consecutive_empty >= _bm_early_stop_threshold
-                ):
-                    logger.warning(
-                        f"[nightly/benchmark] Circuit-breaker: {_bm_consecutive_empty} consecutive "
-                        f"empty results at day {idx_pos + 1}/{len(sample_indices)} — stopping"
-                    )
-                    _bm_early_stop_triggered = True
-                    break
-
-                if progress_callback is not None:
-                    try:
-                        progress_callback(idx_pos + 1, len(sample_indices))
-                    except Exception:
-                        pass
+            day_loop_start = time.time()
+            sampled_results, _bm_runner_state = execute_day_queries_concurrently(
+                query_func=_run_benchmark_day_query,
+                args_list=sample_indices,
+                max_workers=2,
+                early_stop_threshold=_bm_early_stop_threshold,
+                progress_callback=progress_callback,
+            )
+            _bm_queried_night_indices = [
+                sample_indices[i] for i in _bm_runner_state.completed_indices
+            ]
+            _bm_consecutive_empty_peak = _bm_runner_state.consecutive_empty_peak
+            _bm_early_stop_triggered = _bm_runner_state.early_stop_triggered
+            if _bm_early_stop_triggered and _bm_early_stop_threshold is not None:
+                logger.warning(
+                    f"[nightly/benchmark] Circuit-breaker: reached {_bm_early_stop_threshold} consecutive "
+                    f"empty results - stopping"
+                )
 
             timings["day_queries_ms"] = round((time.time() - day_loop_start) * 1000)
             if nightly_plan is not None:

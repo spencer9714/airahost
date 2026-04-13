@@ -17,6 +17,11 @@ except ImportError:
         parse_search_response,
     )
 
+try:
+    from worker.core.concurrent_runner import execute_day_queries_concurrently
+except ImportError:
+    from core.concurrent_runner import execute_day_queries_concurrently
+
 # ---------------------------------------------------------
 # SCRAPER CONFIGURATION
 # ---------------------------------------------------------
@@ -124,8 +129,7 @@ def collect_houses_around_listing_for_date_range(
         query,
     )
 
-    all_rows = []
-    for d in _date_iter(range_start, range_end):
+    def _collect_rows_for_date(d):
         checkin = d.strftime("%Y-%m-%d")
         checkout = (d + timedelta(days=1)).strftime("%Y-%m-%d")
         search_url = _build_search_url(
@@ -156,6 +160,7 @@ def collect_houses_around_listing_for_date_range(
             listing_ids = listing_ids[:max_listings]
         search_context = parse_search_listing_context(search_data)
 
+        date_rows = []
         logger.info("Found %s listings for %s", len(listing_ids), checkin)
         for idx, listing_id in enumerate(listing_ids, 1):
             logger.info("Date %s: processing listing %s/%s (%s)", checkin, idx, len(listing_ids), listing_id)
@@ -165,7 +170,9 @@ def collect_houses_around_listing_for_date_range(
             has_price = isinstance(fallback.get("nightly_price"), (int, float)) or isinstance(
                 fallback.get("total_price"), (int, float)
             )
-            if not is_anchor and (not is_available or not has_price):
+            # Keep priced rows even when availability heuristics are noisy.
+            effective_available = bool(is_available or has_price)
+            if not is_anchor and (not effective_available or not has_price):
                 logger.info(
                     "Date %s: skipping listing %s (available=%s has_price=%s reason=%s min_nights=%s)",
                     checkin,
@@ -198,7 +205,19 @@ def collect_houses_around_listing_for_date_range(
 
             if not row["title"]:
                 row["title"] = f"Listing {listing_id}"
-            all_rows.append(row)
+            date_rows.append(row)
+
+        return date_rows
+
+    date_args = list(_date_iter(range_start, range_end))
+    date_row_batches, _ = execute_day_queries_concurrently(
+        query_func=_collect_rows_for_date,
+        args_list=date_args,
+        max_workers=5,
+    )
+    all_rows = []
+    for rows in date_row_batches:
+        all_rows.extend(rows)
 
     return all_rows
 

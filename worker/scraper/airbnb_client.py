@@ -89,7 +89,6 @@ class AirbnbClient:
             "saved_at": time.time(),
             "cookies": self._cookies_to_records(),
             "captured_search_req": self.captured_search_req,
-            "captured_pdp_req": self.captured_pdp_req,
         }
         try:
             with open(self.cache_path, "w", encoding="utf-8") as f:
@@ -114,7 +113,9 @@ class AirbnbClient:
 
         self._restore_cookies(cookies)
         self.captured_search_req = payload.get("captured_search_req")
-        self.captured_pdp_req = payload.get("captured_pdp_req")
+        # PDP template is intentionally not restored from cache.
+        # It is captured fresh on each listing details fetch.
+        self.captured_pdp_req = None
 
         # Search template is required for this run mode.
         if not self.captured_search_req:
@@ -257,6 +258,8 @@ class AirbnbClient:
     ):
         """Capture a live StaysPdpSections template by opening a specific listing page."""
         logger.info("Capturing StaysPdpSections template on-demand...")
+        # Always refresh PDP template to avoid stale/partial request shapes.
+        self.captured_pdp_req = None
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
@@ -444,13 +447,13 @@ class AirbnbClient:
         adults: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute StaysPdpSections query for listing pricing/amenities."""
-        if not self.captured_pdp_req:
-            self._capture_pdp_template_for_listing(
-                str(listing_id),
-                checkin=checkin,
-                checkout=checkout,
-                adults=adults,
-            )
+        # Always capture a fresh PDP template before replaying.
+        self._capture_pdp_template_for_listing(
+            str(listing_id),
+            checkin=checkin,
+            checkout=checkout,
+            adults=adults,
+        )
 
         payload = copy.deepcopy(self.captured_pdp_req["post_data"])
         stay_gid = self._to_global_id("StayListing", str(listing_id))

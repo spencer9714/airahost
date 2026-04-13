@@ -88,16 +88,48 @@ def parse_search_response(data: Dict[str, Any]) -> List[str]:
 
 def _parse_price_string(price_str: str) -> Optional[float]:
     """Extract numeric price from text like '$1,200 CAD' or 'US$241 / night'."""
+    value, _prefix = _parse_price_with_prefix(price_str)
+    return value
+
+
+def _parse_price_with_prefix(price_str: str) -> tuple[Optional[float], Optional[str]]:
+    """
+    Extract numeric price plus the raw prefix string immediately before it.
+
+    Prefix is intentionally not validated against known currencies.
+    """
     if not price_str:
-        return None
-    # Require at least one digit to avoid matches like "," that crash float conversion.
-    match = re.search(r"\d[\d,]*(?:\.\d+)?", price_str)
-    if match:
-        numeric = match.group(0).replace(",", "").strip()
+        return None, None
+    text = str(price_str).replace("\xa0", " ")
+
+    # Context-first match without requiring a specific prefix string:
+    # "241 / night", "241 per night", "241 total", "241 for 2 nights"
+    contextual = re.search(
+        r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:/\s*night|per\s+night|night|total|for\s+\d+\s+nights?)",
+        text,
+        re.I,
+    )
+    if contextual:
+        numeric = contextual.group(1).replace(",", "").strip()
+        if numeric:
+            prefix_match = re.search(r"([^\d\s]+)\s*$", text[:contextual.start(1)])
+            prefix = prefix_match.group(1).strip() if prefix_match else None
+            return float(numeric), prefix
+
+    # Generic fallback: first plausible numeric token.
+    for m in re.finditer(r"\d[\d,]*(?:\.\d+)?", text):
+        numeric = m.group(0).replace(",", "").strip()
         if not numeric:
-            return None
-        return float(numeric)
-    return None
+            continue
+        try:
+            value = float(numeric)
+        except Exception:
+            continue
+        if value > 0:
+            prefix_match = re.search(r"([^\d\s]+)\s*$", text[:m.start()])
+            prefix = prefix_match.group(1).strip() if prefix_match else None
+            return value, prefix
+    return None, None
 
 
 def _extract_price_nights(text: str) -> int:
@@ -287,12 +319,11 @@ def _extract_availability_context_from_search_result(r: Dict[str, Any]) -> Dict[
         "min_nights": None,
     }
 
-    unavailable_markers = (
-        "sold out",
-        "unavailable",
-        "no longer available",
-        "not available",
-        "booked",
+    strong_unavailable_patterns = (
+        r"\bsold out\b",
+        r"\bno longer available\b",
+        r"\bnot available\b",
+        r"\bbooked\b",
     )
 
     # Typed fields first.
@@ -328,7 +359,10 @@ def _extract_availability_context_from_search_result(r: Dict[str, Any]) -> Dict[
                 except Exception:
                     pass
 
-        if any(marker in txt_l for marker in unavailable_markers):
+        is_strong_unavailable = any(
+            re.search(pattern, txt_l) for pattern in strong_unavailable_patterns
+        )
+        if is_strong_unavailable:
             out["is_available"] = False
             if "sold out" in txt_l:
                 out["availability_reason"] = "sold_out"
@@ -371,6 +405,7 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                 "title": None,
                 "nightly_price": None,
                 "total_price": None,
+                "currency": None,
                 "price_nights": 1,
                 "location": None,
                 "lat": None,
@@ -411,13 +446,17 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                 price_text = primary.get("price")
                 qualifier = str(primary.get("qualifier") or "").lower()
 
-                total_from_a11y = _parse_price_string(accessibility) if isinstance(accessibility, str) else None
+                total_from_a11y, a11y_prefix = _parse_price_with_prefix(accessibility) if isinstance(accessibility, str) else (None, None)
                 if total_from_a11y is not None:
                     row["total_price"] = total_from_a11y
+                    if a11y_prefix and not row.get("currency"):
+                        row["currency"] = a11y_prefix
                     row["price_nights"] = max(int(row.get("price_nights") or 1), _extract_price_nights(accessibility))
 
-                price_val = _parse_price_string(price_text) if isinstance(price_text, str) else None
+                price_val, price_prefix = _parse_price_with_prefix(price_text) if isinstance(price_text, str) else (None, None)
                 if price_val is not None:
+                    if price_prefix and not row.get("currency"):
+                        row["currency"] = price_prefix
                     if "night" in qualifier:
                         row["nightly_price"] = price_val
                         row["price_nights"] = 1
@@ -431,8 +470,10 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
             if isinstance(secondary, dict):
                 sec_text = secondary.get("accessibilityLabel") or secondary.get("price")
                 if isinstance(sec_text, str):
-                    sec_val = _parse_price_string(sec_text)
+                    sec_val, sec_prefix = _parse_price_with_prefix(sec_text)
                     if sec_val is not None:
+                        if sec_prefix and not row.get("currency"):
+                            row["currency"] = sec_prefix
                         sec_l = sec_text.lower()
                         if "night" in sec_l or "per night" in sec_l:
                             row["nightly_price"] = row["nightly_price"] or sec_val
@@ -481,6 +522,7 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
         "property_type": None,
         "nightly_price": None,
         "total_price": None,
+        "currency": None,
         "cleaning_fee": None,
         "service_fee": None,
         "amenities": [],
@@ -657,9 +699,11 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
                 price_str = item["total"].get("amountFormatted")
             if not price_str:
                 continue
-            value = _parse_price_string(str(price_str))
+            value, prefix = _parse_price_with_prefix(str(price_str))
             if value is None:
                 continue
+            if prefix and not result.get("currency"):
+                result["currency"] = prefix
 
             if "cleaning fee" in label or "frais de menage" in label:
                 result["cleaning_fee"] = value
@@ -676,16 +720,20 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
     total_candidates = _find_keys(data, "totalPrice") + _find_keys(data, "priceTotal") + _find_keys(data, "total")
     if result["total_price"] is None:
         for t in total_candidates:
-            if isinstance(t, str):
-                val = _parse_price_string(t)
-                if val is not None:
-                    result["total_price"] = val
-                    break
-            elif isinstance(t, dict) and isinstance(t.get("amountFormatted"), str):
-                val = _parse_price_string(t["amountFormatted"])
-                if val is not None:
-                    result["total_price"] = val
-                    break
+                if isinstance(t, str):
+                    val, prefix = _parse_price_with_prefix(t)
+                    if val is not None:
+                        result["total_price"] = val
+                        if prefix and not result.get("currency"):
+                            result["currency"] = prefix
+                        break
+                elif isinstance(t, dict) and isinstance(t.get("amountFormatted"), str):
+                    val, prefix = _parse_price_with_prefix(t["amountFormatted"])
+                    if val is not None:
+                        result["total_price"] = val
+                        if prefix and not result.get("currency"):
+                            result["currency"] = prefix
+                        break
 
     # 5) Fallback money scan across strings.
     if result["nightly_price"] is None or result["total_price"] is None:
@@ -698,14 +746,20 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
                     val = _parse_price_string(s)
                     if val is not None:
                         result["nightly_price"] = val
+                        if not result.get("currency"):
+                            _v, prefix = _parse_price_with_prefix(s)
+                            if prefix:
+                                result["currency"] = prefix
                         break
 
         if result["total_price"] is None:
             for s in money_strings:
                 if "total" in s.lower():
-                    val = _parse_price_string(s)
+                    val, prefix = _parse_price_with_prefix(s)
                     if val is not None:
                         result["total_price"] = val
+                        if prefix and not result.get("currency"):
+                            result["currency"] = prefix
                         break
 
     # 6) Amenities from common shapes (exclude "not included"/unavailable amenities).

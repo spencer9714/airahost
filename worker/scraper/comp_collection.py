@@ -49,6 +49,7 @@ def _map_search_row_to_spec(
         baths=row.get("baths"),
         property_type=str(row.get("property_type") or ""),
         nightly_price=effective_nightly,
+        currency=str(row.get("currency") or "USD"),
         rating=row.get("rating"),
         reviews=row.get("reviews"),
         amenities=list(row.get("amenities") or []),
@@ -120,7 +121,11 @@ def collect_search_comps(
                 min_stay_blocked_count += 1
             if not is_available:
                 unavailable_count += 1
-            if c.url and c.nightly_price and c.nightly_price > 0 and is_available:
+            has_price = bool(c.nightly_price and c.nightly_price > 0)
+            # Availability heuristics can be noisy; if Airbnb returned a positive
+            # price for this card, keep it even when availability was mis-flagged.
+            effective_available = bool(is_available or has_price)
+            if c.url and has_price and effective_available:
                 priced.append(c)
 
         if priced:

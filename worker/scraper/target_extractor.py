@@ -298,7 +298,7 @@ def map_pdp_to_listing_spec(parsed: Dict[str, Any], listing_url: str) -> Listing
         baths=parsed.get("baths"),
         property_type=_normalize_property_type_for_spec(parsed.get("property_type")),
         nightly_price=parsed.get("nightly_price"),
-        currency="USD",
+        currency=clean(str(parsed.get("currency") or "USD")),
         amenities=list(parsed.get("amenities") or []),
     )
 
