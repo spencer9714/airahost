@@ -153,17 +153,18 @@ def _parse_dollar_amount_currency(text: str) -> tuple[Optional[float], Optional[
     if not isinstance(text, str) or not text.strip():
         return None, None
     s = text.replace("\xa0", " ").strip()
-    m = re.search(
-        r"^(?:US)?\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+([A-Za-z]{3,8})\b",
-        s,
-    )
+    # Search for "$<amount> <token>" anywhere in the string so variants like
+    # "CA$248 CAD" and "US$241 CAD total" still parse via "$248 CAD"/"$241 CAD".
+    m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+([^\d\s]+)", s)
     if not m:
         return None, None
     try:
         amount = float(m.group(1).replace(",", ""))
     except Exception:
         return None, None
-    currency = m.group(2).upper()
+    currency = str(m.group(2) or "").strip().upper()
+    if not currency:
+        return None, None
     return (amount if amount > 0 else None), currency
 
 
@@ -345,7 +346,6 @@ def _extract_availability_context_from_search_result(r: Dict[str, Any]) -> Dict[
         r"\bsold out\b",
         r"\bno longer available\b",
         r"\bnot available\b",
-        r"\bbooked\b",
     )
 
     # Typed fields first.

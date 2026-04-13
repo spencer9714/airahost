@@ -179,7 +179,6 @@ def estimate_base_price_for_date(
             exclude_url=target.url,
             log_prefix="day_query",
         )
-
         # ── Phase 3A: Geographic distance filter ──────────────────
         # Applied before similarity scoring.  Requires both the target
         # and at least some comps to have coordinates; otherwise skipped.
@@ -193,8 +192,6 @@ def estimate_base_price_for_date(
             except Exception as _geo_exc:
                 logger.warning(f"[day_query] Geo filter failed (non-fatal): {_geo_exc}")
 
-        comps_collected = len(comps)
-
         # Optional fixed-comp mode: only keep comps selected in the initial
         # similarity pass. This enforces one stable comparable set across dates.
         if fixed_comp_pool:
@@ -202,6 +199,8 @@ def estimate_base_price_for_date(
                 c for c in comps
                 if build_comp_id(c.url or "") in fixed_comp_pool
             ]
+
+        comps_collected = len(comps)
 
         # Build full comp_prices map (all priced comps, not just top_k).
         # This populates priceByDate for every comp in comparable listings.

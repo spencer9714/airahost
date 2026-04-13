@@ -4,6 +4,7 @@ from worker.scraper.parsers import (
     parse_search_listing_context,
     _parse_price_with_prefix,
     _parse_price_string,
+    _parse_dollar_amount_currency,
 )
 
 
@@ -71,6 +72,52 @@ def test_parse_search_context_uses_structured_primary_price_when_available():
     assert row["is_available"] is True
     assert row["total_price"] == 173.0
     assert row["currency"] == "CAD"
+
+
+def test_parse_search_context_parses_currency_prefix_variant_ca_dollar():
+    payload = {
+        "data": {
+            "presentation": {
+                "staysSearch": {
+                    "results": {
+                        "searchResults": [
+                            {
+                                "demandStayListing": {
+                                    "id": "RGVtYW5kU3RheUxpc3Rpbmc6MTY1MDk1NDQwMDUyNTM0MDQ0NA=="
+                                },
+                                "available": True,
+                                "structuredDisplayPrice": {
+                                    "primaryLine": {
+                                        "accessibilityLabel": "CA$248 CAD total",
+                                        "price": "CA$248 CAD",
+                                        "qualifier": "total",
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    ctx = parse_search_listing_context(payload)
+    row = ctx["1650954400525340444"]
+    assert row["total_price"] == 248.0
+    assert row["currency"] == "CAD"
+
+
+def test_availability_does_not_mark_unavailable_from_popularity_booked_text():
+    payload = {"subtitle": "Booked 6 times in the last month"}
+    out = _extract_availability_context_from_search_result(payload)
+    assert out["is_available"] is True
+    assert out["availability_reason"] is None
+
+
+def test_parse_dollar_amount_currency_accepts_embedded_dollar_token():
+    amount, currency = _parse_dollar_amount_currency("CA$248 CAD total")
+    assert amount == 248.0
+    assert currency == "CAD"
 
 
 def test_parse_search_context_does_not_apply_structured_primary_price_when_unavailable():

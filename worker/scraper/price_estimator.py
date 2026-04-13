@@ -511,6 +511,18 @@ def _build_fixed_comp_pool(
             "similarity": round(float(score), 3),
             "url": comp.url,
             "title": comp.title,
+            "location": comp.location,
+            "accommodates": comp.accommodates,
+            "bedrooms": comp.bedrooms,
+            "beds": comp.beds,
+            "baths": comp.baths,
+            "property_type": comp.property_type,
+            "rating": comp.rating,
+            "reviews": comp.reviews,
+            "amenities": list(comp.amenities or []),
+            "currency": comp.currency,
+            "lat": comp.lat,
+            "lng": comp.lng,
         }
     return fixed
 
