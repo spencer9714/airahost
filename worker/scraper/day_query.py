@@ -31,7 +31,6 @@ import logging
 import math
 import os
 import statistics
-import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -52,12 +51,7 @@ from worker.core.similarity import (
     similarity_score,
 )
 from worker.scraper.comp_collection import collect_search_comps
-from worker.scraper.comparable_collector import (
-    build_search_url,
-    parse_card_to_spec,
-    scroll_and_collect,
-    wait_for_cards,
-)
+from worker.scraper.parsers import parse_search_listing_context
 from worker.scraper.target_extractor import ListingSpec
 
 logger = logging.getLogger("worker.scraper.day_query")
@@ -148,7 +142,7 @@ def compute_sample_dates(total_nights: int, max_queries: int = MAX_SAMPLE_QUERIE
 # ── Single-day query ─────────────────────────────────────────────
 
 def estimate_base_price_for_date(
-    page,
+    client,
     target: ListingSpec,
     base_origin: str,
     date_i: date,
@@ -171,7 +165,7 @@ def estimate_base_price_for_date(
     try:
         # 2-night-primary / 1-night-fallback search; coord extraction included.
         comps, query_nights_used = collect_search_comps(
-            page,
+            client,
             target.location,
             base_origin,
             date_i,
@@ -198,6 +192,19 @@ def estimate_base_price_for_date(
                 logger.warning(f"[day_query] Geo filter failed (non-fatal): {_geo_exc}")
 
         comps_collected = len(comps)
+        logger.warning(
+            "[PRICE_TRACE][day_query] %s collected_prices=%s",
+            checkin_str,
+            [
+                {
+                    "url": c.url,
+                    "nightly": c.nightly_price,
+                    "kind": c.price_kind,
+                    "nights": c.scrape_nights,
+                }
+                for c in comps
+            ],
+        )
 
         # Build full comp_prices map (all priced comps, not just top_k).
         # This populates priceByDate for every comp in comparable listings.
@@ -405,12 +412,21 @@ def estimate_base_price_for_date(
         # Comps excluded by price sanity are tagged priceOutlier=True;
         # comps excluded by price band are tagged priceBandExcluded=True.
         top_comps_scored = above_floor[: min(max(3, top_k), len(above_floor))]
+        # Build date-specific deep link so manual click checks the same queried window.
+        _comp_checkout = (date_i + timedelta(days=max(1, int(query_nights_used or 1)))).isoformat()
         top_comps = [
-            {
-                **to_comparable_payload(c, s, target=target, include_geo=True),
-                **({"priceOutlier": True} if id(c) in excluded_ids else {}),
-                **({"priceBandExcluded": True} if id(c) in _band_excluded_ids else {}),
-            }
+            (
+                lambda _p: {
+                    **_p,
+                    "url": (
+                        f"{(c.url or '').split('?')[0]}"
+                        f"?check_in={checkin_str}&check_out={_comp_checkout}&adults={adults}"
+                        if c.url else _p.get("url")
+                    ),
+                    **({"priceOutlier": True} if id(c) in excluded_ids else {}),
+                    **({"priceBandExcluded": True} if id(c) in _band_excluded_ids else {}),
+                }
+            )(to_comparable_payload(c, s, target=target, include_geo=True))
             for c, s in top_comps_scored
         ]
 
@@ -473,7 +489,7 @@ def estimate_base_price_for_date(
 # ── Discount evidence (debug only) ──────────────────────────────
 
 def detect_discount_evidence(
-    page,
+    client,
     base_origin: str,
     target: ListingSpec,
     start_date: str,
@@ -490,25 +506,22 @@ def detect_discount_evidence(
     We divide by nights to show what the "per-night from total" would be.
     """
     try:
-        search_url = build_search_url(
-            base_origin, target.location, start_date, end_date, adults,
+        _, search_data = client.search_listings_with_overrides(
+            {
+                "checkin": start_date,
+                "checkout": end_date,
+                "adults": adults,
+                "query": target.location,
+                "itemsPerGrid": 20,
+            }
         )
-
-        time.sleep(rate_limit_seconds)
-        page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
-        wait_for_cards(page)
-
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
-
-        raw_cards = scroll_and_collect(
-            page, max_rounds=2, max_cards=20, pause_ms=600,
-            rate_limit_seconds=rate_limit_seconds,
-        )
-        comps = [parse_card_to_spec(c) for c in raw_cards]
-        prices = [c.nightly_price for c in comps if c.nightly_price and c.nightly_price > 0]
+        context = parse_search_listing_context(search_data)
+        prices = [
+            row.get("total_price") or row.get("nightly_price")
+            for row in context.values()
+            if isinstance(row.get("total_price") or row.get("nightly_price"), (int, float))
+            and (row.get("total_price") or row.get("nightly_price")) > 0
+        ]
 
         if not prices:
             return {

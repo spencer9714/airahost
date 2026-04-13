@@ -13,10 +13,13 @@ import json
 import logging
 import re
 import time
+from datetime import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
+
+from worker.scraper.parsers import parse_pdp_response
 
 logger = logging.getLogger("worker.scraper.target_extractor")
 
@@ -255,17 +258,94 @@ def safe_domain_base(url: str) -> str:
     return "https://www.airbnb.com"
 
 
+def extract_listing_id_from_url(listing_url: str) -> Optional[str]:
+    m = re.search(r"/rooms/(\d+)", normalize_airbnb_url(listing_url or ""))
+    return m.group(1) if m else None
+
+
+def _normalize_property_type_for_spec(value: Any) -> str:
+    v = clean(str(value or ""))
+    if not v:
+        return ""
+    normalized = normalize_property_type(v)
+    return normalized or v.lower().replace(" ", "_")
+
+
+def map_pdp_to_listing_spec(parsed: Dict[str, Any], listing_url: str) -> ListingSpec:
+    location = clean(str(parsed.get("location") or ""))
+    city = clean(str(parsed.get("city") or ""))
+    state = clean(str(parsed.get("state") or ""))
+    country = clean(str(parsed.get("country") or ""))
+    country_code = normalize_country_code(parsed.get("country_code") or country)
+    if location and (not city or not state or not country):
+        _city, _state, _country = derive_location_parts(location)
+        city = city or _city
+        state = state or _state
+        country = country or _country
+
+    return ListingSpec(
+        url=normalize_airbnb_url(listing_url),
+        title=clean(str(parsed.get("title") or "")),
+        location=location or ", ".join([p for p in (city, state, country) if p]),
+        city=city,
+        state=state,
+        postal_code=clean(str(parsed.get("postal_code") or "")),
+        country=country,
+        country_code=country_code,
+        accommodates=parsed.get("accommodates"),
+        bedrooms=parsed.get("bedrooms"),
+        beds=parsed.get("beds"),
+        baths=parsed.get("baths"),
+        property_type=_normalize_property_type_for_spec(parsed.get("property_type")),
+        nightly_price=parsed.get("nightly_price"),
+        currency="USD",
+        amenities=list(parsed.get("amenities") or []),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Page-level extraction
 # ---------------------------------------------------------------------------
 
 
-def extract_target_spec(page, listing_url: str) -> Tuple[ListingSpec, List[str]]:
+def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str]]:
     """
-    Navigate to a listing page and extract specs.
+    Extract listing specs. Preferred path uses AirbnbClient HTTP fetches.
+    Legacy page extraction is retained as a fallback when a non-client object is passed.
 
     Returns (ListingSpec, extraction_warnings).
     """
+    if hasattr(client, "get_listing_details"):
+        warnings: List[str] = []
+        listing_id = extract_listing_id_from_url(listing_url)
+        if not listing_id:
+            return (
+                ListingSpec(url=normalize_airbnb_url(listing_url)),
+                [f"Unable to parse listing_id from URL: {listing_url}"],
+            )
+        try:
+            pdp_data = client.get_listing_details(str(listing_id))
+            parsed = parse_pdp_response(pdp_data, str(listing_id), safe_domain_base(listing_url))
+            spec = map_pdp_to_listing_spec(parsed, listing_url)
+            if spec.accommodates is None:
+                warnings.append("Missing accommodates from PDP response")
+            if spec.bedrooms is None:
+                warnings.append("Missing bedrooms from PDP response")
+            if spec.beds is None:
+                warnings.append("Missing beds from PDP response")
+            if spec.baths is None:
+                warnings.append("Missing baths from PDP response")
+            if not spec.property_type:
+                warnings.append("Missing property_type from PDP response")
+            return spec, warnings
+        except Exception as exc:
+            return (
+                ListingSpec(url=normalize_airbnb_url(listing_url)),
+                [f"PDP extraction failed: {exc}"],
+            )
+
+    # Legacy DOM fallback
+    page = client
     warnings: List[str] = []
 
     page.goto(listing_url, wait_until="domcontentloaded")
@@ -996,6 +1076,29 @@ def extract_nightly_price_from_listing_page(
     Extraction layers run in confidence order and stop at first success.
     One retry is attempted on navigation failure before giving up.
     """
+    if hasattr(page, "get_listing_details"):
+        listing_id = extract_listing_id_from_url(listing_url)
+        if not listing_id:
+            return None, "failed"
+        try:
+            data = page.get_listing_details(
+                listing_id,
+                checkin=checkin,
+                checkout=checkout,
+                adults=2,
+            )
+            parsed = parse_pdp_response(data, listing_id, safe_domain_base(listing_url))
+            nightly = parsed.get("nightly_price")
+            if isinstance(nightly, (int, float)) and nightly > 0:
+                return float(nightly), "high"
+            total = parsed.get("total_price")
+            if isinstance(total, (int, float)) and total > 0:
+                nights = max(1, (dt.strptime(checkout, "%Y-%m-%d") - dt.strptime(checkin, "%Y-%m-%d")).days)
+                return round(float(total) / nights, 2), "medium"
+        except Exception:
+            return None, "failed"
+        return None, "failed"
+
     parsed = urlparse(listing_url)
     # Reconstruct with only check_in / check_out — drop any pre-existing params.
     url_with_dates = (
@@ -1251,8 +1354,9 @@ def capture_target_live_price(
     listing_url: str,
     checkin: str,
     checkout: str,
-    cdp_url: str,
+    cdp_url: Optional[str] = None,
     cdp_connect_timeout_ms: int = 15000,
+    client: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Open a short Playwright session to extract the target listing's current
@@ -1283,32 +1387,28 @@ def capture_target_live_price(
     listing_url = normalize_airbnb_url(listing_url)
 
     try:
-        from playwright.sync_api import sync_playwright
+        if client is None:
+            from worker.scraper.airbnb_client import AirbnbClient
+            client = AirbnbClient({"CHECKIN": checkin, "CHECKOUT": checkout, "ADULTS": 1})
 
-        with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(cdp_url, timeout=cdp_connect_timeout_ms)
-            context = browser.new_context(
-                locale="en-US",
-                timezone_id="America/Los_Angeles",
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-            )
-            page = context.new_page()
-            try:
-                price, confidence = extract_nightly_price_from_listing_page(
-                    page, listing_url, checkin, checkout
-                )
-            finally:
-                try:
-                    page.close()
-                except Exception:
-                    pass
-                try:
-                    context.close()
-                except Exception:
-                    pass
+        listing_id = extract_listing_id_from_url(listing_url)
+        if not listing_id:
+            raise ValueError(f"Unable to parse listing_id from URL: {listing_url}")
 
+        pdp_data = client.get_listing_details(
+            str(listing_id),
+            checkin=checkin,
+            checkout=checkout,
+            adults=1,
+        )
+        parsed = parse_pdp_response(pdp_data, str(listing_id), safe_domain_base(listing_url))
+        price = parsed.get("nightly_price")
+        if price is None and isinstance(parsed.get("total_price"), (int, float)):
+            nights = max(1, (dt.strptime(checkout, "%Y-%m-%d") - dt.strptime(checkin, "%Y-%m-%d")).days)
+            price = round(float(parsed["total_price"]) / nights, 2)
+        confidence = "high" if price is not None else "failed"
     except Exception as exc:
-        logger.warning(f"[target_live_price] Browser/navigation failed: {exc}")
+        logger.warning(f"[target_live_price] HTTP extraction failed: {exc}")
         return {
             "observedListingPrice": None,
             "observedListingPriceDate": checkin,

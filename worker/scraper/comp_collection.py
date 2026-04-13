@@ -1,43 +1,66 @@
-"""
-Shared market-comp search helper.
-
-``collect_search_comps`` encapsulates the 2-night-primary / 1-night-fallback
-Airbnb search loop used by both the standard day-query pipeline and the
-benchmark-first pipeline.  Previously each pipeline carried its own copy of
-this logic (~30 lines each); this module is the single source of truth.
-
-Improvement over the previous benchmark path: coordinate extraction
-(``extract_comp_coords``) is now applied in both pipelines, giving benchmark
-market comps the same geo-distance data that standard comps have always had.
-"""
-
 from __future__ import annotations
 
 import logging
-import re
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from worker.core.similarity import comp_urls_match
-from worker.scraper.comparable_collector import (
-    build_search_url,
-    extract_comp_coords,
-    parse_card_to_spec,
-    scroll_and_collect,
-    wait_for_cards,
-)
+from worker.scraper.parsers import parse_search_listing_context, parse_search_response
 from worker.scraper.target_extractor import ListingSpec
 
 logger = logging.getLogger("worker.scraper.comp_collection")
 
-_ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
 
-_DEFAULT_PAGE_TIMEOUT_MS: int = 15_000
-_DEFAULT_PAUSE_MS: int = 600
+def _map_search_row_to_spec(
+    listing_id: str,
+    row: Dict[str, Any],
+    base_origin: str,
+    query_nights: int,
+) -> ListingSpec:
+    nightly = row.get("nightly_price")
+    total = row.get("total_price")
+    price_nights = int(row.get("price_nights") or 1)
+    price_kind = "unknown"
+    scrape_nights = 1
+    if isinstance(nightly, (int, float)) and nightly > 0:
+        effective_nightly = float(nightly)
+        price_kind = "nightly_from_search"
+    elif isinstance(total, (int, float)) and total > 0:
+        nights = max(1, price_nights)
+        if int(query_nights or 1) == 1 and nights > 1:
+            # Strict 1-night mode: reject multi-night totals to avoid 2-night bias.
+            effective_nightly = None
+            price_kind = "multi_night_total_skipped"
+            scrape_nights = nights
+        else:
+            effective_nightly = round(float(total) / nights, 2)
+            price_kind = "trip_total_from_search"
+            scrape_nights = nights
+    else:
+        effective_nightly = None
+
+    return ListingSpec(
+        url=f"{base_origin.rstrip('/')}/rooms/{listing_id}",
+        title=str(row.get("title") or ""),
+        location=str(row.get("location") or ""),
+        accommodates=row.get("accommodates"),
+        bedrooms=row.get("bedrooms"),
+        beds=row.get("beds"),
+        baths=row.get("baths"),
+        property_type=str(row.get("property_type") or ""),
+        nightly_price=effective_nightly,
+        rating=row.get("rating"),
+        reviews=row.get("reviews"),
+        amenities=list(row.get("amenities") or []),
+        lat=row.get("lat"),
+        lng=row.get("lng"),
+        scrape_nights=scrape_nights,
+        price_kind=price_kind,
+    )
 
 
 def collect_search_comps(
-    page,
+    client,
     search_location: str,
     base_origin: str,
     date_i: date,
@@ -46,118 +69,96 @@ def collect_search_comps(
     max_scroll_rounds: int,
     max_cards: int,
     rate_limit_seconds: float,
-    timeout_ms: int = _DEFAULT_PAGE_TIMEOUT_MS,
+    timeout_ms: int = 15000,
     exclude_url: Optional[str] = None,
     log_prefix: str = "search",
 ) -> Tuple[List[ListingSpec], int]:
-    """
-    Execute a 2-night-primary / 1-night-fallback Airbnb market search for *date_i*.
-
-    Strategy (mirrors day_query.py's 2-night-primary rationale):
-      1. Try a 2-night query (checkin=date_i, checkout=date_i+2).
-         Listings with minimum_stay=2 only appear in 2-night+ queries, so this
-         broadens the comp pool vs a pure 1-night search.
-      2. Fall back to a 1-night query only when the 2-night search returns zero
-         priced comps (rare).
-
-    Coordinate extraction is applied after card parsing so that comps carry
-    approximate lat/lng for downstream geo-distance filtering.  If extraction
-    fails (e.g. page has no embedded map state), it is silently ignored.
-
-    Args:
-        page:              Playwright page object (already connected to CDP).
-        search_location:   Airbnb search location string (address / city / ZIP).
-        base_origin:       Base URL for Airbnb (e.g. "https://www.airbnb.com").
-        date_i:            Check-in date for this day query.
-        adults:            Number of guests.
-        max_scroll_rounds: How many scroll rounds to perform before stopping.
-        max_cards:         Maximum number of listing cards to collect.
-        rate_limit_seconds: Seconds to pause between page interactions.
-        timeout_ms:        Playwright navigation timeout in milliseconds.
-        exclude_url:       When provided, any parsed comp whose URL matches this
-                           value (via ``comp_urls_match``) is excluded from the
-                           returned list.  Used by the standard path to remove
-                           the target listing from its own comp pool.
-                           The benchmark path leaves this ``None`` so the
-                           benchmark listing stays in results for Stage-1 capture.
-        log_prefix:        Logger tag prefix for contextual log lines.
-
-    Returns:
-        ``(priced_comps, query_nights_used)`` where:
-        - ``priced_comps`` — ``ListingSpec`` objects with a non-zero
-          ``nightly_price``, optional coords populated, optional self-listing
-          removed;
-        - ``query_nights_used`` — 2 if the 2-night pass found results, else 1.
-    """
     checkin_str = date_i.isoformat()
 
-    for query_nights in (2, 1):
+    # 1-night primary keeps prices aligned with nightly card pricing.
+    # 2-night fallback is used only when 1-night has no usable priced listings
+    # (commonly because of minimum-stay constraints).
+    for query_nights in (1, 2):
         checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
-        search_url = build_search_url(
-            base_origin, search_location, checkin_str, checkout_str, adults,
+        status, search_data = client.search_listings_with_overrides(
+            {
+                "checkin": checkin_str,
+                "checkout": checkout_str,
+                "adults": adults,
+                "query": search_location,
+                "itemsPerGrid": max_cards,
+            }
         )
-        logger.info(
-            f"[{log_prefix}] {checkin_str}: {query_nights}-night search (primary=2)"
-        )
+        if status < 200 or status >= 300:
+            logger.warning("[%s] %s: search status=%s", log_prefix, checkin_str, status)
+            continue
 
-        page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
-        wait_for_cards(page)
-        try:
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
+        listing_ids = parse_search_response(search_data)
+        context = parse_search_listing_context(search_data)
+        parsed_comps: List[ListingSpec] = []
+        for listing_id in listing_ids:
+            row = context.get(str(listing_id), {})
+            spec = _map_search_row_to_spec(str(listing_id), row, base_origin, query_nights)
+            logger.warning(
+                "[PRICE_TRACE][%s] %s listing=%s nightly_raw=%s total_raw=%s price_nights=%s nightly_effective=%s kind=%s nights=%s",
+                log_prefix,
+                checkin_str,
+                listing_id,
+                row.get("nightly_price"),
+                row.get("total_price"),
+                row.get("price_nights"),
+                spec.nightly_price,
+                spec.price_kind,
+                spec.scrape_nights,
+            )
+            parsed_comps.append(spec)
 
-        raw_cards = scroll_and_collect(
-            page,
-            max_rounds=max_scroll_rounds,
-            max_cards=max_cards,
-            pause_ms=_DEFAULT_PAUSE_MS,
-            rate_limit_seconds=rate_limit_seconds,
-            stay_nights=query_nights,
-        )
-
-        # Best-effort: extract approximate lat/lng from page map state.
-        # Returns {} on any parse failure — never blocks collection.
-        coord_map: Dict[str, Any] = {}
-        try:
-            coord_map = extract_comp_coords(page)
-        except Exception:
-            pass
-
-        parsed_comps = [parse_card_to_spec(c) for c in raw_cards]
-
-        if coord_map:
-            for spec in parsed_comps:
-                room_m = _ROOM_ID_RE.search(spec.url or "")
-                if room_m:
-                    pair = coord_map.get(room_m.group(1))
-                    if pair:
-                        spec.lat, spec.lng = pair[0], pair[1]
-
-        # Optional self-exclusion (standard path only; benchmark keeps all comps)
         comps = parsed_comps
         self_excluded = 0
         if exclude_url:
-            comps = [
-                c for c in comps
-                if not (c.url and comp_urls_match(c.url, exclude_url))
-            ]
+            comps = [c for c in comps if not (c.url and comp_urls_match(c.url, exclude_url))]
             self_excluded = len(parsed_comps) - len(comps)
 
-        priced = [
-            c for c in comps
-            if c.url and c.nightly_price and c.nightly_price > 0
-        ]
+        # Keep only listings with a positive nightly price AND marked available.
+        priced: List[ListingSpec] = []
+        unavailable_count = 0
+        min_stay_blocked_count = 0
+        for c in comps:
+            lid = c.url.rsplit("/", 1)[-1] if c.url else ""
+            row = context.get(str(lid), {})
+            is_available = bool(row.get("is_available", True))
+            min_nights = row.get("min_nights")
+            if isinstance(min_nights, int) and min_nights > int(query_nights):
+                min_stay_blocked_count += 1
+            if not is_available:
+                unavailable_count += 1
+            if c.url and c.nightly_price and c.nightly_price > 0 and is_available:
+                priced.append(c)
 
-        logger.info(
-            "[%s] %s: query_nights=%d raw_cards=%d parsed=%d%s priced=%d",
-            log_prefix, checkin_str, query_nights, len(raw_cards),
+        logger.warning(
+            "[PRICE_TRACE][%s] %s: query_nights=%d parsed=%d%s priced=%d unavailable=%d min_stay_blocked=%d",
+            log_prefix,
+            checkin_str,
+            query_nights,
             len(parsed_comps),
             f" self_excluded={self_excluded}" if self_excluded else "",
             len(priced),
+            unavailable_count,
+            min_stay_blocked_count,
         )
-
         if priced:
             return priced, query_nights
+        if query_nights == 1:
+            reason = "unknown"
+            if min_stay_blocked_count > 0:
+                reason = "minimum_night_requirement_likely"
+            elif unavailable_count > 0:
+                reason = "sold_out_or_unavailable_likely"
+            logger.warning(
+                "[PRICE_TRACE][%s] %s: no priced comps from 1-night query; retrying 2-night fallback (reason=%s)",
+                log_prefix,
+                checkin_str,
+                reason,
+            )
 
     return [], 1

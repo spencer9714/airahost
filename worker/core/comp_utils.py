@@ -157,6 +157,7 @@ def to_comparable_payload(
         "similarity": round(float(score), 3),
         "rating": round(float(spec.rating), 2) if isinstance(spec.rating, (int, float)) else None,
         "reviews": int(spec.reviews) if isinstance(spec.reviews, (int, float)) else None,
+        "amenities": list(spec.amenities or []),
         "location": spec.location or None,
         "url": spec.url or None,
     }

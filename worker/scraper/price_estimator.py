@@ -32,13 +32,8 @@ from worker.core.similarity import (
     filter_similar_candidates,
     similarity_score,
 )
-from worker.scraper.comparable_collector import (
-    build_search_url,
-    extract_comp_coords,
-    parse_card_to_spec,
-    scroll_and_collect,
-    wait_for_cards,
-)
+from worker.scraper.airbnb_client import AirbnbClient
+from worker.scraper.parsers import parse_search_listing_context, parse_search_response
 from worker.scraper.day_query import (
     DAY_MAX_CARDS,
     DAY_SCROLL_ROUNDS,
@@ -55,8 +50,7 @@ from worker.scraper.day_query import (
 )
 from worker.scraper.target_extractor import (
     ListingSpec,
-    check_cdp_endpoint,
-    extract_listing_page_title,
+    extract_listing_id_from_url,
     extract_target_spec,
     normalize_airbnb_url,
     safe_domain_base,
@@ -88,7 +82,7 @@ def _title_looks_suspicious(title: str) -> bool:
 
 
 def _repair_suspicious_comparable_titles(
-    page,
+    client,
     transparent_result: Dict[str, Any],
     extraction_warnings: List[str],
     limit: int = 8,
@@ -108,7 +102,8 @@ def _repair_suspicious_comparable_titles(
         if not url or not _title_looks_suspicious(title):
             continue
         try:
-            resolved_title, title_warnings = extract_listing_page_title(page, url)
+            spec, title_warnings = extract_target_spec(client, url)
+            resolved_title = spec.title
         except Exception as exc:
             extraction_warnings.append(f"Comparable title repair failed for {url}: {exc}")
             continue
@@ -120,7 +115,7 @@ def _repair_suspicious_comparable_titles(
 
 
 def _repair_incomplete_comparable_specs(
-    page,
+    client,
     transparent_result: Dict[str, Any],
     extraction_warnings: List[str],
     limit: int = 6,
@@ -150,7 +145,7 @@ def _repair_incomplete_comparable_specs(
             continue
 
         try:
-            spec, warnings = extract_target_spec(page, url)
+            spec, warnings = extract_target_spec(client, url)
         except Exception as exc:
             extraction_warnings.append(f"Comparable spec repair failed for {url}: {exc}")
             continue
@@ -736,7 +731,6 @@ def run_scrape(
 
     Raises ValueError if the date range exceeds MAX_NIGHTS.
     """
-    from playwright.sync_api import sync_playwright
 
     listing_url = normalize_airbnb_url(listing_url)
 
@@ -785,28 +779,20 @@ def run_scrape(
             f"querying {len(sample_indices)} days (sampling={'yes' if len(sample_indices) < total_nights else 'no'})"
         )
 
-    # CDP check
-    cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
-    if not cdp_ok:
-        return [], _empty_transparent("scrape", f"CDP unavailable: {cdp_reason}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(
-            cdp_url,
-            timeout=cdp_connect_timeout_ms,
-        )
-        context = browser.new_context(
-            locale="en-US",
-            timezone_id="America/Los_Angeles",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
-        page = context.new_page()
-
-        try:
+    client = AirbnbClient(
+        {
+            "AIRBNB_BASE_URL": base_origin,
+            "CHECKIN": checkin,
+            "CHECKOUT": checkout,
+            "ADULTS": adults,
+        }
+    )
+    page = client
+    try:
             # Step 1: Extract target listing spec (with one retry on degraded pages)
             logger.info(f"Extracting target: {listing_url}")
             extract_start = time.time()
-            target, warnings = extract_target_spec(page, listing_url)
+            target, warnings = extract_target_spec(client, listing_url)
             extraction_warnings.extend(warnings)
             timings["extract_ms"] = round((time.time() - extract_start) * 1000)
             logger.info(
@@ -836,7 +822,7 @@ def run_scrape(
                 time.sleep(2)
                 _spec_retry_attempted = True
                 _retry_start = time.time()
-                target_retry, retry_warnings = extract_target_spec(page, listing_url)
+                target_retry, retry_warnings = extract_target_spec(client, listing_url)
                 timings["extract_retry_ms"] = round((time.time() - _retry_start) * 1000)
                 extraction_warnings.extend(retry_warnings)
                 if not _is_spec_degraded(target_retry):
@@ -928,7 +914,7 @@ def run_scrape(
             # (handles listings with a 2-night minimum stay).
             _target_price_confidence: Optional[str] = None
             try:
-                from worker.scraper.target_extractor import extract_nightly_price_from_listing_page
+                from worker.scraper.parsers import parse_pdp_response
                 _checkin_dt = dt.strptime(checkin, "%Y-%m-%d")
                 _checkout_1n = (_checkin_dt + timedelta(days=1)).strftime("%Y-%m-%d")
                 _checkout_2n = (_checkin_dt + timedelta(days=2)).strftime("%Y-%m-%d")
@@ -1174,7 +1160,7 @@ def run_scrape(
                 for attempt in range(1, PER_DAY_MAX_RETRIES + 1):
                     time.sleep(rate_limit_seconds)
                     result = estimate_base_price_for_date(
-                        page,
+                        client,
                         target,
                         base_origin,
                         date_i,
@@ -1287,7 +1273,7 @@ def run_scrape(
             if elapsed < max_runtime_seconds - 20 and total_nights > 1:
                 try:
                     discount_evidence = detect_discount_evidence(
-                        page, base_origin, target, checkin, checkout,
+                        client, base_origin, target, checkin, checkout,
                         effective_adults, rate_limit_seconds=rate_limit_seconds,
                     )
                 except Exception as exc:
@@ -1324,8 +1310,8 @@ def run_scrape(
                     "source": _coord_source,
                 }
             if target_spec_override is None:
-                _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
-            _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
+                _repair_incomplete_comparable_specs(client, transparent, extraction_warnings)
+            _repair_suspicious_comparable_titles(client, transparent, extraction_warnings)
 
             logger.info(
                 f"Day-by-day pipeline complete: {len(sample_indices)} queries, "
@@ -1334,16 +1320,8 @@ def run_scrape(
             )
 
             return all_day_results, transparent
-
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
-            try:
-                context.close()
-            except Exception:
-                pass
+    finally:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1386,7 +1364,6 @@ def run_benchmark_scrape(
     with the tiered nightly plan and applies reduced per-query limits and
     circuit-breaker early-stop.
     """
-    from playwright.sync_api import sync_playwright
     from worker.core.benchmark import (
         BENCHMARK_MAX_SAMPLE_QUERIES,
         BenchmarkDayResult,
@@ -1439,25 +1416,21 @@ def run_benchmark_scrape(
             f"querying {len(sample_indices)} days"
         )
 
-    cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
-    if not cdp_ok:
-        return [], _empty_transparent("benchmark", f"CDP unavailable: {cdp_reason}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(cdp_url, timeout=cdp_connect_timeout_ms)
-        context = browser.new_context(
-            locale="en-US",
-            timezone_id="America/Los_Angeles",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
-        page = context.new_page()
-
-        # ── Step 0: Probe Discounts (Strategy B) ────────────────────────
+    client = AirbnbClient(
+        {
+            "AIRBNB_BASE_URL": base_origin,
+            "CHECKIN": checkin,
+            "CHECKOUT": checkout,
+            "ADULTS": adults,
+        }
+    )
+    if True:
+        # Step 0: Probe Discounts
         # 在開始逐日抓取前，先對 Benchmark 進行「定價策略探測」
         # 這會額外花費約 3-5 秒，但能大幅提升準確度
         discount_info = {}
         try:
-            discount_info = probe_benchmark_discounts(page, benchmark_url, base_origin, d_start)
+            discount_info = probe_benchmark_discounts(client, benchmark_url, base_origin, d_start)
         except Exception as e:
             logger.warning(f"[benchmark] Discount probe failed: {e}")
         # ────────────────────────────────────────────────────────────────
@@ -1471,7 +1444,7 @@ def run_benchmark_scrape(
                 target = target_spec_override
             else:
                 logger.info(f"[benchmark] Extracting spec from: {benchmark_url}")
-                target, warnings = extract_target_spec(page, benchmark_url)
+                target, warnings = extract_target_spec(client, benchmark_url)
                 extraction_warnings.extend(warnings)
                 logger.info(
                     f"[benchmark] Target spec (raw): type={target.property_type!r} "
@@ -1492,7 +1465,7 @@ def run_benchmark_scrape(
                     )
                     time.sleep(2)
                     _bm_retry_attempted = True
-                    target_bm_retry, bm_retry_warnings = extract_target_spec(page, benchmark_url)
+                    target_bm_retry, bm_retry_warnings = extract_target_spec(client, benchmark_url)
                     extraction_warnings.extend(bm_retry_warnings)
                     if not _is_spec_degraded(target_bm_retry):
                         target = target_bm_retry
@@ -1692,7 +1665,7 @@ def run_benchmark_scrape(
                 date_i = all_nights[night_idx]
                 time.sleep(rate_limit_seconds)
                 result = estimate_benchmark_price_for_date(
-                    page,
+                    client,
                     target,
                     benchmark_url,
                     base_origin,
@@ -1904,8 +1877,8 @@ def run_benchmark_scrape(
                 spec_backfill=_bm_backfill_meta,
                 spec_extraction_meta=_bm_spec_extraction_meta,
             )
-            _repair_incomplete_comparable_specs(page, transparent, extraction_warnings)
-            _repair_suspicious_comparable_titles(page, transparent, extraction_warnings)
+            _repair_incomplete_comparable_specs(client, transparent, extraction_warnings)
+            _repair_suspicious_comparable_titles(client, transparent, extraction_warnings)
 
             logger.info(
                 f"[benchmark] Pipeline complete: {len(sampled_results)} queries, "
@@ -1915,16 +1888,8 @@ def run_benchmark_scrape(
             )
 
             return all_day_results, transparent
-
         finally:
-            try:
-                page.close()
-            except Exception:
-                pass
-            try:
-                context.close()
-            except Exception:
-                pass
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -2544,7 +2509,6 @@ def run_criteria_search(
 
     Returns (daily_results, transparent_result).
     """
-    from playwright.sync_api import sync_playwright
 
     start_time = time.time()
     timings: Dict[str, int] = {}
@@ -2759,41 +2723,15 @@ def run_criteria_search(
         },
     }
 
-    cdp_ok, cdp_reason = check_cdp_endpoint(cdp_url)
-    if not cdp_ok:
-        return [], {
-            "targetSpec": {
-                "title": "User property",
-                "location": address,
-                "city": "",
-                "state": "",
-                "postalCode": "",
-                "country": "",
-                "countryCode": "",
-                "lat": target_lat,
-                "lng": target_lng,
-                "propertyType": user_spec.property_type,
-                "accommodates": user_spec.accommodates,
-                "bedrooms": user_spec.bedrooms,
-                "beds": user_spec.beds,
-                "baths": user_spec.baths,
-                "amenities": [],
-                "rating": None,
-                "reviews": None,
-            },
-            "queryCriteria": query_criteria,
-            "compsSummary": None,
-            "priceDistribution": None,
-            "recommendedPrice": None,
-            "comparableListings": None,
-            "debug": {
-                "source": "criteria",
-                "error": f"CDP unavailable: {cdp_reason}",
-                "cdp_url": cdp_url,
-                "extractionWarnings": [],
-                "timingsMs": {},
-            },
+    client = AirbnbClient(
+        {
+            "AIRBNB_BASE_URL": base_origin,
+            "CHECKIN": checkin,
+            "CHECKOUT": checkout,
+            "ADULTS": adults,
+            "QUERY": search_location,
         }
+    )
 
     # Initialised before the playwright block so they're in scope for
     # the debug metadata section that runs after pass 2.
@@ -2801,147 +2739,69 @@ def run_criteria_search(
     n_coords_assigned = 0
     anchor_debug: Dict[str, Any] = {}
 
-    with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(
-            cdp_url,
-            timeout=cdp_connect_timeout_ms,
+    _p1_max_cards = nightly_plan.max_cards if nightly_plan is not None else max_cards
+    search_start = time.time()
+    _, search_data = client.search_listings_with_overrides(
+        {
+            "checkin": checkin,
+            "checkout": checkout,
+            "adults": adults,
+            "query": search_location,
+            "itemsPerGrid": _p1_max_cards,
+        }
+    )
+    timings["scroll_ms"] = round((time.time() - search_start) * 1000)
+    listing_ids = parse_search_response(search_data)
+    listing_context = parse_search_listing_context(search_data)
+    candidates = [
+        ListingSpec(
+            url=f"{base_origin}/rooms/{lid}",
+            title=str((listing_context.get(str(lid)) or {}).get("title") or ""),
+            location=search_location,
+            nightly_price=(listing_context.get(str(lid)) or {}).get("nightly_price"),
         )
-        context = browser.new_context(
-            locale="en-US",
-            timezone_id="America/Los_Angeles",
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+        for lid in listing_ids
+    ]
+    candidates = [c for c in candidates if c.url and c.nightly_price]
+    if not candidates:
+        no_results_hint = (
+            f"No listings found for ZIP code '{search_location}'. Try using the city name instead."
+            if is_zip
+            else f"No listings found in search results for '{search_location}'."
         )
-        page = context.new_page()
+        return [], {
+            "targetSpec": None,
+            "queryCriteria": query_criteria,
+            "compsSummary": {"collected": 0, "afterFiltering": 0, "usedForPricing": 0, "filterStage": "empty", "topSimilarity": None, "avgSimilarity": None},
+            "priceDistribution": None,
+            "recommendedPrice": None,
+            "comparableListings": None,
+            "debug": {"source": "criteria", "error": no_results_hint, "searchMode": search_mode, "extractionWarnings": [], "timingsMs": timings},
+        }
 
-        try:
-            # Pass 1: Search Airbnb for the area to find an anchor listing
-            search_url = build_search_url(
-                base_origin, search_location, checkin, checkout, adults
-            )
-            logger.info(f"[criteria] Search URL: {search_url}")
-
-            time.sleep(rate_limit_seconds)
-            page.goto(search_url, wait_until="domcontentloaded")
-            wait_for_cards(page)
-
-            # Dismiss modals
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-
-            # Check timeout
-            elapsed = time.time() - start_time
-            if elapsed > max_runtime_seconds - 10:
-                return [], _empty_transparent("criteria", "Timeout before scroll")
-
-            # Nightly Pass 1: apply reduced scroll/card limits to match the per-query
-            # budget of the crawl plan.  Interactive jobs use caller-supplied defaults.
-            _p1_scroll = nightly_plan.scroll_rounds if nightly_plan is not None else max_scroll_rounds
-            _p1_max_cards = nightly_plan.max_cards if nightly_plan is not None else max_cards
-
-            scroll_start = time.time()
-            raw_cards = scroll_and_collect(
-                page,
-                max_rounds=_p1_scroll,
-                max_cards=_p1_max_cards,
-                pause_ms=900,
-                rate_limit_seconds=rate_limit_seconds,
-                stay_nights=total_nights,
-            )
-            timings["scroll_ms"] = round((time.time() - scroll_start) * 1000)
-
-            candidates = [parse_card_to_spec(c) for c in raw_cards]
-            candidates = [c for c in candidates if c.url and c.nightly_price]
-
-            # Enrich candidates with page-embedded coordinates (map pin data).
-            # extract_comp_coords() scans __NEXT_DATA__ for room_id → (lat, lng).
-            # Candidates that lack a room-id match keep lat=None (pass-through in geo filter).
-            coord_map = extract_comp_coords(page)
-            if coord_map:
-                for spec in candidates:
-                    m = ROOM_ID_RE.search(spec.url or "")
-                    if m:
-                        pair = coord_map.get(m.group(1))
-                        if pair:
-                            spec.lat, spec.lng = pair[0], pair[1]
-                            n_coords_assigned += 1
-            logger.info(
-                f"[criteria] Coord map: {len(coord_map)} entries, "
-                f"coords assigned to {n_coords_assigned}/{len(candidates)} candidates"
-            )
-
-            if not candidates:
-                no_results_hint = (
-                    f"No listings found for ZIP code '{search_location}'. "
-                    "Try using the city name instead."
-                    if is_zip else
-                    f"No listings found in search results for '{search_location}'."
-                )
-                return [], {
-                    "targetSpec": None,
-                    "queryCriteria": query_criteria,
-                    "compsSummary": {"collected": 0, "afterFiltering": 0, "usedForPricing": 0, "filterStage": "empty", "topSimilarity": None, "avgSimilarity": None},
-                    "priceDistribution": None,
-                    "recommendedPrice": None,
-                    "comparableListings": None,
-                    "debug": {
-                        "source": "criteria",
-                        "error": no_results_hint,
-                        "searchMode": search_mode,
-                        "extractionWarnings": [],
-                        "timingsMs": timings,
-                    },
-                }
-
-            # Canonical target inference: when address confidence is low/medium,
-            # vote on the most common city/state from first-page Airbnb candidates
-            # rather than trusting the raw user-supplied _city/_state.  High
-            # confidence (ZIP geocoded, or city+state both provided) always uses
-            # the structured address fields directly.
-            _target_raw_city  = _city
-            _target_raw_state = _state
-            _anchor_target_city, _anchor_target_state, _target_canonical_city_source = \
-                _resolve_canonical_target(
-                    candidates, _city, _state, addr_confidence,
-                    target_lat=target_lat,
-                    target_lng=target_lng,
-                )
-
-            # Anchor selection: geo-constrained then structural similarity.
-            # _select_anchor_candidate() tries three paths in order:
-            #   A. listing-level coords (from coord_map)   → 20 km / 40 km filter
-            #   B. city-proxy geocoding (if coord_map = 0) → 15 km filter
-            #   C. metro-cluster text-bucket filter        → confidence-gated
-            best_match, best_score, anchor_debug = _select_anchor_candidate(
-                candidates, user_spec, target_lat, target_lng,
-                target_city=_anchor_target_city,
-                target_state=_anchor_target_state,
-                n_listing_coords=n_coords_assigned,
-                addr_confidence=addr_confidence,
-            )
-            anchor_debug["targetRawCity"]              = _target_raw_city or None
-            anchor_debug["targetRawState"]             = _target_raw_state or None
-            anchor_debug["targetCanonicalCitySource"]  = _target_canonical_city_source
-
-            logger.info(
-                f"[criteria] Anchor selected: {best_match.url} "
-                f"(score={best_score:.3f}, "
-                f"dist={anchor_debug.get('anchorDistanceKm')!r} km, "
-                f"bedrooms={best_match.bedrooms}, "
-                f"price=${best_match.nightly_price})"
-            )
-
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
-            try:
-                context.close()
-            except Exception:
-                pass
-
+    _target_raw_city = _city
+    _target_raw_state = _state
+    _anchor_target_city, _anchor_target_state, _target_canonical_city_source = _resolve_canonical_target(
+        candidates,
+        _city,
+        _state,
+        addr_confidence,
+        target_lat=target_lat,
+        target_lng=target_lng,
+    )
+    best_match, best_score, anchor_debug = _select_anchor_candidate(
+        candidates,
+        user_spec,
+        target_lat,
+        target_lng,
+        target_city=_anchor_target_city,
+        target_state=_anchor_target_state,
+        n_listing_coords=n_coords_assigned,
+        addr_confidence=addr_confidence,
+    )
+    anchor_debug["targetRawCity"] = _target_raw_city or None
+    anchor_debug["targetRawState"] = _target_raw_state or None
+    anchor_debug["targetCanonicalCitySource"] = _target_canonical_city_source
     # Pass 2: Use best match as anchor for full day-by-day scrape
     elapsed = time.time() - start_time
     remaining = max_runtime_seconds - elapsed
@@ -3019,3 +2879,9 @@ def _empty_transparent(source: str, error: str) -> Dict[str, Any]:
             "timingsMs": {},
         },
     }
+
+
+
+
+
+

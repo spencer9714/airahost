@@ -51,10 +51,8 @@ from worker.core.similarity import (
     similarity_score,
 )
 from worker.scraper.comp_collection import collect_search_comps
-from worker.scraper.target_extractor import (
-    ListingSpec,
-    extract_nightly_price_from_listing_page,
-)
+from worker.scraper.parsers import parse_pdp_response
+from worker.scraper.target_extractor import ListingSpec, extract_listing_id_from_url, safe_domain_base
 
 logger = logging.getLogger("worker.core.benchmark")
 
@@ -159,7 +157,7 @@ def _calculate_discount_pct(base_val: float, discounted_val: float) -> float:
 
 
 def _extract_benchmark_price_with_min_stay_fallback(
-    page,
+    client,
     benchmark_url: str,
     checkin: str,
     checkout: str,
@@ -172,9 +170,13 @@ def _extract_benchmark_price_with_min_stay_fallback(
     The underlying extractor returns a nightly price, so the fallback remains
     per-night rather than a total trip price.
     """
-    price, confidence = extract_nightly_price_from_listing_page(
-        page, benchmark_url, checkin, checkout
-    )
+    listing_id = extract_listing_id_from_url(benchmark_url)
+    if not listing_id:
+        return None, "failed"
+    pdp = client.get_listing_details(listing_id, checkin=checkin, checkout=checkout, adults=1)
+    parsed = parse_pdp_response(pdp, listing_id, safe_domain_base(benchmark_url))
+    price = parsed.get("nightly_price")
+    confidence = "high" if price is not None else "failed"
     if price is not None:
         return price, confidence
 
@@ -183,9 +185,10 @@ def _extract_benchmark_price_with_min_stay_fallback(
         return None, "failed"
 
     fallback_checkout = (date.fromisoformat(checkin) + timedelta(days=2)).isoformat()
-    fallback_price, fallback_confidence = extract_nightly_price_from_listing_page(
-        page, benchmark_url, checkin, fallback_checkout
-    )
+    pdp_fb = client.get_listing_details(listing_id, checkin=checkin, checkout=fallback_checkout, adults=1)
+    parsed_fb = parse_pdp_response(pdp_fb, listing_id, safe_domain_base(benchmark_url))
+    fallback_price = parsed_fb.get("nightly_price")
+    fallback_confidence = "high" if fallback_price is not None else "failed"
     if fallback_price is not None:
         logger.info(
             f"[benchmark] {checkin}: direct page 1-night unavailable, "
@@ -196,7 +199,7 @@ def _extract_benchmark_price_with_min_stay_fallback(
     return None, "failed"
 
 def probe_benchmark_discounts(
-    page,
+    client,
     benchmark_url: str,
     base_origin: str,
     start_date: date,
@@ -221,7 +224,7 @@ def probe_benchmark_discounts(
 
     def _fetch(in_date: str, out_date: str) -> Optional[float]:
         p, _conf = _extract_benchmark_price_with_min_stay_fallback(
-            page, benchmark_url, in_date, out_date
+            client, benchmark_url, in_date, out_date
         )
         return p
 
@@ -250,7 +253,7 @@ def probe_benchmark_discounts(
 # ── Single-day benchmark query ────────────────────────────────────────────────
 
 def estimate_benchmark_price_for_date(
-    page,
+    client,
     target: ListingSpec,
     benchmark_url: str,
     base_origin: str,
@@ -290,7 +293,7 @@ def estimate_benchmark_price_for_date(
         # in the results so Stage 1 can capture its search-card price as a
         # fallback when direct-page extraction fails.
         comps, query_nights_used = collect_search_comps(
-            page,
+            client,
             target.location,
             base_origin,
             date_i,
@@ -343,7 +346,7 @@ def estimate_benchmark_price_for_date(
         # the full rate_limit_seconds (1.0s) is overly conservative here.
         time.sleep(min(rate_limit_seconds * 0.5, 0.5))
         direct_price, direct_confidence = _extract_benchmark_price_with_min_stay_fallback(
-            page, benchmark_url, checkin_str, _bm_checkout_str
+            client, benchmark_url, checkin_str, _bm_checkout_str
         )
         if direct_price:
             benchmark_price = direct_price
@@ -687,6 +690,7 @@ def estimate_benchmark_price_for_date(
                 "similarity": 0.98,
                 "rating": round(float(bm_spec.rating), 2) if bm_spec and isinstance(bm_spec.rating, (int, float)) else None,
                 "reviews": int(bm_spec.reviews) if bm_spec and isinstance(bm_spec.reviews, (int, float)) else None,
+                "amenities": list((bm_spec.amenities if bm_spec else []) or []),
                 "location": (bm_spec.location if bm_spec else "") or None,
                 "url": benchmark_url,
                 "isPinnedBenchmark": True,
