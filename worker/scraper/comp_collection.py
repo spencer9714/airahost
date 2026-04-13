@@ -3,12 +3,34 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 from worker.core.similarity import comp_urls_match
 from worker.scraper.parsers import parse_search_listing_context, parse_search_response
 from worker.scraper.target_extractor import ListingSpec
 
 logger = logging.getLogger("worker.scraper.comp_collection")
+
+
+def _build_debug_search_url(
+    *,
+    base_origin: str,
+    query: str,
+    checkin: str,
+    checkout: str,
+    adults: int,
+) -> str:
+    # Mirrors the human-readable Airbnb URL for quick inspection in logs.
+    query_path = quote((query or "").strip(), safe="").replace("%2C", "--")
+    params = urlencode(
+        {
+            "checkin": checkin,
+            "checkout": checkout,
+            "adults": adults,
+            "search_type": "AUTOSUGGEST",
+        }
+    )
+    return f"{base_origin.rstrip('/')}/s/{query_path}/homes?{params}"
 
 
 def _map_search_row_to_spec(
@@ -80,6 +102,29 @@ def collect_search_comps(
     # (commonly because of minimum-stay constraints).
     for query_nights in (1, 2):
         checkout_str = (date_i + timedelta(days=query_nights)).isoformat()
+        debug_search_url = _build_debug_search_url(
+            base_origin=base_origin,
+            query=search_location,
+            checkin=checkin_str,
+            checkout=checkout_str,
+            adults=adults,
+        )
+        logger.warning(
+            "[SEARCH_URL][%s] %s: %s",
+            log_prefix,
+            checkin_str,
+            debug_search_url,
+        )
+        logger.warning(
+            "[SEARCH_PARAMS][%s] %s: query=%r checkin=%s checkout=%s adults=%s itemsPerGrid=%s",
+            log_prefix,
+            checkin_str,
+            search_location,
+            checkin_str,
+            checkout_str,
+            adults,
+            max_cards,
+        )
         status, search_data = client.search_listings_with_overrides(
             {
                 "checkin": checkin_str,

@@ -501,6 +501,34 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
     sections_root = _get_nested(data, ["data", "presentation", "stayProductDetailPage", "sections", "sections"])
     if not isinstance(sections_root, list):
         sections_root = _get_nested(data, ["data", "presentation", "stayproductdetailpage", "sections", "sections"])
+
+    # 0) Primary location extraction from LOCATION_DEFAULT:
+    # "Where you'll be" -> section.subtitle (e.g., "Mississauga, Ontario, Canada")
+    if isinstance(sections_root, list):
+        for entry in sections_root:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("sectionId") not in ("LOCATION_DEFAULT", "LOCATION_PDP"):
+                continue
+            sec = entry.get("section")
+            if not isinstance(sec, dict):
+                continue
+            subtitle = sec.get("subtitle")
+            if not (isinstance(subtitle, str) and subtitle.strip()):
+                continue
+
+            loc = subtitle.strip()
+            result["location"] = loc
+
+            parts = [p.strip() for p in loc.split(",") if p and p.strip()]
+            if len(parts) >= 1 and not result["city"]:
+                result["city"] = parts[0]
+            if len(parts) >= 2 and not result["state"]:
+                result["state"] = parts[1]
+            if len(parts) >= 3 and not result["country"]:
+                result["country"] = parts[-1]
+            break
+
     if isinstance(sections_root, list):
         for entry in sections_root:
             if not isinstance(entry, dict):
@@ -589,6 +617,31 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
             result["country"] = d.get("country").strip()
         if not result["country_code"] and isinstance(d.get("countryCode"), str) and d.get("countryCode").strip():
             result["country_code"] = d.get("countryCode").strip().upper()
+
+        # JSON-LD style address fields occasionally appear in PDP payload trees.
+        if not result["city"] and isinstance(d.get("addressLocality"), str) and d.get("addressLocality").strip():
+            result["city"] = d.get("addressLocality").strip()
+        if not result["state"] and isinstance(d.get("addressRegion"), str) and d.get("addressRegion").strip():
+            result["state"] = d.get("addressRegion").strip()
+        if not result["country"] and isinstance(d.get("addressCountry"), str) and d.get("addressCountry").strip():
+            result["country"] = d.get("addressCountry").strip()
+        if not result["postal_code"] and isinstance(d.get("postalCode"), str) and d.get("postalCode").strip():
+            result["postal_code"] = d.get("postalCode").strip()
+
+    # 2b) Metadata fallback: sharingConfig.location is often present even when
+    # section-level city/state fields are absent.
+    if not result["location"]:
+        for path in (
+            ["data", "presentation", "stayProductDetailPage", "sections", "metadata", "sharingConfig", "location"],
+            ["data", "presentation", "stayproductdetailpage", "sections", "metadata", "sharingConfig", "location"],
+        ):
+            val = _get_nested(data, path)
+            if isinstance(val, str) and val.strip():
+                result["location"] = val.strip()
+                break
+        # If we only got a city-like token, populate city too.
+        if result["location"] and not result["city"] and "," not in result["location"]:
+            result["city"] = result["location"]
 
     # 3) Structured price/fee extraction.
     price_item_groups = _find_keys(data, "priceItems") + _find_keys(data, "lineItems") + _find_keys(data, "items")
