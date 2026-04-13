@@ -36,6 +36,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from worker.core.comp_utils import (
+    build_comp_id,
     build_comp_prices_dict,
     compute_price_distribution,
     to_comparable_payload,
@@ -154,6 +155,7 @@ def estimate_base_price_for_date(
     top_k: int = 10,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
     max_radius_km: float = DEFAULT_MAX_RADIUS_KM,
+    fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> DayResult:
     """
     Execute a 1-night Airbnb search for date_i -> date_i+1.
@@ -193,6 +195,14 @@ def estimate_base_price_for_date(
 
         comps_collected = len(comps)
 
+        # Optional fixed-comp mode: only keep comps selected in the initial
+        # similarity pass. This enforces one stable comparable set across dates.
+        if fixed_comp_pool:
+            comps = [
+                c for c in comps
+                if build_comp_id(c.url or "") in fixed_comp_pool
+            ]
+
         # Build full comp_prices map (all priced comps, not just top_k).
         # This populates priceByDate for every comp in comparable listings.
         all_comp_prices = build_comp_prices_dict(comps)
@@ -211,7 +221,20 @@ def estimate_base_price_for_date(
         filtered_comps, filter_debug = filter_similar_candidates(target, comps)
 
         # Score and rank (raw scores stored separately before any boost).
-        comps_scored = [(c, similarity_score(target, c)) for c in filtered_comps]
+        if fixed_comp_pool:
+            comps_scored = [
+                (
+                    c,
+                    float(
+                        (fixed_comp_pool.get(build_comp_id(c.url or "")) or {}).get(
+                            "similarity", similarity_score(target, c)
+                        )
+                    ),
+                )
+                for c in filtered_comps
+            ]
+        else:
+            comps_scored = [(c, similarity_score(target, c)) for c in filtered_comps]
         # Capture raw scores keyed by object id before the boost step overwrites them.
         raw_sim_scores: Dict[int, float] = {id(c): s for c, s in comps_scored}
         comps_scored.sort(key=lambda x: x[1], reverse=True)

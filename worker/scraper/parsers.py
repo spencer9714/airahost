@@ -145,6 +145,28 @@ def _extract_price_nights(text: str) -> int:
         return 1
 
 
+def _parse_dollar_amount_currency(text: str) -> tuple[Optional[float], Optional[str]]:
+    """
+    Parse strict Airbnb primaryLine.price shapes like '$173 CAD' / 'US$241 CAD'.
+    Returns (amount, currency_code).
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None, None
+    s = text.replace("\xa0", " ").strip()
+    m = re.search(
+        r"^(?:US)?\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+([A-Za-z]{3,8})\b",
+        s,
+    )
+    if not m:
+        return None, None
+    try:
+        amount = float(m.group(1).replace(",", ""))
+    except Exception:
+        return None, None
+    currency = m.group(2).upper()
+    return (amount if amount > 0 else None), currency
+
+
 _GUEST_RE = re.compile(r"(\d+)\s*(?:guests?|guest|people|person)\b", re.I)
 _BEDROOM_RE = re.compile(r"(\d+)\s*(?:bedrooms?|bedroom|br)\b", re.I)
 _BED_RE = re.compile(r"(\d+)\s*beds?\b", re.I)
@@ -436,51 +458,38 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
         elif isinstance(r.get("title"), str) and r.get("title", "").strip():
             row["title"] = r["title"].strip()
 
-        # Price source from search payload:
-        # structuredDisplayPrice.primaryLine.accessibilityLabel / price
+        # Availability/min-stay context for filtering and diagnostics.
+        avail = _extract_availability_context_from_search_result(r)
+        if isinstance(avail.get("is_available"), bool):
+            row["is_available"] = bool(avail["is_available"])
+        if avail.get("availability_reason"):
+            row["availability_reason"] = avail["availability_reason"]
+        if isinstance(avail.get("min_nights"), int) and avail["min_nights"] > 0:
+            row["min_nights"] = int(avail["min_nights"])
+
+        # Price source from search payload (strict path only):
+        # available=true + structuredDisplayPrice.primaryLine.price
         sdp = r.get("structuredDisplayPrice", {})
         if isinstance(sdp, dict):
             primary = sdp.get("primaryLine", {})
             if isinstance(primary, dict):
-                accessibility = primary.get("accessibilityLabel")
                 price_text = primary.get("price")
                 qualifier = str(primary.get("qualifier") or "").lower()
 
-                total_from_a11y, a11y_prefix = _parse_price_with_prefix(accessibility) if isinstance(accessibility, str) else (None, None)
-                if total_from_a11y is not None:
-                    row["total_price"] = total_from_a11y
-                    if a11y_prefix and not row.get("currency"):
-                        row["currency"] = a11y_prefix
-                    row["price_nights"] = max(int(row.get("price_nights") or 1), _extract_price_nights(accessibility))
-
-                price_val, price_prefix = _parse_price_with_prefix(price_text) if isinstance(price_text, str) else (None, None)
-                if price_val is not None:
-                    if price_prefix and not row.get("currency"):
-                        row["currency"] = price_prefix
-                    if "night" in qualifier:
-                        row["nightly_price"] = price_val
-                        row["price_nights"] = 1
-                    elif row["total_price"] is None:
-                        # For your payload, primaryLine.price is typically total.
-                        row["total_price"] = price_val
-                        row["price_nights"] = max(int(row.get("price_nights") or 1), _extract_price_nights(str(price_text)))
-
-            # Secondary line may include per-night value.
-            secondary = sdp.get("secondaryLine")
-            if isinstance(secondary, dict):
-                sec_text = secondary.get("accessibilityLabel") or secondary.get("price")
-                if isinstance(sec_text, str):
-                    sec_val, sec_prefix = _parse_price_with_prefix(sec_text)
-                    if sec_val is not None:
-                        if sec_prefix and not row.get("currency"):
-                            row["currency"] = sec_prefix
-                        sec_l = sec_text.lower()
-                        if "night" in sec_l or "per night" in sec_l:
-                            row["nightly_price"] = row["nightly_price"] or sec_val
+                # Exact payload rule:
+                # if available=true and primaryLine.price is '$<num> <ccy>',
+                # parse it as the primary source.
+                if row.get("is_available") and isinstance(price_text, str):
+                    strict_val, strict_ccy = _parse_dollar_amount_currency(price_text)
+                    if strict_val is not None:
+                        if strict_ccy and not row.get("currency"):
+                            row["currency"] = strict_ccy
+                        if "night" in qualifier:
+                            row["nightly_price"] = strict_val
                             row["price_nights"] = 1
-                        elif "total" in sec_l:
-                            row["total_price"] = row["total_price"] or sec_val
-                            row["price_nights"] = max(int(row.get("price_nights") or 1), _extract_price_nights(sec_text))
+                        else:
+                            row["total_price"] = strict_val
+                            row["price_nights"] = 1
 
         # Structural/context fields used for similarity scoring.
         derived = _extract_structural_context_from_search_result(r)
@@ -491,15 +500,6 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                     row[key] = v
         if not row.get("amenities") and isinstance(derived.get("amenities"), list):
             row["amenities"] = derived["amenities"]
-
-        # Availability/min-stay context for filtering and diagnostics.
-        avail = _extract_availability_context_from_search_result(r)
-        if isinstance(avail.get("is_available"), bool):
-            row["is_available"] = bool(avail["is_available"])
-        if avail.get("availability_reason"):
-            row["availability_reason"] = avail["availability_reason"]
-        if isinstance(avail.get("min_nights"), int) and avail["min_nights"] > 0:
-            row["min_nights"] = int(avail["min_nights"])
 
     return context
 
@@ -685,82 +685,51 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
         if result["location"] and not result["city"] and "," not in result["location"]:
             result["city"] = result["location"]
 
-    # 3) Structured price/fee extraction.
-    price_item_groups = _find_keys(data, "priceItems") + _find_keys(data, "lineItems") + _find_keys(data, "items")
-    for group in price_item_groups:
-        if not isinstance(group, list):
-            continue
-        for item in group:
-            if not isinstance(item, dict):
+    # 3) Strict booking section parser only.
+    # Accept both BOOK_IT_FLOATING_FOOTER and BOOK_IT_SIDEBAR.
+    if isinstance(sections_root, list):
+        section_priority = ("BOOK_IT_FLOATING_FOOTER", "BOOK_IT_SIDEBAR")
+        section_by_id: Dict[str, Dict[str, Any]] = {}
+        for entry in sections_root:
+            if not isinstance(entry, dict):
                 continue
-            label = str(item.get("localizedTitle") or item.get("title") or item.get("label") or "").lower()
-            price_str = item.get("priceString")
-            if not price_str and isinstance(item.get("total"), dict):
-                price_str = item["total"].get("amountFormatted")
-            if not price_str:
-                continue
-            value, prefix = _parse_price_with_prefix(str(price_str))
-            if value is None:
-                continue
-            if prefix and not result.get("currency"):
-                result["currency"] = prefix
+            sid = entry.get("sectionId")
+            if isinstance(sid, str):
+                section_by_id[sid] = entry
 
-            if "cleaning fee" in label or "frais de menage" in label:
-                result["cleaning_fee"] = value
-            elif "service fee" in label or "frais de service" in label:
-                result["service_fee"] = value
-            elif "night" in label or "per night" in label or "nuit" in label:
-                if result["nightly_price"] is None:
-                    result["nightly_price"] = value
-            elif "total" in label:
+        for sid in section_priority:
+            entry = section_by_id.get(sid)
+            if not isinstance(entry, dict):
+                continue
+            sec = entry.get("section")
+            if not isinstance(sec, dict):
+                continue
+            if sec.get("available") is not True:
+                continue
+            sdp = sec.get("structuredDisplayPrice")
+            if not isinstance(sdp, dict):
+                continue
+            primary = sdp.get("primaryLine")
+            if not isinstance(primary, dict):
+                continue
+            price_text = primary.get("price")
+            if not isinstance(price_text, str):
+                continue
+            amount, ccy = _parse_dollar_amount_currency(price_text)
+            if amount is None:
+                continue
+            qualifier = str(primary.get("qualifier") or "").lower()
+            if "night" in qualifier:
+                result["nightly_price"] = amount
                 if result["total_price"] is None:
-                    result["total_price"] = value
-
-    # 4) Known total fields.
-    total_candidates = _find_keys(data, "totalPrice") + _find_keys(data, "priceTotal") + _find_keys(data, "total")
-    if result["total_price"] is None:
-        for t in total_candidates:
-                if isinstance(t, str):
-                    val, prefix = _parse_price_with_prefix(t)
-                    if val is not None:
-                        result["total_price"] = val
-                        if prefix and not result.get("currency"):
-                            result["currency"] = prefix
-                        break
-                elif isinstance(t, dict) and isinstance(t.get("amountFormatted"), str):
-                    val, prefix = _parse_price_with_prefix(t["amountFormatted"])
-                    if val is not None:
-                        result["total_price"] = val
-                        if prefix and not result.get("currency"):
-                            result["currency"] = prefix
-                        break
-
-    # 5) Fallback money scan across strings.
-    if result["nightly_price"] is None or result["total_price"] is None:
-        money_strings = [s for s in _walk_strings(data) if isinstance(s, str) and ("$" in s or "CAD" in s)]
-
-        if result["nightly_price"] is None:
-            for s in money_strings:
-                s_l = s.lower()
-                if "night" in s_l or "per night" in s_l or "/ night" in s_l:
-                    val = _parse_price_string(s)
-                    if val is not None:
-                        result["nightly_price"] = val
-                        if not result.get("currency"):
-                            _v, prefix = _parse_price_with_prefix(s)
-                            if prefix:
-                                result["currency"] = prefix
-                        break
-
-        if result["total_price"] is None:
-            for s in money_strings:
-                if "total" in s.lower():
-                    val, prefix = _parse_price_with_prefix(s)
-                    if val is not None:
-                        result["total_price"] = val
-                        if prefix and not result.get("currency"):
-                            result["currency"] = prefix
-                        break
+                    result["total_price"] = amount
+            else:
+                result["total_price"] = amount
+                if result["nightly_price"] is None:
+                    result["nightly_price"] = amount
+            if ccy:
+                result["currency"] = ccy
+            break
 
     # 6) Amenities from common shapes (exclude "not included"/unavailable amenities).
     amenity_names = set()

@@ -47,6 +47,29 @@ function listingUrlForDate(url: string, date: string): string {
   }
 }
 
+function nearestSampledPriceForDate(
+  priceByDate: Record<string, number> | undefined,
+  targetDate: string
+): { date: string; price: number } | null {
+  if (!priceByDate) return null;
+  const entries = Object.entries(priceByDate).filter(
+    ([d, p]) => !!d && typeof p === "number"
+  );
+  if (entries.length === 0) return null;
+  const targetTs = new Date(targetDate + "T00:00:00Z").getTime();
+  let best: { date: string; price: number } | null = null;
+  let bestDiff = Number.POSITIVE_INFINITY;
+  for (const [d, p] of entries) {
+    const ts = new Date(d + "T00:00:00Z").getTime();
+    const diff = Math.abs(ts - targetTs);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = { date: d, price: p };
+    }
+  }
+  return best;
+}
+
 // ── Helpers ─────────────────────────────────────────────────────
 
 function similarityBadgeClasses(similarity: number): string {
@@ -149,6 +172,9 @@ function ComparableCard({
   const datePrice: number | undefined = selectedDate
     ? listing.priceByDate?.[selectedDate]
     : undefined;
+  const nearestSampled = selectedDate
+    ? nearestSampledPriceForDate(listing.priceByDate, selectedDate)
+    : null;
 
   // No date selected → show the general comparable price.
   // Date selected + price found → show sampled date price.
@@ -193,9 +219,16 @@ function ComparableCard({
         {/* Right zone */}
         <div className="shrink-0 text-right">
           {isPriceUnavailable ? (
-            <p className="text-sm font-medium text-gray-400">
-              No data for this date
-            </p>
+            <div className="text-right">
+              <p className="text-sm font-medium text-gray-400">
+                No scraped data for this date
+              </p>
+              {nearestSampled && (
+                <p className="mt-0.5 text-[10px] text-amber-700">
+                  Closest sampled: {nearestSampled.date} (${nearestSampled.price}/night)
+                </p>
+              )}
+            </div>
           ) : (
             <p className="text-2xl font-semibold text-gray-900">
               ${displayPrice}

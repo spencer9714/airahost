@@ -19,6 +19,7 @@ This module orchestrates the pipeline by delegating to:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import statistics
 import time
@@ -26,6 +27,7 @@ from datetime import datetime as dt, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from worker.core.concurrent_runner import execute_day_queries_concurrently
+from worker.core.comp_utils import build_comp_id
 from worker.core.geo_filter import apply_geo_filter, haversine_km, DEFAULT_MAX_RADIUS_KM
 from worker.core.similarity import (
     SIMILARITY_FLOOR,
@@ -35,6 +37,7 @@ from worker.core.similarity import (
 )
 from worker.scraper.airbnb_client import AirbnbClient
 from worker.scraper.parsers import parse_search_listing_context, parse_search_response
+from worker.scraper.comp_collection import collect_search_comps
 from worker.scraper.day_query import (
     DAY_MAX_CARDS,
     DAY_SCROLL_ROUNDS,
@@ -59,6 +62,16 @@ from worker.scraper.target_extractor import (
 
 logger = logging.getLogger("worker.scraper")
 ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+
+
+def _bounded_workers(env_name: str, default: int = 2) -> int:
+    """Read worker count from env with defensive bounds."""
+    raw = os.getenv(env_name)
+    try:
+        value = int(raw) if raw is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(1, min(value, 8))
 
 
 def _title_looks_suspicious(title: str) -> bool:
@@ -450,6 +463,56 @@ def _build_daily_transparent_result(
             },
         },
     }
+
+
+def _build_fixed_comp_pool(
+    client,
+    target: ListingSpec,
+    base_origin: str,
+    anchor_date,
+    adults: int,
+    *,
+    max_scroll_rounds: int,
+    max_cards: int,
+    rate_limit_seconds: float,
+    max_radius_km: float,
+    pool_size: int = 20,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Build a fixed comparable pool once, then reuse across all sampled dates.
+    """
+    comps, _qn = collect_search_comps(
+        client,
+        target.location,
+        base_origin,
+        anchor_date,
+        adults,
+        max_scroll_rounds=max_scroll_rounds,
+        max_cards=max_cards,
+        rate_limit_seconds=rate_limit_seconds,
+        timeout_ms=15000,
+        exclude_url=target.url,
+        log_prefix="fixed_pool",
+    )
+    if not comps:
+        return {}
+
+    filtered_comps, _dbg = filter_similar_candidates(target, comps)
+    scored = [(c, similarity_score(target, c)) for c in filtered_comps]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    selected = scored[: max(1, int(pool_size))]
+
+    fixed: Dict[str, Dict[str, Any]] = {}
+    for comp, score in selected:
+        cid = build_comp_id(comp.url or "")
+        if not cid:
+            continue
+        fixed[cid] = {
+            "similarity": round(float(score), 3),
+            "url": comp.url,
+            "title": comp.title,
+        }
+    return fixed
 
 
 def _preferred_comp_id(listing_url: str) -> str:
@@ -1140,6 +1203,26 @@ def run_scrape(
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
 
+            fixed_pool_size = max(1, int(os.getenv("FIXED_COMP_POOL_SIZE", "20")))
+            fixed_comp_pool = _build_fixed_comp_pool(
+                client,
+                target,
+                base_origin,
+                all_nights[0],
+                effective_adults,
+                max_scroll_rounds=_eff_scroll_rounds,
+                max_cards=max(_eff_max_cards, 40),
+                rate_limit_seconds=rate_limit_seconds,
+                max_radius_km=_effective_radius,
+                pool_size=fixed_pool_size,
+            )
+            logger.info(
+                f"[fixed_pool] selected {len(fixed_comp_pool)} comps on anchor_date={all_nights[0].isoformat()} "
+                f"(pool_size_target={fixed_pool_size})"
+            )
+            query_criteria["fixedCompPoolSize"] = len(fixed_comp_pool)
+            query_criteria["fixedCompPoolAnchorDate"] = all_nights[0].isoformat()
+
             def _run_day_query(night_idx: int) -> DayResult:
                 date_i = all_nights[night_idx]
                 result: Optional[DayResult] = None
@@ -1157,6 +1240,7 @@ def run_scrape(
                         top_k=top_k,
                         preferred_comps=preferred_comps,
                         max_radius_km=_effective_radius,
+                        fixed_comp_pool=fixed_comp_pool or None,
                     )
                     if result.median_price is not None:
                         break
@@ -1173,10 +1257,11 @@ def run_scrape(
                 return result
 
             day_loop_start = time.time()
+            _day_query_workers = _bounded_workers("DAY_QUERY_MAX_WORKERS", 2)
             sampled_results, _runner_state = execute_day_queries_concurrently(
                 query_func=_run_day_query,
                 args_list=sample_indices,
-                max_workers=2,
+                max_workers=_day_query_workers,
                 early_stop_threshold=_early_stop_threshold,
                 progress_callback=progress_callback,
             )
@@ -1219,6 +1304,7 @@ def run_scrape(
                     "actual_inferred_indices": _actual_inferred,
                     "scroll_rounds": nightly_plan.scroll_rounds,
                     "max_cards": nightly_plan.max_cards,
+                    "query_workers": _day_query_workers,
                 }
 
             # Step 3: Interpolate unsampled/failed days
@@ -1645,10 +1731,11 @@ def run_benchmark_scrape(
                 )
 
             day_loop_start = time.time()
+            _bm_day_query_workers = _bounded_workers("BENCHMARK_DAY_QUERY_MAX_WORKERS", 2)
             sampled_results, _bm_runner_state = execute_day_queries_concurrently(
                 query_func=_run_benchmark_day_query,
                 args_list=sample_indices,
-                max_workers=2,
+                max_workers=_bm_day_query_workers,
                 early_stop_threshold=_bm_early_stop_threshold,
                 progress_callback=progress_callback,
             )
@@ -1687,6 +1774,7 @@ def run_benchmark_scrape(
                     "actual_inferred_indices": _bm_actual_inferred,
                     "scroll_rounds": nightly_plan.scroll_rounds,
                     "max_cards": nightly_plan.max_cards,
+                    "query_workers": _bm_day_query_workers,
                 }
 
             # Step 3: Interpolate

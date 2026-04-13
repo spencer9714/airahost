@@ -97,6 +97,15 @@ class AirbnbClient:
             if self.debug:
                 logger.debug("Failed to write cache file %s: %s", self.cache_path, exc)
 
+    @staticmethod
+    def _log_scraped_result(kind: str, payload: Dict[str, Any]) -> None:
+        """Always log raw scraped payloads for diagnostics."""
+        try:
+            logger.info("[SCRAPED_RESULT][%s] %s", kind, json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            # Logging must never break scraping flow.
+            logger.info("[SCRAPED_RESULT][%s] <unserializable>", kind)
+
     def _load_cached_state(self) -> bool:
         if not os.path.exists(self.cache_path):
             return False
@@ -255,11 +264,15 @@ class AirbnbClient:
         checkin: Optional[str] = None,
         checkout: Optional[str] = None,
         adults: Optional[int] = None,
+        force_refresh: bool = True,
     ):
         """Capture a live StaysPdpSections template by opening a specific listing page."""
+        if self.captured_pdp_req is not None and not force_refresh:
+            return
         logger.info("Capturing StaysPdpSections template on-demand...")
-        # Always refresh PDP template to avoid stale/partial request shapes.
-        self.captured_pdp_req = None
+        # Refresh on demand when explicitly requested.
+        if force_refresh:
+            self.captured_pdp_req = None
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(
@@ -365,6 +378,7 @@ class AirbnbClient:
             payload = copy.deepcopy(self.captured_search_req["post_data"])
             status_code, response_data = self._replay_request(self.captured_search_req, payload)
 
+        self._log_scraped_result("StaysSearch", response_data)
         return status_code, response_data
 
     @staticmethod
@@ -414,12 +428,14 @@ class AirbnbClient:
         status_code, response_data = self._replay_request(self.captured_search_req, payload)
         if response_data.get("errors"):
             if _already_retried:
+                self._log_scraped_result("StaysSearchWithOverrides", response_data)
                 return status_code, response_data
             logger.warning("GraphQL errors in StaysSearch with overrides. Refreshing and retrying once...")
             self.refresh_session(force_capture=True)
             payload = copy.deepcopy(self.captured_search_req["post_data"])
             return self.search_listings_with_overrides(overrides, _already_retried=True)
 
+        self._log_scraped_result("StaysSearchWithOverrides", response_data)
         return status_code, response_data
 
     @staticmethod
@@ -447,12 +463,14 @@ class AirbnbClient:
         adults: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute StaysPdpSections query for listing pricing/amenities."""
-        # Always capture a fresh PDP template before replaying.
+        # Reuse the in-memory PDP template within a run; capture only when missing.
+        # If replay returns GraphQL errors, recapture once and retry.
         self._capture_pdp_template_for_listing(
             str(listing_id),
             checkin=checkin,
             checkout=checkout,
             adults=adults,
+            force_refresh=False,
         )
 
         payload = copy.deepcopy(self.captured_pdp_req["post_data"])
@@ -473,4 +491,26 @@ class AirbnbClient:
             pass
 
         _, response_data = self._replay_request(self.captured_pdp_req, payload)
+        if response_data.get("errors"):
+            logger.warning("GraphQL errors in StaysPdpSections. Refreshing PDP template and retrying once...")
+            self._capture_pdp_template_for_listing(
+                str(listing_id),
+                checkin=checkin,
+                checkout=checkout,
+                adults=adults,
+                force_refresh=True,
+            )
+            payload = copy.deepcopy(self.captured_pdp_req["post_data"])
+            self._replace_listing_ids(payload, str(listing_id), stay_gid, demand_gid)
+            try:
+                request_vars = payload["variables"].get("pdpSectionsRequest", {})
+                if request_vars:
+                    request_vars["adults"] = str(adults if adults is not None else self.config.get("ADULTS", 1))
+                    request_vars["checkIn"] = checkin or self.config.get("CHECKIN", "")
+                    request_vars["checkOut"] = checkout or self.config.get("CHECKOUT", "")
+                    request_vars.pop("sectionIds", None)
+            except (KeyError, TypeError):
+                pass
+            _, response_data = self._replay_request(self.captured_pdp_req, payload)
+        self._log_scraped_result("StaysPdpSections", response_data)
         return response_data
