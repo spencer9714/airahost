@@ -72,7 +72,7 @@ export async function POST(
   }
 
   const cohostStatus = (listing.auto_apply_cohost_status as string | null) ?? "not_started";
-  if (false) {
+  if (cohostStatus !== "verified") {
     const statusMessages: Record<string, string> = {
       not_started:
         "Co-host setup is required before applying prices. Add Airahost as a co-host on Airbnb.",

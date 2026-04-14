@@ -864,7 +864,11 @@ export default function ResultsPage({
         <div className="mb-6 space-y-3">
           <PricingHeatmap
             calendar={report.resultCalendar ?? []}
-            selectable={isSignedIn === true && autoApplyConfigured === true}
+            selectable={
+              isSignedIn === true &&
+              autoApplyConfigured === true &&
+              cohostVerified === true
+            }
             onApplyDates={(selectedDates) => {
               void handleHeatmapApply(selectedDates);
             }}
