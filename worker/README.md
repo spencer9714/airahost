@@ -253,6 +253,14 @@ The `worker/logs/` directory is created automatically on first run.
 | `MAX_SCROLL_ROUNDS` | `12` | Max scroll iterations when collecting comps |
 | `MAX_CARDS` | `80` | Max comparable listings to collect |
 | `SCRAPE_RATE_LIMIT_SECONDS` | `1.0` | Sleep between external requests |
+| `DAY_QUERY_MAX_WORKERS` | `2` | Parallel workers for day-by-day scrape queries (min 1, max 8) |
+| `BENCHMARK_DAY_QUERY_MAX_WORKERS` | `2` | Parallel workers for benchmark-first day queries (min 1, max 8) |
+| `FIXED_POOL_MAX_WORKERS` | `3` | Parallel workers for fixed-pool setup anchor searches (min 1, max 8) |
+| `FIXED_POOL_PAGES` | `6` | Search pages scanned per fixed-pool anchor before ranking by similarity |
+| `FIXED_POOL_PER_ANCHOR` | `15` | Top-N most similar comps kept per fixed-pool anchor |
+| `FIXED_POOL_GLOBAL_LIMIT` | `15` | Final fixed compset cap; higher-similarity comps replace the current lowest |
+| `AIRBNB_DISABLE_MAP_SEARCH` | `0` | Set `1` to disable map search payload path |
+| `AIRBNB_ENABLE_AI_SEARCH` | `0` | Set `1` to force `aiSearchEnabled=true` in search payload |
 
 ## Processing Modes
 

@@ -36,10 +36,17 @@ class AirbnbClient:
         disable_map_cfg = self.config.get("DISABLE_MAP_SEARCH", None)
         if disable_map_cfg is None:
             self.disable_map_search = bool(
-                str(os.getenv("AIRBNB_DISABLE_MAP_SEARCH", "1")).strip().lower() in ("1", "true", "yes", "on")
+                str(os.getenv("AIRBNB_DISABLE_MAP_SEARCH", "0")).strip().lower() in ("1", "true", "yes", "on")
             )
         else:
             self.disable_map_search = bool(disable_map_cfg)
+        enable_ai_cfg = self.config.get("ENABLE_AI_SEARCH", None)
+        if enable_ai_cfg is None:
+            self.enable_ai_search = bool(
+                str(os.getenv("AIRBNB_ENABLE_AI_SEARCH", "0")).strip().lower() in ("1", "true", "yes", "on")
+            )
+        else:
+            self.enable_ai_search = bool(enable_ai_cfg)
         self.cache_path = self.config.get("SESSION_CACHE_PATH", ".airbnb_session_cache.json")
         self.session_max_age_seconds = int(self.config.get("SESSION_MAX_AGE_SECONDS", 6 * 60 * 60))
 
@@ -110,6 +117,37 @@ class AirbnbClient:
         except Exception as exc:
             if self.debug:
                 logger.debug("Failed to write cache file %s: %s", self.cache_path, exc)
+
+    def fork(self) -> "AirbnbClient":
+        """
+        Create an in-memory clone of the client for concurrent read-only replay.
+
+        The clone reuses captured templates/cookies but has its own requests.Session,
+        so concurrent setup tasks (e.g., fixed-pool anchor searches) don't contend
+        on a single session object.
+        """
+        clone = AirbnbClient.__new__(AirbnbClient)
+        clone.config = copy.deepcopy(self.config)
+        clone.base_url = self.base_url
+        clone.session = requests.Session()
+        clone.captured_search_req = copy.deepcopy(self.captured_search_req)
+        clone.captured_pdp_req = copy.deepcopy(self.captured_pdp_req)
+        clone.debug = self.debug
+        clone.log_raw_payloads = self.log_raw_payloads
+        clone.disable_map_search = self.disable_map_search
+        clone.enable_ai_search = self.enable_ai_search
+        clone.cache_path = self.cache_path
+        clone.session_max_age_seconds = self.session_max_age_seconds
+        for c in self.session.cookies:
+            clone.session.cookies.set(
+                c.name,
+                c.value,
+                domain=c.domain,
+                path=c.path,
+                secure=c.secure,
+                expires=c.expires,
+            )
+        return clone
 
     def _log_scraped_result(self, kind: str, payload: Dict[str, Any]) -> None:
         """Log raw scraped payloads only when explicitly enabled."""
@@ -458,8 +496,12 @@ class AirbnbClient:
                 if key in overrides and overrides[key] is not None:
                     self._set_raw_param(raw_params, raw_name, [str(overrides[key])])
 
-            # Force-enable Airbnb AI-search mode in the replayed search payload.
-            self._set_raw_param(raw_params, "aiSearchEnabled", ["true"])
+            # Default to classic search behavior unless explicitly enabled.
+            self._set_raw_param(
+                raw_params,
+                "aiSearchEnabled",
+                ["true" if self.enable_ai_search else "false"],
+            )
 
             if "itemsPerGrid" in overrides and req_key == "staysSearchRequest":
                 self._set_raw_param(raw_params, "itemsPerGrid", [str(overrides["itemsPerGrid"])])

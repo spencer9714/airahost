@@ -41,7 +41,6 @@ from worker.core.comp_utils import (
     compute_price_distribution,
     to_comparable_payload,
 )
-from worker.core.geo_filter import DEFAULT_MAX_RADIUS_KM, apply_geo_filter
 from worker.core.price_band import apply_price_band_filter
 from worker.core.price_sanity import apply_price_sanity, build_price_sanity_weights
 from worker.core.pricing_engine import recommend_price
@@ -178,7 +177,7 @@ def estimate_base_price_for_date(
     rate_limit_seconds: float = 1.0,
     top_k: int = 10,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
-    max_radius_km: float = DEFAULT_MAX_RADIUS_KM,
+    max_radius_km: Optional[float] = None,
     fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> DayResult:
     """
@@ -203,21 +202,14 @@ def estimate_base_price_for_date(
             timeout_ms=PER_DAY_TIMEOUT_S * 1000,
             exclude_url=target.url,
             log_prefix="day_query",
-            center_lat=target.lat,
-            center_lng=target.lng,
+            center_lat=None,
+            center_lng=None,
         )
         # ── Phase 3A: Geographic distance filter ──────────────────
         # Applied before similarity scoring.  Requires both the target
         # and at least some comps to have coordinates; otherwise skipped.
         # Comps without coords always pass through — see geo_filter.py.
         geo_excluded_count = 0
-        if target.lat is not None and target.lng is not None:
-            try:
-                comps, geo_excluded_count = apply_geo_filter(
-                    comps, target.lat, target.lng, max_radius_km
-                )
-            except Exception as _geo_exc:
-                logger.warning(f"[day_query] Geo filter failed (non-fatal): {_geo_exc}")
 
         # Optional fixed-comp mode: only keep comps selected in the initial
         # similarity pass. This enforces one stable comparable set across dates.
@@ -248,19 +240,9 @@ def estimate_base_price_for_date(
                     exclude_url=target.url,
                     log_prefix="day_query_deep",
                     page_offsets=offsets,
-                    center_lat=target.lat,
-                    center_lng=target.lng,
+                    center_lat=None,
+                    center_lng=None,
                 )
-                if target.lat is not None and target.lng is not None and deep_comps:
-                    try:
-                        deep_comps, _geo_excl_deep = apply_geo_filter(
-                            deep_comps, target.lat, target.lng, max_radius_km
-                        )
-                        geo_excluded_count += _geo_excl_deep
-                    except Exception as _geo_exc:
-                        logger.warning(
-                            f"[day_query] Deep geo filter failed (non-fatal): {_geo_exc}"
-                        )
                 deep_comps = [
                     c for c in deep_comps
                     if build_comp_id(c.url or "") in fixed_comp_pool

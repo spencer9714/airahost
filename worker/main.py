@@ -65,6 +65,17 @@ WORKER_LANE = os.getenv("WORKER_LANE", "interactive")
 MAX_SCROLL_ROUNDS = int(os.getenv("MAX_SCROLL_ROUNDS", "12"))
 MAX_CARDS = int(os.getenv("MAX_CARDS", "80"))
 RATE_LIMIT_SECONDS = float(os.getenv("SCRAPE_RATE_LIMIT_SECONDS", "1.0"))
+DAY_QUERY_MAX_WORKERS = max(1, min(int(os.getenv("DAY_QUERY_MAX_WORKERS", "2")), 8))
+BENCHMARK_DAY_QUERY_MAX_WORKERS = max(
+    1, min(int(os.getenv("BENCHMARK_DAY_QUERY_MAX_WORKERS", "2")), 8)
+)
+FIXED_POOL_MAX_WORKERS = max(1, min(int(os.getenv("FIXED_POOL_MAX_WORKERS", "3")), 8))
+AIRBNB_DISABLE_MAP_SEARCH = bool(
+    str(os.getenv("AIRBNB_DISABLE_MAP_SEARCH", "0")).strip().lower() in ("1", "true", "yes", "on")
+)
+AIRBNB_ENABLE_AI_SEARCH = bool(
+    str(os.getenv("AIRBNB_ENABLE_AI_SEARCH", "0")).strip().lower() in ("1", "true", "yes", "on")
+)
 
 # Auto-apply queue settings (single-process mode via worker.main)
 AUTO_APPLY_STALE_MINUTES = int(os.getenv("AUTO_APPLY_STALE_MINUTES", "15"))
@@ -1757,6 +1768,16 @@ def main():
     logger.info(f"  env={WORKER_ENV}, lane={WORKER_LANE}, poll={POLL_SECONDS}s, stale={STALE_MINUTES}min, max_attempts={MAX_ATTEMPTS}")
     logger.info(f"  heartbeat={HEARTBEAT_SECONDS}s, max_runtime={MAX_RUNTIME_SECONDS}s")
     logger.info(f"  CDP={CDP_URL}, connect_timeout={CDP_CONNECT_TIMEOUT_MS}ms")
+    logger.info(
+        f"  day_query_workers={DAY_QUERY_MAX_WORKERS}, "
+        f"benchmark_day_query_workers={BENCHMARK_DAY_QUERY_MAX_WORKERS}, "
+        f"fixed_pool_workers={FIXED_POOL_MAX_WORKERS}, "
+        f"scrape_rate_limit={RATE_LIMIT_SECONDS}s"
+    )
+    logger.info(
+        f"disable_map_search={AIRBNB_DISABLE_MAP_SEARCH}, "
+        f"enable_ai_search={AIRBNB_ENABLE_AI_SEARCH}"
+    )
     logger.info(
         f"  auto_apply: stale={AUTO_APPLY_STALE_MINUTES}min, "
         f"max_attempts={AUTO_APPLY_MAX_ATTEMPTS}, cdp={AUTO_APPLY_CDP_URL}"

@@ -62,7 +62,6 @@ from worker.scraper.target_extractor import (
 
 logger = logging.getLogger("worker.scraper")
 ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
-FIXED_POOL_STRICT_RADIUS_KM = float(os.getenv("FIXED_POOL_STRICT_RADIUS_KM", "3.0"))
 
 
 def _bounded_workers(env_name: str, default: int = 2) -> int:
@@ -373,10 +372,9 @@ def _build_daily_transparent_result(
     for state in comparable_index.values():
         item = dict(state["item"])
         seen_days = comp_seen_dates.get(str(item.get("id") or ""), set())
-        if fixed_pool_mode and seen_days:
-            state["count"] = max(int(state.get("count") or 0), len(seen_days))
-
-        avg_score = state["score_sum"] / max(1, state["count"])
+        # Similarity should not decay by number of observed days.
+        score_count = int(state.get("count") or 0)
+        avg_score = state["score_sum"] / max(1, score_count)
         # Surface comps down to the fallback floor — comps used in fallback_relaxed
         # days have scores between SIMILARITY_FLOOR_FALLBACK and SIMILARITY_FLOOR
         # and should still appear in the comparable listings display.
@@ -384,7 +382,7 @@ def _build_daily_transparent_result(
         if avg_score < SIMILARITY_FLOOR_FALLBACK and not has_any_price:
             continue
         item["similarity"] = round(avg_score, 3)
-        item["usedInPricingDays"] = state["count"]
+        item["usedInPricingDays"] = len(seen_days) if fixed_pool_mode else score_count
         price_by_date = state.get("price_by_date", {})
         if price_by_date:
             item["priceByDate"] = price_by_date
@@ -540,7 +538,7 @@ def _build_fixed_comp_pool(
     max_scroll_rounds: int,
     max_cards: int,
     rate_limit_seconds: float,
-    max_radius_km: float,
+    max_radius_km: Optional[float],
     pool_size: int = 20,
     page_count: int = 1,
 ) -> Dict[str, Dict[str, Any]]:
@@ -567,32 +565,11 @@ def _build_fixed_comp_pool(
         exclude_url=target.url,
         log_prefix="fixed_pool",
         page_offsets=_page_offsets,
-        center_lat=target.lat,
-        center_lng=target.lng,
+        center_lat=None,
+        center_lng=None,
     )
     if not comps:
         return {}
-
-    # Optional strict geo narrowing before fixed-pool selection.
-    # This is intentionally tighter than the day-query radius so the fixed set
-    # stays local and stable around the anchor.
-    if target.lat is not None and target.lng is not None:
-        strict_radius = min(float(max_radius_km), float(FIXED_POOL_STRICT_RADIUS_KM))
-        if strict_radius > 0:
-            try:
-                pre_count = len(comps)
-                comps, strict_excluded = apply_geo_filter(
-                    comps,
-                    target.lat,
-                    target.lng,
-                    strict_radius,
-                )
-                logger.info(
-                    f"[fixed_pool] strict radius {strict_radius:.2f}km: "
-                    f"kept={len(comps)} excluded={strict_excluded} from {pre_count}"
-                )
-            except Exception as exc:
-                logger.warning(f"[fixed_pool] strict radius filter failed (non-fatal): {exc}")
 
     filtered_comps, _dbg = filter_similar_candidates(target, comps)
     scored = [(c, similarity_score(target, c)) for c in filtered_comps]
@@ -658,7 +635,7 @@ def _build_fixed_comp_pool_by_stride(
     max_scroll_rounds: int,
     max_cards: int,
     rate_limit_seconds: float,
-    max_radius_km: float,
+    max_radius_km: Optional[float],
     pool_size: int,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Build one deduped fixed comp pool from anchor dates sampled every stride_days."""
@@ -1266,8 +1243,8 @@ def run_scrape(
                     anchor_url,
                 )
 
-            # Enforce strict geo radius around the anchor listing.
-            _effective_radius = 1.0
+            # Search comps by address query only (no geo/radius constraints).
+            _effective_radius: Optional[float] = None
 
             if not target.location:
                 # Try "... in City, State" pattern first
@@ -1389,17 +1366,27 @@ def run_scrape(
             from worker.scraper.day_query import DayResult
 
             # Build fixed comp set from three anchors: first day, midpoint day, last day.
-            fixed_pool_pages = 1
-            fixed_pool_per_anchor = 15
+            _fixed_pool_start = time.time()
+            fixed_pool_pages = max(1, int(os.getenv("FIXED_POOL_PAGES", "6")))
+            fixed_pool_per_anchor = max(1, int(os.getenv("FIXED_POOL_PER_ANCHOR", "15")))
+            # Final compset cap: keep only the best-N similarity comps globally.
+            fixed_pool_global_limit = max(1, int(os.getenv("FIXED_POOL_GLOBAL_LIMIT", "15")))
+            fixed_pool_max_workers = _bounded_workers("FIXED_POOL_MAX_WORKERS", 3)
             anchor_indices = sorted({0, len(all_nights) // 2, len(all_nights) - 1})
             anchor_dates = [all_nights[i] for i in anchor_indices]
             fixed_comp_pool: Dict[str, Dict[str, Any]] = {}
             anchor_date_strs: List[str] = []
 
-            for anchor_date in anchor_dates:
-                anchor_date_strs.append(anchor_date.isoformat())
+            logger.info(
+                f"[fixed_pool] building anchor pools concurrently: "
+                f"anchors={len(anchor_dates)}, workers={min(fixed_pool_max_workers, len(anchor_dates))}"
+            )
+
+            def _build_anchor_pool(anchor_date):
+                # Use isolated client instance per anchor worker to avoid shared-session contention.
+                anchor_client = client.fork()
                 anchor_pool = _build_fixed_comp_pool(
-                    client,
+                    anchor_client,
                     target,
                     base_origin,
                     anchor_date,
@@ -1411,33 +1398,68 @@ def run_scrape(
                     pool_size=fixed_pool_per_anchor,
                     page_count=fixed_pool_pages,
                 )
+                return {
+                    "anchor_date": anchor_date.isoformat(),
+                    "anchor_pool": anchor_pool,
+                }
+
+            anchor_pool_results, _anchor_state = execute_day_queries_concurrently(
+                query_func=_build_anchor_pool,
+                args_list=anchor_dates,
+                max_workers=min(fixed_pool_max_workers, len(anchor_dates)),
+                early_stop_threshold=None,
+                progress_callback=None,
+            )
+
+            for row in anchor_pool_results:
+                anchor_date_iso = str(row.get("anchor_date") or "")
+                anchor_pool = row.get("anchor_pool") or {}
+                anchor_date_strs.append(anchor_date_iso)
+
+                def _lowest_similarity_entry(pool: Dict[str, Dict[str, Any]]) -> Optional[Tuple[str, float]]:
+                    if not pool:
+                        return None
+                    return min(
+                        ((k, float((v or {}).get("similarity") or 0.0)) for k, v in pool.items()),
+                        key=lambda kv: kv[1],
+                    )
+
                 for cid, payload in anchor_pool.items():
                     if cid not in fixed_comp_pool:
-                        fixed_comp_pool[cid] = dict(payload)
+                        # Keep bounded top-N by similarity while gathering.
+                        if len(fixed_comp_pool) < fixed_pool_global_limit:
+                            fixed_comp_pool[cid] = dict(payload)
+                        else:
+                            lowest = _lowest_similarity_entry(fixed_comp_pool)
+                            incoming_sim = float((payload or {}).get("similarity") or 0.0)
+                            if lowest is not None and incoming_sim > lowest[1]:
+                                del fixed_comp_pool[lowest[0]]
+                                fixed_comp_pool[cid] = dict(payload)
                     else:
                         fixed_comp_pool[cid] = _merge_fixed_comp_entry(fixed_comp_pool[cid], payload)
-
                 logger.info(
-                    f"[fixed_pool] anchor_date={anchor_date.isoformat()} "
+                    f"[fixed_pool] anchor_date={anchor_date_iso} "
                     f"size={len(anchor_pool)} (per_anchor_target={fixed_pool_per_anchor}, pages={fixed_pool_pages})"
                 )
 
-            # Defensive cap: at most 15 comps from each of 3 anchors.
-            max_fixed_pool_size = fixed_pool_per_anchor * 3
-            if len(fixed_comp_pool) > max_fixed_pool_size:
+            # Defensive cap: keep only global top-N similarity comps.
+            max_fixed_pool_size = fixed_pool_global_limit
+            if len(fixed_comp_pool) > fixed_pool_global_limit:
                 ranked_fixed = sorted(
                     fixed_comp_pool.items(),
                     key=lambda kv: -float((kv[1] or {}).get("similarity") or 0.0),
                 )
-                fixed_comp_pool = dict(ranked_fixed[:max_fixed_pool_size])
+                fixed_comp_pool = dict(ranked_fixed[:fixed_pool_global_limit])
 
             logger.info(
                 f"[fixed_pool] merged anchors={anchor_date_strs} total_size={len(fixed_comp_pool)}"
             )
+            timings["fixed_pool_ms"] = round((time.time() - _fixed_pool_start) * 1000)
 
             query_criteria["fixedCompPoolAnchorDates"] = anchor_date_strs
             query_criteria["fixedCompPoolPerAnchor"] = fixed_pool_per_anchor
             query_criteria["fixedCompPoolPages"] = fixed_pool_pages
+            query_criteria["fixedCompPoolGlobalLimit"] = fixed_pool_global_limit
             query_criteria["fixedCompPoolSize"] = len(fixed_comp_pool)
             query_criteria["fixedCompPoolStrategy"] = "first_mid_last"
             query_criteria["reportRanking"] = "price_presence_then_similarity"
@@ -1477,6 +1499,10 @@ def run_scrape(
 
             day_loop_start = time.time()
             _day_query_workers = _bounded_workers("DAY_QUERY_MAX_WORKERS", 2)
+            logger.info(
+                f"[day_query] concurrent execution: workers={_day_query_workers}, "
+                f"dates={len(sample_indices)}, rate_limit_seconds={rate_limit_seconds}"
+            )
             sampled_results, _runner_state = execute_day_queries_concurrently(
                 query_func=_run_day_query,
                 args_list=sample_indices,
@@ -1560,6 +1586,7 @@ def run_scrape(
             discount_evidence = None
             elapsed = time.time() - start_time
             if elapsed < max_runtime_seconds - 20 and total_nights > 1:
+                _discount_start = time.time()
                 try:
                     discount_evidence = detect_discount_evidence(
                         client, base_origin, target, checkin, checkout,
@@ -1567,6 +1594,8 @@ def run_scrape(
                     )
                 except Exception as exc:
                     logger.warning(f"Discount evidence query failed: {exc}")
+                finally:
+                    timings["discount_evidence_ms"] = round((time.time() - _discount_start) * 1000)
 
             timings["total_ms"] = round((time.time() - start_time) * 1000)
 
@@ -1606,7 +1635,12 @@ def run_scrape(
             logger.info(
                 f"Day-by-day pipeline complete: {len(sample_indices)} queries, "
                 f"{sum(1 for r in all_day_results if r['median_price'] is not None)} valid prices, "
-                f"{timings['total_ms']}ms total"
+                f"{timings['total_ms']}ms total "
+                f"(extract={timings.get('extract_ms', 0)}ms, "
+                f"fixed_pool={timings.get('fixed_pool_ms', 0)}ms, "
+                f"day_queries={timings.get('day_queries_ms', 0)}ms, "
+                f"interpolation={timings.get('interpolation_ms', 0)}ms, "
+                f"discount_evidence={timings.get('discount_evidence_ms', 0)}ms)"
             )
 
             return all_day_results, transparent
@@ -1953,6 +1987,10 @@ def run_benchmark_scrape(
 
             day_loop_start = time.time()
             _bm_day_query_workers = _bounded_workers("BENCHMARK_DAY_QUERY_MAX_WORKERS", 2)
+            logger.info(
+                f"[benchmark/day_query] concurrent execution: workers={_bm_day_query_workers}, "
+                f"dates={len(sample_indices)}, rate_limit_seconds={rate_limit_seconds}"
+            )
             sampled_results, _bm_runner_state = execute_day_queries_concurrently(
                 query_func=_run_benchmark_day_query,
                 args_list=sample_indices,
