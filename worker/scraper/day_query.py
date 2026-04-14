@@ -73,7 +73,6 @@ DAY_MAX_CARDS = int(os.getenv("DAY_QUERY_MAX_CARDS", "30"))
 FIXED_COMP_DEEP_PAGES = int(os.getenv("FIXED_COMP_DEEP_PAGES", "3"))
 FIXED_COMP_DEEP_MIN_HITS = int(os.getenv("FIXED_COMP_DEEP_MIN_HITS", "4"))
 FIXED_COMP_MIN_PRICED = int(os.getenv("FIXED_COMP_MIN_PRICED", "4"))
-FIXED_COMP_RESCUE_TARGET = int(os.getenv("FIXED_COMP_RESCUE_TARGET", "15"))
 
 # Relaxed similarity floor — used when the strict floor yields zero comps for a day.
 # Comps in range [SIMILARITY_FLOOR_FALLBACK, SIMILARITY_FLOOR) are accepted only when
@@ -228,7 +227,6 @@ def estimate_base_price_for_date(
                 if build_comp_id(c.url or "") in fixed_comp_pool
             ]
             min_hits = max(1, FIXED_COMP_DEEP_MIN_HITS)
-            deep_all_comps: List[ListingSpec] = []
             # Keep normal search path and cap deep paging to max 3 pages.
             deep_pages = min(3, max(1, FIXED_COMP_DEEP_PAGES))
             if len(comps) < min_hits and deep_pages > 1:
@@ -263,7 +261,6 @@ def estimate_base_price_for_date(
                         logger.warning(
                             f"[day_query] Deep geo filter failed (non-fatal): {_geo_exc}"
                         )
-                deep_all_comps = list(deep_comps)
                 deep_comps = [
                     c for c in deep_comps
                     if build_comp_id(c.url or "") in fixed_comp_pool
@@ -275,29 +272,6 @@ def estimate_base_price_for_date(
                         f"[day_query] {checkin_str}: deep search improved fixed-pool hits "
                         f"to {len(comps)}"
                     )
-                # Availability rescue: when fixed pool is sparse for this day, use
-                # additional priced comps from the same day deep-search results.
-                rescue_target = max(min_hits, max(1, FIXED_COMP_RESCUE_TARGET))
-                if len(comps) < rescue_target and deep_all_comps:
-                    existing_ids = {build_comp_id(c.url or "") for c in comps}
-                    rescue_candidates = [
-                        c for c in deep_all_comps
-                        if build_comp_id(c.url or "") not in existing_ids
-                        and isinstance(c.nightly_price, (int, float))
-                        and c.nightly_price > 0
-                    ]
-                    rescue_candidates.sort(
-                        key=lambda c: similarity_score(target, c),
-                        reverse=True,
-                    )
-                    needed = rescue_target - len(comps)
-                    rescued = rescue_candidates[: max(0, needed)]
-                    if rescued:
-                        comps.extend(rescued)
-                        logger.info(
-                            f"[day_query] {checkin_str}: fixed-pool rescue added "
-                            f"{len(rescued)} comps (total={len(comps)})"
-                        )
 
         comps_collected = len(comps)
 
