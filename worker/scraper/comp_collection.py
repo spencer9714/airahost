@@ -74,6 +74,8 @@ def collect_search_comps(
     exclude_url: Optional[str] = None,
     log_prefix: str = "search",
     page_offsets: Optional[List[int]] = None,
+    center_lat: Optional[float] = None,
+    center_lng: Optional[float] = None,
 ) -> Tuple[List[ListingSpec], int]:
     checkin_str = date_i.isoformat()
     offsets = page_offsets or [0]
@@ -96,6 +98,10 @@ def collect_search_comps(
                 "query": search_location,
                 "itemsPerGrid": max_cards,
             }
+            if center_lat is not None:
+                overrides["centerLat"] = center_lat
+            if center_lng is not None:
+                overrides["centerLng"] = center_lng
             if offset > 0:
                 overrides["itemsOffset"] = offset
             status, search_data = client.search_listings_with_overrides(overrides)

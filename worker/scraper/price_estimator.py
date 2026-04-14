@@ -62,6 +62,7 @@ from worker.scraper.target_extractor import (
 
 logger = logging.getLogger("worker.scraper")
 ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+FIXED_POOL_STRICT_RADIUS_KM = float(os.getenv("FIXED_POOL_STRICT_RADIUS_KM", "3.0"))
 
 
 def _bounded_workers(env_name: str, default: int = 2) -> int:
@@ -211,6 +212,7 @@ def _build_daily_transparent_result(
     target_price_confidence: Optional[str] = None,
     spec_backfill: Optional[Dict[str, Any]] = None,
     spec_extraction_meta: Optional[Dict[str, Any]] = None,
+    fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -264,6 +266,36 @@ def _build_daily_transparent_result(
         return candidate if current is None else current
 
     day_comp_price_rows: List[Tuple[str, Dict[str, float]]] = []
+
+    # Seed report index with fixed pool so comps can still surface in output
+    # even when they were not selected into a day's top_comps.
+    if fixed_comp_pool:
+        for comp_id, payload in fixed_comp_pool.items():
+            cid = str(comp_id or "").strip()
+            if not cid:
+                continue
+            comparable_index[cid] = {
+                "item": {
+                    "id": cid,
+                    "title": payload.get("title") or "Comparable listing",
+                    "propertyType": payload.get("property_type") or target.property_type or "entire_home",
+                    "accommodates": payload.get("accommodates"),
+                    "bedrooms": payload.get("bedrooms"),
+                    "baths": payload.get("baths"),
+                    "nightlyPrice": None,
+                    "currency": payload.get("currency") or target.currency or "USD",
+                    "similarity": round(float(payload.get("similarity") or 0.0), 3),
+                    "rating": payload.get("rating"),
+                    "reviews": payload.get("reviews"),
+                    "amenities": list(payload.get("amenities") or []),
+                    "location": payload.get("location"),
+                    "url": payload.get("url"),
+                },
+                "score_sum": float(payload.get("similarity") or 0.0),
+                "count": 0,
+                "price_by_date": {},
+                "max_query_nights": 1,
+            }
 
     for day_result in all_day_results:
         day_date = day_result.get("date")
@@ -337,7 +369,8 @@ def _build_daily_transparent_result(
         # Surface comps down to the fallback floor — comps used in fallback_relaxed
         # days have scores between SIMILARITY_FLOOR_FALLBACK and SIMILARITY_FLOOR
         # and should still appear in the comparable listings display.
-        if avg_score < SIMILARITY_FLOOR_FALLBACK:
+        has_any_price = bool(state.get("price_by_date"))
+        if avg_score < SIMILARITY_FLOOR_FALLBACK and not has_any_price:
             continue
         item["similarity"] = round(avg_score, 3)
         item["usedInPricingDays"] = state["count"]
@@ -350,14 +383,17 @@ def _build_daily_transparent_result(
         elif "queryNights" in item:
             del item["queryNights"]
         comparable_listings.append(item)
-    # Sort: similarity DESC; use reviews as tie-break (more reviews = more signal).
+    # Sort: listings with any priced dates first, then similarity DESC,
+    # then price coverage breadth, then reviews.
     comparable_listings.sort(
         key=lambda row: (
+            -int(bool(row.get("priceByDate"))),
             -float(row.get("similarity") or 0.0),
+            -len(row.get("priceByDate") or {}),
             -int(row.get("reviews") or 0),
         )
     )
-    comparable_listings = comparable_listings[:15]
+    # Keep full comparable list for UI display; do not truncate here.
 
     # Price distribution from aggregated daily medians
     price_dist: Dict[str, Any] = {
@@ -481,9 +517,14 @@ def _build_fixed_comp_pool(
     """
     Build a fixed comparable pool once, then reuse across all sampled dates.
     """
+    search_location = (
+        f"{str(target.city).strip()}, {str(target.state).strip()}"
+        if str(target.city or "").strip() and str(target.state or "").strip()
+        else (str(target.city or "").strip() or target.location)
+    )
     comps, _qn = collect_search_comps(
         client,
-        target.location,
+        search_location,
         base_origin,
         anchor_date,
         adults,
@@ -493,9 +534,32 @@ def _build_fixed_comp_pool(
         timeout_ms=15000,
         exclude_url=target.url,
         log_prefix="fixed_pool",
+        center_lat=target.lat,
+        center_lng=target.lng,
     )
     if not comps:
         return {}
+
+    # Optional strict geo narrowing before fixed-pool selection.
+    # This is intentionally tighter than the day-query radius so the fixed set
+    # stays local and stable around the anchor.
+    if target.lat is not None and target.lng is not None:
+        strict_radius = min(float(max_radius_km), float(FIXED_POOL_STRICT_RADIUS_KM))
+        if strict_radius > 0:
+            try:
+                pre_count = len(comps)
+                comps, strict_excluded = apply_geo_filter(
+                    comps,
+                    target.lat,
+                    target.lng,
+                    strict_radius,
+                )
+                logger.info(
+                    f"[fixed_pool] strict radius {strict_radius:.2f}km: "
+                    f"kept={len(comps)} excluded={strict_excluded} from {pre_count}"
+                )
+            except Exception as exc:
+                logger.warning(f"[fixed_pool] strict radius filter failed (non-fatal): {exc}")
 
     filtered_comps, _dbg = filter_similar_candidates(target, comps)
     scored = [(c, similarity_score(target, c)) for c in filtered_comps]
@@ -524,7 +588,88 @@ def _build_fixed_comp_pool(
             "lat": comp.lat,
             "lng": comp.lng,
         }
+
     return fixed
+
+
+def _merge_fixed_comp_entry(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(existing)
+    if float(incoming.get("similarity") or 0.0) > float(existing.get("similarity") or 0.0):
+        out["similarity"] = incoming.get("similarity")
+    for key in ("url", "title", "location", "property_type", "currency"):
+        if not out.get(key) and incoming.get(key):
+            out[key] = incoming.get(key)
+    for key in ("accommodates", "bedrooms", "beds", "baths", "rating", "reviews", "lat", "lng"):
+        if out.get(key) is None and incoming.get(key) is not None:
+            out[key] = incoming.get(key)
+    ex_amen = list(out.get("amenities") or [])
+    in_amen = list(incoming.get("amenities") or [])
+    if in_amen:
+        seen = set(ex_amen)
+        for a in in_amen:
+            if a not in seen:
+                ex_amen.append(a)
+                seen.add(a)
+        out["amenities"] = ex_amen
+    return out
+
+
+def _build_fixed_comp_pool_by_stride(
+    client,
+    target: ListingSpec,
+    base_origin: str,
+    all_nights: List,
+    adults: int,
+    *,
+    stride_days: int,
+    max_scroll_rounds: int,
+    max_cards: int,
+    rate_limit_seconds: float,
+    max_radius_km: float,
+    pool_size: int,
+) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    """Build one deduped fixed comp pool from anchor dates sampled every stride_days."""
+    merged: Dict[str, Dict[str, Any]] = {}
+    seen_counts: Dict[str, int] = {}
+    anchor_dates: List[str] = []
+    step = max(1, int(stride_days))
+    for anchor_idx in range(0, len(all_nights), step):
+        anchor_date = all_nights[anchor_idx]
+        anchor_dates.append(anchor_date.isoformat())
+        pool = _build_fixed_comp_pool(
+            client,
+            target,
+            base_origin,
+            anchor_date,
+            adults,
+            max_scroll_rounds=max_scroll_rounds,
+            max_cards=max_cards,
+            rate_limit_seconds=rate_limit_seconds,
+            max_radius_km=max_radius_km,
+            pool_size=pool_size,
+        )
+        for cid, payload in pool.items():
+            seen_counts[cid] = int(seen_counts.get(cid, 0)) + 1
+            if cid not in merged:
+                merged[cid] = dict(payload)
+            else:
+                merged[cid] = _merge_fixed_comp_entry(merged[cid], payload)
+
+    # Keep fixed pool size bounded after dedupe by availability then similarity.
+    ranked = sorted(
+        merged.items(),
+        key=lambda kv: (
+            -int(seen_counts.get(kv[0], 0)),
+            -float((kv[1] or {}).get("similarity") or 0.0),
+            -int((kv[1] or {}).get("reviews") or 0),
+        ),
+    )
+    limited = {}
+    for cid, payload in ranked[: max(1, int(pool_size))]:
+        item = dict(payload)
+        item["seenCount"] = int(seen_counts.get(cid, 0))
+        limited[cid] = item
+    return limited, anchor_dates
 
 
 def _preferred_comp_id(listing_url: str) -> str:
@@ -840,30 +985,25 @@ def run_scrape(
 
     all_nights = daterange_nights(d_start, d_end)
 
-    # Determine which nights to actually query.
-    # Nightly jobs use the plan's tiered observe set; interactive uses the
-    # standard even-sampling strategy.
+    # Query every night in the requested range.
     if nightly_plan is not None:
-        sample_indices = nightly_plan.observe_indices
+        sample_indices = list(range(total_nights))
         _eff_scroll_rounds = nightly_plan.scroll_rounds
         _eff_max_cards = nightly_plan.max_cards
-        _early_stop_threshold: Optional[int] = nightly_plan.early_stop_threshold
+        _early_stop_threshold = None
         logger.info(
             f"Day-by-day pipeline (nightly): {total_nights} nights, "
-            f"observing {len(sample_indices)} / inferring {len(nightly_plan.infer_indices)} "
+            f"querying all {len(sample_indices)} nights "
             f"(scroll_rounds={_eff_scroll_rounds}, max_cards={_eff_max_cards})"
         )
     else:
-        if total_nights <= SAMPLE_THRESHOLD:
-            sample_indices = list(range(total_nights))
-        else:
-            sample_indices = compute_sample_dates(total_nights, MAX_SAMPLE_QUERIES)
+        sample_indices = list(range(total_nights))
         _eff_scroll_rounds = max_scroll_rounds
         _eff_max_cards = max_cards
         _early_stop_threshold = None
         logger.info(
             f"Day-by-day pipeline: {total_nights} nights, "
-            f"querying {len(sample_indices)} days (sampling={'yes' if len(sample_indices) < total_nights else 'no'})"
+            f"querying all {len(sample_indices)} days (sampling=no)"
         )
 
     client = AirbnbClient(
@@ -872,6 +1012,7 @@ def run_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
+            "LOG_RAW_PAYLOADS": False,
         }
     )
     page = client
@@ -995,7 +1136,6 @@ def run_scrape(
             # (handles listings with a 2-night minimum stay).
             _target_price_confidence: Optional[str] = None
             try:
-                from worker.scraper.parsers import parse_pdp_response
                 _checkin_dt = dt.strptime(checkin, "%Y-%m-%d")
                 _checkout_1n = (_checkin_dt + timedelta(days=1)).strftime("%Y-%m-%d")
                 _checkout_2n = (_checkin_dt + timedelta(days=2)).strftime("%Y-%m-%d")
@@ -1093,8 +1233,8 @@ def run_scrape(
                     anchor_url,
                 )
 
-            # Resolve adaptive radius — use caller-supplied value or fall back to default
-            _effective_radius = max_radius_km if max_radius_km is not None else DEFAULT_MAX_RADIUS_KM
+            # Enforce strict geo radius around the anchor listing.
+            _effective_radius = 1.0
 
             if not target.location:
                 # Try "... in City, State" pattern first
@@ -1215,15 +1355,16 @@ def run_scrape(
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
 
-            # Build a broader fixed comparable pool so later dates can still price
-            # from lower-ranked but still-relevant comps when top-ranked comps drop out.
-            fixed_pool_size = max(1, int(os.getenv("FIXED_COMP_POOL_SIZE", "60")))
-            fixed_comp_pool = _build_fixed_comp_pool(
+            # Build one deduped fixed comp set from searches every 3 days.
+            fixed_pool_size = max(1, int(os.getenv("FIXED_COMP_POOL_SIZE", "20")))
+            compset_stride_days = max(1, int(os.getenv("FIXED_COMP_POOL_STRIDE_DAYS", "4")))
+            fixed_comp_pool, pool_anchor_dates = _build_fixed_comp_pool_by_stride(
                 client,
                 target,
                 base_origin,
-                all_nights[0],
+                all_nights,
                 effective_adults,
+                stride_days=compset_stride_days,
                 max_scroll_rounds=_eff_scroll_rounds,
                 max_cards=max(_eff_max_cards, 40),
                 rate_limit_seconds=rate_limit_seconds,
@@ -1231,11 +1372,15 @@ def run_scrape(
                 pool_size=fixed_pool_size,
             )
             logger.info(
-                f"[fixed_pool] selected {len(fixed_comp_pool)} comps on anchor_date={all_nights[0].isoformat()} "
-                f"(pool_size_target={fixed_pool_size})"
+                f"[fixed_pool] stride={compset_stride_days}d anchors={len(pool_anchor_dates)} "
+                f"deduped_size={len(fixed_comp_pool)} (pool_size_target={fixed_pool_size})"
             )
+
+            query_criteria["fixedCompPoolStrideDays"] = compset_stride_days
+            query_criteria["fixedCompPoolAnchorDates"] = pool_anchor_dates
             query_criteria["fixedCompPoolSize"] = len(fixed_comp_pool)
-            query_criteria["fixedCompPoolAnchorDate"] = all_nights[0].isoformat()
+            query_criteria["fixedCompPoolStrategy"] = "availability_first_stride_union"
+            query_criteria["reportRanking"] = "price_presence_then_similarity"
 
             def _run_day_query(night_idx: int) -> DayResult:
                 date_i = all_nights[night_idx]
@@ -1380,6 +1525,7 @@ def run_scrape(
                 target_price_confidence=_target_price_confidence,
                 spec_backfill=_spec_backfill_meta,
                 spec_extraction_meta=_spec_extraction_meta,
+                fixed_comp_pool=fixed_comp_pool,
             )
             # Phase 3B: surface page-extracted coords so main.py can write them back to DB
             if target.lat is not None and target.lng is not None:
@@ -1506,6 +1652,7 @@ def run_benchmark_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
+            "LOG_RAW_PAYLOADS": False,
         }
     )
     if True:
@@ -2790,6 +2937,7 @@ def run_criteria_search(
             "CHECKOUT": checkout,
             "ADULTS": adults,
             "QUERY": search_location,
+            "LOG_RAW_PAYLOADS": False,
         }
     )
 

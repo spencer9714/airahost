@@ -26,6 +26,13 @@ class AirbnbClient:
         self.captured_search_req = None
         self.captured_pdp_req = None
         self.debug = bool(self.config.get("DEBUG", False))
+        raw_logs_cfg = self.config.get("LOG_RAW_PAYLOADS", None)
+        if raw_logs_cfg is None:
+            self.log_raw_payloads = bool(
+                str(os.getenv("AIRBNB_LOG_RAW_PAYLOADS", "0")).strip().lower() in ("1", "true", "yes", "on")
+            )
+        else:
+            self.log_raw_payloads = bool(raw_logs_cfg)
         self.cache_path = self.config.get("SESSION_CACHE_PATH", ".airbnb_session_cache.json")
         self.session_max_age_seconds = int(self.config.get("SESSION_MAX_AGE_SECONDS", 6 * 60 * 60))
 
@@ -97,9 +104,10 @@ class AirbnbClient:
             if self.debug:
                 logger.debug("Failed to write cache file %s: %s", self.cache_path, exc)
 
-    @staticmethod
-    def _log_scraped_result(kind: str, payload: Dict[str, Any]) -> None:
-        """Always log raw scraped payloads for diagnostics."""
+    def _log_scraped_result(self, kind: str, payload: Dict[str, Any]) -> None:
+        """Log raw scraped payloads only when explicitly enabled."""
+        if not self.log_raw_payloads:
+            return
         try:
             logger.info("[SCRAPED_RESULT][%s] %s", kind, json.dumps(payload, ensure_ascii=False))
         except Exception:

@@ -55,6 +55,7 @@ CONFIG = {
     "SESSION_MAX_AGE_SECONDS": 21600,
     "CAPTURE_PDP_ON_START": False,
     "DEBUG": False,
+    "LOG_RAW_PAYLOADS": False,
 }
 
 # Set up logging
@@ -213,7 +214,7 @@ def collect_houses_around_listing_for_date_range(
     date_row_batches, _ = execute_day_queries_concurrently(
         query_func=_collect_rows_for_date,
         args_list=date_args,
-        max_workers=3,
+        max_workers=5,
     )
     all_rows = []
     for rows in date_row_batches:

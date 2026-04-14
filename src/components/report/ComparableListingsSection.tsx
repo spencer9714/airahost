@@ -349,7 +349,7 @@ export function ComparableListingsSection({
     return copy;
   }, [listings, sortBy, pinnedUrls, selectedDate]);
 
-  const visible = expanded ? sorted.slice(0, 20) : sorted.slice(0, 10);
+  const visible = expanded ? sorted : sorted.slice(0, 10);
   const hasMore = sorted.length > 10 && !expanded;
   const canCollapse = expanded && sorted.length > 10;
 
@@ -487,7 +487,7 @@ export function ComparableListingsSection({
           onClick={() => setExpanded(true)}
           className="mt-4 w-full rounded-xl border border-gray-200 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50"
         >
-          Show {Math.min(sorted.length, 20) - 10} more listings
+          Show {sorted.length - 10} more listings
         </button>
       )}
       {canCollapse && (

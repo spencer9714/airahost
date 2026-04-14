@@ -73,6 +73,7 @@ DAY_MAX_CARDS = int(os.getenv("DAY_QUERY_MAX_CARDS", "30"))
 FIXED_COMP_DEEP_PAGES = int(os.getenv("FIXED_COMP_DEEP_PAGES", "3"))
 FIXED_COMP_DEEP_MIN_HITS = int(os.getenv("FIXED_COMP_DEEP_MIN_HITS", "4"))
 FIXED_COMP_MIN_PRICED = int(os.getenv("FIXED_COMP_MIN_PRICED", "4"))
+FIXED_COMP_RESCUE_TARGET = int(os.getenv("FIXED_COMP_RESCUE_TARGET", "15"))
 
 # Relaxed similarity floor — used when the strict floor yields zero comps for a day.
 # Comps in range [SIMILARITY_FLOOR_FALLBACK, SIMILARITY_FLOOR) are accepted only when
@@ -145,6 +146,27 @@ def compute_sample_dates(total_nights: int, max_queries: int = MAX_SAMPLE_QUERIE
 
 # ── Single-day query ─────────────────────────────────────────────
 
+def _derive_canonical_search_location(target: ListingSpec) -> str:
+    city = str(target.city or "").strip()
+    state = str(target.state or "").strip()
+    if city and state:
+        return f"{city}, {state}"
+    if city:
+        return city
+    return str(target.location or "").strip()
+
+
+def _get_locked_search_location(client, target: ListingSpec) -> str:
+    locked = getattr(client, "_locked_search_location", None)
+    if isinstance(locked, str) and locked.strip():
+        return locked
+    canonical = _derive_canonical_search_location(target)
+    if canonical:
+        setattr(client, "_locked_search_location", canonical)
+        logger.info(f"[day_query] locked canonical search_location={canonical!r}")
+    return canonical
+
+
 def estimate_base_price_for_date(
     client,
     target: ListingSpec,
@@ -168,10 +190,11 @@ def estimate_base_price_for_date(
     is_weekend = date_i.weekday() >= 4  # Fri=4, Sat=5
 
     try:
-        # 2-night-primary / 1-night-fallback search; coord extraction included.
+        search_location = _get_locked_search_location(client, target) or target.location
+        # 2-night-primary / 1-night-fallback area search.
         comps, query_nights_used = collect_search_comps(
             client,
-            target.location,
+            search_location,
             base_origin,
             date_i,
             adults,
@@ -181,6 +204,8 @@ def estimate_base_price_for_date(
             timeout_ms=PER_DAY_TIMEOUT_S * 1000,
             exclude_url=target.url,
             log_prefix="day_query",
+            center_lat=target.lat,
+            center_lng=target.lng,
         )
         # ── Phase 3A: Geographic distance filter ──────────────────
         # Applied before similarity scoring.  Requires both the target
@@ -203,7 +228,9 @@ def estimate_base_price_for_date(
                 if build_comp_id(c.url or "") in fixed_comp_pool
             ]
             min_hits = max(1, FIXED_COMP_DEEP_MIN_HITS)
-            deep_pages = max(1, FIXED_COMP_DEEP_PAGES)
+            deep_all_comps: List[ListingSpec] = []
+            # Keep normal search path and cap deep paging to max 3 pages.
+            deep_pages = min(3, max(1, FIXED_COMP_DEEP_PAGES))
             if len(comps) < min_hits and deep_pages > 1:
                 offsets = [i * max(1, int(max_cards)) for i in range(deep_pages)]
                 logger.info(
@@ -212,7 +239,7 @@ def estimate_base_price_for_date(
                 )
                 deep_comps, deep_query_nights = collect_search_comps(
                     client,
-                    target.location,
+                    search_location,
                     base_origin,
                     date_i,
                     adults,
@@ -223,6 +250,8 @@ def estimate_base_price_for_date(
                     exclude_url=target.url,
                     log_prefix="day_query_deep",
                     page_offsets=offsets,
+                    center_lat=target.lat,
+                    center_lng=target.lng,
                 )
                 if target.lat is not None and target.lng is not None and deep_comps:
                     try:
@@ -234,6 +263,7 @@ def estimate_base_price_for_date(
                         logger.warning(
                             f"[day_query] Deep geo filter failed (non-fatal): {_geo_exc}"
                         )
+                deep_all_comps = list(deep_comps)
                 deep_comps = [
                     c for c in deep_comps
                     if build_comp_id(c.url or "") in fixed_comp_pool
@@ -245,6 +275,29 @@ def estimate_base_price_for_date(
                         f"[day_query] {checkin_str}: deep search improved fixed-pool hits "
                         f"to {len(comps)}"
                     )
+                # Availability rescue: when fixed pool is sparse for this day, use
+                # additional priced comps from the same day deep-search results.
+                rescue_target = max(min_hits, max(1, FIXED_COMP_RESCUE_TARGET))
+                if len(comps) < rescue_target and deep_all_comps:
+                    existing_ids = {build_comp_id(c.url or "") for c in comps}
+                    rescue_candidates = [
+                        c for c in deep_all_comps
+                        if build_comp_id(c.url or "") not in existing_ids
+                        and isinstance(c.nightly_price, (int, float))
+                        and c.nightly_price > 0
+                    ]
+                    rescue_candidates.sort(
+                        key=lambda c: similarity_score(target, c),
+                        reverse=True,
+                    )
+                    needed = rescue_target - len(comps)
+                    rescued = rescue_candidates[: max(0, needed)]
+                    if rescued:
+                        comps.extend(rescued)
+                        logger.info(
+                            f"[day_query] {checkin_str}: fixed-pool rescue added "
+                            f"{len(rescued)} comps (total={len(comps)})"
+                        )
 
         comps_collected = len(comps)
 
