@@ -451,14 +451,12 @@ def _build_daily_transparent_result(
     if fixed_pool_mode and isinstance(query_criteria, dict):
         # In fixed-pool mode, report stage counters from setup (anchor discovery).
         # This preserves the expected funnel: collected > filtered > used.
-        summary_collected = max(
-            summary_collected,
-            int(query_criteria.get("fixedCompPoolCollectedTotal") or 0),
-        )
-        summary_after_filtering = max(
-            summary_after_filtering,
-            int(query_criteria.get("fixedCompPoolFilteredTotal") or 0),
-        )
+        setup_collected = int(query_criteria.get("fixedCompPoolCollectedTotal") or 0)
+        setup_filtered = int(query_criteria.get("fixedCompPoolFilteredTotal") or 0)
+        if setup_collected > 0:
+            summary_collected = setup_collected
+        if setup_filtered > 0:
+            summary_after_filtering = setup_filtered
         summary_used_for_pricing = int(
             query_criteria.get("fixedCompPoolSize")
             or query_criteria.get("fixedCompPoolGlobalLimit")
@@ -1406,6 +1404,7 @@ def run_scrape(
             anchor_indices = sorted({0, len(all_nights) // 2, len(all_nights) - 1})
             anchor_dates = [all_nights[i] for i in anchor_indices]
             fixed_comp_pool: Dict[str, Dict[str, Any]] = {}
+            fixed_pool_merged_candidates: Dict[str, Dict[str, Any]] = {}
             anchor_date_strs: List[str] = []
             fixed_pool_collected_total = 0
             fixed_pool_filtered_total = 0
@@ -1465,6 +1464,13 @@ def run_scrape(
                     )
 
                 for cid, payload in anchor_pool.items():
+                    if cid in fixed_pool_merged_candidates:
+                        fixed_pool_merged_candidates[cid] = _merge_fixed_comp_entry(
+                            fixed_pool_merged_candidates[cid], payload
+                        )
+                    else:
+                        fixed_pool_merged_candidates[cid] = dict(payload)
+
                     if cid not in fixed_comp_pool:
                         # Keep bounded top-N by similarity while gathering.
                         if len(fixed_comp_pool) < fixed_pool_global_limit:
@@ -1501,9 +1507,16 @@ def run_scrape(
             query_criteria["fixedCompPoolPages"] = fixed_pool_pages
             query_criteria["fixedCompPoolGlobalLimit"] = fixed_pool_global_limit
             query_criteria["fixedCompPoolSize"] = len(fixed_comp_pool)
-            query_criteria["fixedCompPoolCollectedTotal"] = fixed_pool_collected_total
-            query_criteria["fixedCompPoolFilteredTotal"] = fixed_pool_filtered_total
+            # Funnel counters for report:
+            # collected = per-anchor selected comps before global dedupe/cap
+            # afterFiltering = unique comps after merge/dedupe before global cap
+            # usedForPricing = final capped fixed pool size (top-N global)
+            query_criteria["fixedCompPoolCollectedTotal"] = fixed_pool_selected_total
+            query_criteria["fixedCompPoolFilteredTotal"] = len(fixed_pool_merged_candidates)
             query_criteria["fixedCompPoolSelectedTotal"] = fixed_pool_selected_total
+            # Keep raw setup counters for diagnostics.
+            query_criteria["fixedCompPoolRawCollectedTotal"] = fixed_pool_collected_total
+            query_criteria["fixedCompPoolRawFilteredTotal"] = fixed_pool_filtered_total
             query_criteria["fixedCompPoolStrategy"] = "first_mid_last"
             query_criteria["reportRanking"] = "price_presence_then_similarity"
 
