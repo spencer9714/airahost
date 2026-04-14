@@ -1402,7 +1402,7 @@ def run_scrape(
             fixed_pool_per_anchor = max(1, int(os.getenv("FIXED_POOL_PER_ANCHOR", "15")))
             # Final compset cap: keep only the best-N similarity comps globally.
             fixed_pool_global_limit = max(1, int(os.getenv("FIXED_POOL_GLOBAL_LIMIT", "20")))
-            fixed_pool_max_workers = _bounded_workers("FIXED_POOL_MAX_WORKERS", 3)
+            fixed_pool_max_workers = _bounded_workers("FIXED_POOL_MAX_WORKERS", 5)
             anchor_indices = sorted({0, len(all_nights) // 2, len(all_nights) - 1})
             anchor_dates = [all_nights[i] for i in anchor_indices]
             fixed_comp_pool: Dict[str, Dict[str, Any]] = {}
@@ -1541,7 +1541,7 @@ def run_scrape(
                 return result
 
             day_loop_start = time.time()
-            _day_query_workers = _bounded_workers("DAY_QUERY_MAX_WORKERS", 2)
+            _day_query_workers = _bounded_workers("DAY_QUERY_MAX_WORKERS", 5)
             logger.info(
                 f"[day_query] concurrent execution: workers={_day_query_workers}, "
                 f"dates={len(sample_indices)}, rate_limit_seconds={rate_limit_seconds}"
@@ -2029,7 +2029,7 @@ def run_benchmark_scrape(
                 )
 
             day_loop_start = time.time()
-            _bm_day_query_workers = _bounded_workers("BENCHMARK_DAY_QUERY_MAX_WORKERS", 2)
+            _bm_day_query_workers = _bounded_workers("BENCHMARK_DAY_QUERY_MAX_WORKERS", 5)
             logger.info(
                 f"[benchmark/day_query] concurrent execution: workers={_bm_day_query_workers}, "
                 f"dates={len(sample_indices)}, rate_limit_seconds={rate_limit_seconds}"
