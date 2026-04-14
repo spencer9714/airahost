@@ -55,6 +55,7 @@ from worker.scraper.day_query import (
 from worker.scraper.target_extractor import (
     ListingSpec,
     extract_listing_id_from_url,
+    extract_nightly_price_from_listing_page,
     extract_target_spec,
     normalize_airbnb_url,
     safe_domain_base,
@@ -443,6 +444,26 @@ def _build_daily_transparent_result(
     unique_used_for_pricing_count = sum(
         1 for row in comparable_listings if int(row.get("usedInPricingDays") or 0) > 0
     )
+    summary_collected = len(unique_collected_comp_ids)
+    summary_after_filtering = unique_filtered_comp_count
+    summary_used_for_pricing = unique_used_for_pricing_count
+
+    if fixed_pool_mode and isinstance(query_criteria, dict):
+        # In fixed-pool mode, report stage counters from setup (anchor discovery).
+        # This preserves the expected funnel: collected > filtered > used.
+        summary_collected = max(
+            summary_collected,
+            int(query_criteria.get("fixedCompPoolCollectedTotal") or 0),
+        )
+        summary_after_filtering = max(
+            summary_after_filtering,
+            int(query_criteria.get("fixedCompPoolFilteredTotal") or 0),
+        )
+        summary_used_for_pricing = int(
+            query_criteria.get("fixedCompPoolSize")
+            or query_criteria.get("fixedCompPoolGlobalLimit")
+            or summary_used_for_pricing
+        )
 
     return {
         "targetSpec": {
@@ -479,9 +500,9 @@ def _build_daily_transparent_result(
         "compsSummary": {
             # Report-level counts should represent unique comparable listings,
             # not day-summed totals (which can look inflated, e.g. 30 days * N comps).
-            "collected": len(unique_collected_comp_ids),
-            "afterFiltering": unique_filtered_comp_count,
-            "usedForPricing": unique_used_for_pricing_count,
+            "collected": summary_collected,
+            "afterFiltering": summary_after_filtering,
+            "usedForPricing": summary_used_for_pricing,
             "filterStage": "day_by_day",
             "topSimilarity": None,
             "avgSimilarity": None,
@@ -541,7 +562,8 @@ def _build_fixed_comp_pool(
     max_radius_km: Optional[float],
     pool_size: int = 20,
     page_count: int = 1,
-) -> Dict[str, Dict[str, Any]]:
+    return_meta: bool = False,
+) -> Any:
     """
     Build a fixed comparable pool once, then reuse across all sampled dates.
     """
@@ -569,7 +591,10 @@ def _build_fixed_comp_pool(
         center_lng=None,
     )
     if not comps:
-        return {}
+        empty = {}
+        if return_meta:
+            return empty, {"collected": 0, "afterFiltering": 0, "selected": 0}
+        return empty
 
     filtered_comps, _dbg = filter_similar_candidates(target, comps)
     scored = [(c, similarity_score(target, c)) for c in filtered_comps]
@@ -599,6 +624,12 @@ def _build_fixed_comp_pool(
             "lng": comp.lng,
         }
 
+    if return_meta:
+        return fixed, {
+            "collected": len(comps),
+            "afterFiltering": len(filtered_comps),
+            "selected": len(fixed),
+        }
     return fixed
 
 
@@ -1370,12 +1401,15 @@ def run_scrape(
             fixed_pool_pages = max(1, int(os.getenv("FIXED_POOL_PAGES", "6")))
             fixed_pool_per_anchor = max(1, int(os.getenv("FIXED_POOL_PER_ANCHOR", "15")))
             # Final compset cap: keep only the best-N similarity comps globally.
-            fixed_pool_global_limit = max(1, int(os.getenv("FIXED_POOL_GLOBAL_LIMIT", "15")))
+            fixed_pool_global_limit = max(1, int(os.getenv("FIXED_POOL_GLOBAL_LIMIT", "20")))
             fixed_pool_max_workers = _bounded_workers("FIXED_POOL_MAX_WORKERS", 3)
             anchor_indices = sorted({0, len(all_nights) // 2, len(all_nights) - 1})
             anchor_dates = [all_nights[i] for i in anchor_indices]
             fixed_comp_pool: Dict[str, Dict[str, Any]] = {}
             anchor_date_strs: List[str] = []
+            fixed_pool_collected_total = 0
+            fixed_pool_filtered_total = 0
+            fixed_pool_selected_total = 0
 
             logger.info(
                 f"[fixed_pool] building anchor pools concurrently: "
@@ -1385,7 +1419,7 @@ def run_scrape(
             def _build_anchor_pool(anchor_date):
                 # Use isolated client instance per anchor worker to avoid shared-session contention.
                 anchor_client = client.fork()
-                anchor_pool = _build_fixed_comp_pool(
+                anchor_pool, anchor_meta = _build_fixed_comp_pool(
                     anchor_client,
                     target,
                     base_origin,
@@ -1397,10 +1431,12 @@ def run_scrape(
                     max_radius_km=_effective_radius,
                     pool_size=fixed_pool_per_anchor,
                     page_count=fixed_pool_pages,
+                    return_meta=True,
                 )
                 return {
                     "anchor_date": anchor_date.isoformat(),
                     "anchor_pool": anchor_pool,
+                    "anchor_meta": anchor_meta,
                 }
 
             anchor_pool_results, _anchor_state = execute_day_queries_concurrently(
@@ -1414,7 +1450,11 @@ def run_scrape(
             for row in anchor_pool_results:
                 anchor_date_iso = str(row.get("anchor_date") or "")
                 anchor_pool = row.get("anchor_pool") or {}
+                anchor_meta = row.get("anchor_meta") or {}
                 anchor_date_strs.append(anchor_date_iso)
+                fixed_pool_collected_total += int(anchor_meta.get("collected") or 0)
+                fixed_pool_filtered_total += int(anchor_meta.get("afterFiltering") or 0)
+                fixed_pool_selected_total += int(anchor_meta.get("selected") or 0)
 
                 def _lowest_similarity_entry(pool: Dict[str, Dict[str, Any]]) -> Optional[Tuple[str, float]]:
                     if not pool:
@@ -1461,6 +1501,9 @@ def run_scrape(
             query_criteria["fixedCompPoolPages"] = fixed_pool_pages
             query_criteria["fixedCompPoolGlobalLimit"] = fixed_pool_global_limit
             query_criteria["fixedCompPoolSize"] = len(fixed_comp_pool)
+            query_criteria["fixedCompPoolCollectedTotal"] = fixed_pool_collected_total
+            query_criteria["fixedCompPoolFilteredTotal"] = fixed_pool_filtered_total
+            query_criteria["fixedCompPoolSelectedTotal"] = fixed_pool_selected_total
             query_criteria["fixedCompPoolStrategy"] = "first_mid_last"
             query_criteria["reportRanking"] = "price_presence_then_similarity"
 
