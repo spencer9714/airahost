@@ -10,7 +10,7 @@ for the rationale and per-night normalisation details.
 
 This module orchestrates the pipeline by delegating to:
   - target_extractor: listing page spec extraction
-  - comparable_collector: search page scrolling & card parsing
+  - comp_collection + parsers: HTTP search parsing and comp mapping
   - similarity: scoring & filtering
   - pricing_engine: price recommendation & transparent output
   - day_query: day-by-day 1-night query engine

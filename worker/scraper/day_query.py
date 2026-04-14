@@ -3,9 +3,8 @@ Day-by-day 2-night-primary query engine.
 
 WHY 2-NIGHT-PRIMARY:
 Airbnb search cards display *total trip prices* for multi-night stays.  The
-JS extractor in comparable_collector.py detects "for N nights" in the
-aria-label / DOM text and divides the total by N to produce a correct
-per-night rate, so 2-night query results are already normalised.
+HTTP parser detects "for N nights" totals and normalizes them to per-night
+rates, so 2-night query results are already normalized.
 
 Using 2-night queries as the primary strategy improves comp pool coverage:
 listings with minimum_stay=2 only appear (and show a price) in queries that
@@ -17,9 +16,9 @@ Strategy:
   2. Fall back to a 1-night query only when the 2-night search returns zero
      priced comps (rare).
 
-Per-night normalisation is handled in parse_card_to_spec: when the JS
-extractor reports price_kind="trip_total_*" and price_nights=N, the
-raw total is divided by N before the price is stored.
+Per-night normalization is handled in `comp_collection._map_search_row_to_spec`:
+when parsed context reports trip totals with `price_nights=N`, raw totals are
+divided by `N` before storing nightly price.
 
 priceByDate expansion (covering both nights of a 2-night query) is handled
 in price_estimator._build_daily_transparent_result via queryNights metadata.
