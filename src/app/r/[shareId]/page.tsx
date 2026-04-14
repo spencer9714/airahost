@@ -380,7 +380,7 @@ export default function ResultsPage({
   // Auto-Apply status for this listing (null = loading, false = not configured)
   const [autoApplyConfigured, setAutoApplyConfigured] = useState<boolean | null>(null);
   const [cohostVerified, setCohostVerified] = useState<boolean>(false);
-  const [autoApplySubmitting, setAutoApplySubmitting] = useState(false);
+  const [, setAutoApplySubmitting] = useState(false);
   const [autoApplyError, setAutoApplyError] = useState("");
   const [autoApplySuccess, setAutoApplySuccess] = useState("");
   const reportListingId = (report as (typeof report & { listingId?: string | null }))?.listingId ?? null;
@@ -604,11 +604,6 @@ export default function ResultsPage({
     } finally {
       setAutoApplySubmitting(false);
     }
-  }
-
-  async function handleAutoApplyNow() {
-    const selectedDates = (report?.resultCalendar ?? []).map((d) => d.date);
-    await queueManualApply(selectedDates);
   }
 
   async function handleHeatmapApply(selectedDates: string[]) {
@@ -935,8 +930,9 @@ export default function ResultsPage({
             );
           })()}
 
-          {/* Auto-Apply CTA — only when signed in but not configured */}
-          {isSignedIn === true && autoApplyConfigured === false && (
+          {/* Auto-Apply CTA — show when setup is missing or co-host verification is incomplete */}
+          {isSignedIn === true &&
+            (autoApplyConfigured !== true || cohostVerified !== true) && (
             <div className="overflow-hidden rounded-2xl border border-gray-200 bg-gray-50">
               <div className="flex items-start gap-4 px-5 py-4">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white shadow-sm ring-1 ring-gray-200">
@@ -946,33 +942,25 @@ export default function ResultsPage({
                   </svg>
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-foreground/80">Set up Auto-Apply to use this calendar</p>
-                  <p className="mt-0.5 text-xs leading-snug text-foreground/45">
-                    Configure Auto-Apply in your dashboard to select nights and apply pricing recommendations directly to Airbnb.
+                  <p className="text-sm font-semibold text-foreground/80">
+                    {autoApplyConfigured === true && cohostVerified !== true
+                      ? "Finish co-host verification to use this calendar"
+                      : "Set up Auto-Apply to use this calendar"}
                   </p>
-                  {cohostVerified ? (
-                    <button
-                      type="button"
-                      onClick={handleAutoApplyNow}
-                      disabled={autoApplySubmitting}
-                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80 disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {autoApplySubmitting ? "Queueing Auto-Apply..." : "Auto-Apply now"}
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M5 12h14M12 5l7 7-7 7" />
-                      </svg>
-                    </button>
-                  ) : (
-                    <a
-                      href="/dashboard"
-                      className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80"
-                    >
-                      Go to dashboard
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M5 12h14M12 5l7 7-7 7" />
-                      </svg>
-                    </a>
-                  )}
+                  <p className="mt-0.5 text-xs leading-snug text-foreground/45">
+                    {autoApplyConfigured === true && cohostVerified !== true
+                      ? "Go to your dashboard to complete co-host verification before applying nights."
+                      : "Configure Auto-Apply in your dashboard to select nights and apply pricing recommendations directly to Airbnb."}
+                  </p>
+                  <a
+                    href="/dashboard"
+                    className="mt-3 inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-foreground/80"
+                  >
+                    Go to dashboard
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M5 12h14M12 5l7 7-7 7" />
+                    </svg>
+                  </a>
                 </div>
               </div>
             </div>
