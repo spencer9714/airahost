@@ -1355,16 +1355,15 @@ def run_scrape(
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
 
-            # Build one deduped fixed comp set from searches every 3 days.
+            # Build fixed comp set once at the very start date of the report window.
             fixed_pool_size = max(1, int(os.getenv("FIXED_COMP_POOL_SIZE", "20")))
-            compset_stride_days = max(1, int(os.getenv("FIXED_COMP_POOL_STRIDE_DAYS", "4")))
-            fixed_comp_pool, pool_anchor_dates = _build_fixed_comp_pool_by_stride(
+            fixed_pool_anchor_date = all_nights[0]
+            fixed_comp_pool = _build_fixed_comp_pool(
                 client,
                 target,
                 base_origin,
-                all_nights,
+                fixed_pool_anchor_date,
                 effective_adults,
-                stride_days=compset_stride_days,
                 max_scroll_rounds=_eff_scroll_rounds,
                 max_cards=max(_eff_max_cards, 40),
                 rate_limit_seconds=rate_limit_seconds,
@@ -1372,14 +1371,13 @@ def run_scrape(
                 pool_size=fixed_pool_size,
             )
             logger.info(
-                f"[fixed_pool] stride={compset_stride_days}d anchors={len(pool_anchor_dates)} "
-                f"deduped_size={len(fixed_comp_pool)} (pool_size_target={fixed_pool_size})"
+                f"[fixed_pool] anchor_date={fixed_pool_anchor_date.isoformat()} "
+                f"size={len(fixed_comp_pool)} (pool_size_target={fixed_pool_size})"
             )
 
-            query_criteria["fixedCompPoolStrideDays"] = compset_stride_days
-            query_criteria["fixedCompPoolAnchorDates"] = pool_anchor_dates
+            query_criteria["fixedCompPoolAnchorDate"] = fixed_pool_anchor_date.isoformat()
             query_criteria["fixedCompPoolSize"] = len(fixed_comp_pool)
-            query_criteria["fixedCompPoolStrategy"] = "availability_first_stride_union"
+            query_criteria["fixedCompPoolStrategy"] = "start_day_single_anchor"
             query_criteria["reportRanking"] = "price_presence_then_similarity"
 
             def _run_day_query(night_idx: int) -> DayResult:

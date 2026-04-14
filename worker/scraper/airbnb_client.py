@@ -33,6 +33,13 @@ class AirbnbClient:
             )
         else:
             self.log_raw_payloads = bool(raw_logs_cfg)
+        disable_map_cfg = self.config.get("DISABLE_MAP_SEARCH", None)
+        if disable_map_cfg is None:
+            self.disable_map_search = bool(
+                str(os.getenv("AIRBNB_DISABLE_MAP_SEARCH", "1")).strip().lower() in ("1", "true", "yes", "on")
+            )
+        else:
+            self.disable_map_search = bool(disable_map_cfg)
         self.cache_path = self.config.get("SESSION_CACHE_PATH", ".airbnb_session_cache.json")
         self.session_max_age_seconds = int(self.config.get("SESSION_MAX_AGE_SECONDS", 6 * 60 * 60))
 
@@ -378,12 +385,14 @@ class AirbnbClient:
         """Replay captured StaysSearch request and return response JSON."""
         logger.info("Replaying captured StaysSearch request...")
         payload = copy.deepcopy(self.captured_search_req["post_data"])
+        self._apply_disable_map_search(payload)
 
         status_code, response_data = self._replay_request(self.captured_search_req, payload)
         if response_data.get("errors"):
             logger.warning("GraphQL errors in StaysSearch. Refreshing templates/session and retrying once...")
             self.refresh_session(force_capture=True)
             payload = copy.deepcopy(self.captured_search_req["post_data"])
+            self._apply_disable_map_search(payload)
             status_code, response_data = self._replay_request(self.captured_search_req, payload)
 
         self._log_scraped_result("StaysSearch", response_data)
@@ -399,6 +408,23 @@ class AirbnbClient:
                 return
         raw_params.append({"filterName": filter_name, "filterValues": filter_values})
 
+    def _apply_disable_map_search(self, payload: Dict[str, Any]) -> None:
+        """Disable map-oriented search path while keeping persisted-query shape safe."""
+        if not self.disable_map_search:
+            return
+        variables = payload.get("variables")
+        if not isinstance(variables, dict):
+            return
+
+        stays_req = variables.get("staysSearchRequest")
+        if isinstance(stays_req, dict):
+            stays_req["maxMapItems"] = 0
+
+        map_req = variables.get("staysMapSearchRequestV2")
+        if isinstance(map_req, dict):
+            map_req["metadataOnly"] = True
+            map_req["rawParams"] = []
+
     def search_listings_with_overrides(
         self,
         overrides: Dict[str, Any],
@@ -411,6 +437,7 @@ class AirbnbClient:
         """
         logger.info("Replaying captured StaysSearch with overrides...")
         payload = copy.deepcopy(self.captured_search_req["post_data"])
+        self._apply_disable_map_search(payload)
 
         for req_key in ("staysSearchRequest", "staysMapSearchRequestV2"):
             req = payload.get("variables", {}).get(req_key, {})
@@ -431,6 +458,9 @@ class AirbnbClient:
                 if key in overrides and overrides[key] is not None:
                     self._set_raw_param(raw_params, raw_name, [str(overrides[key])])
 
+            # Force-enable Airbnb AI-search mode in the replayed search payload.
+            self._set_raw_param(raw_params, "aiSearchEnabled", ["true"])
+
             if "itemsPerGrid" in overrides and req_key == "staysSearchRequest":
                 self._set_raw_param(raw_params, "itemsPerGrid", [str(overrides["itemsPerGrid"])])
             if "itemsOffset" in overrides and req_key == "staysSearchRequest":
@@ -444,6 +474,7 @@ class AirbnbClient:
             logger.warning("GraphQL errors in StaysSearch with overrides. Refreshing and retrying once...")
             self.refresh_session(force_capture=True)
             payload = copy.deepcopy(self.captured_search_req["post_data"])
+            self._apply_disable_map_search(payload)
             return self.search_listings_with_overrides(overrides, _already_retried=True)
 
         self._log_scraped_result("StaysSearchWithOverrides", response_data)
