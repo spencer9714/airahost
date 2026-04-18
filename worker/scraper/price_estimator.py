@@ -1115,7 +1115,7 @@ def run_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
-            "LOG_RAW_PAYLOADS": False,
+            "LOG_RAW_PAYLOADS": None,
         }
     )
     page = client
@@ -1866,7 +1866,7 @@ def run_benchmark_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
-            "LOG_RAW_PAYLOADS": False,
+            "LOG_RAW_PAYLOADS": None,
         }
     )
     if True:
@@ -3155,7 +3155,7 @@ def run_criteria_search(
             "CHECKOUT": checkout,
             "ADULTS": adults,
             "QUERY": search_location,
-            "LOG_RAW_PAYLOADS": False,
+            "LOG_RAW_PAYLOADS": None,
         }
     )
 
@@ -3167,58 +3167,51 @@ def run_criteria_search(
 
     _p1_max_cards = nightly_plan.max_cards if nightly_plan is not None else max_cards
     search_start = time.time()
-    strict_pass_overrides = {
+    _p1_overrides: Dict[str, Any] = {
         "checkin": checkin,
         "checkout": checkout,
         "adults": adults,
         "query": search_location,
         "itemsPerGrid": _p1_max_cards,
     }
-
-    _, search_data = client.search_listings_with_overrides(strict_pass_overrides)
+    if target_lat is not None:
+        _p1_overrides["centerLat"] = target_lat
+    if target_lng is not None:
+        _p1_overrides["centerLng"] = target_lng
+    _, search_data = client.search_listings_with_overrides(_p1_overrides)
     timings["scroll_ms"] = round((time.time() - search_start) * 1000)
     listing_ids = parse_search_response(search_data)
     listing_context = parse_search_listing_context(search_data)
+    logger.info(
+        "[criteria] Pass 1 search: listing_ids=%d context_entries=%d",
+        len(listing_ids), len(listing_context),
+    )
 
-    if not listing_ids:
-        logger.info(
-            "[criteria] pass-1 strict query returned no listings; retrying with location_search/location overrides"
-        )
-        relaxed_overrides = dict(strict_pass_overrides)
-        relaxed_overrides.update(
-            {
-                "locationSearch": search_location,
-                "location": search_location,
-            }
-        )
-        _, search_data = client.search_listings_with_overrides(relaxed_overrides)
+    # Retry without guestFavorite if initial search is empty — dense urban/tech
+    # markets (e.g. Mountain View, CA) may have very few Guest Favorites.
+    if not listing_ids and client.guest_favorite_only:
+        logger.info("[criteria] 0 results with guestFavorite=true; retrying without filter")
+        _, search_data = client.search_listings_with_overrides({**_p1_overrides, "guestFavorite": False})
         listing_ids = parse_search_response(search_data)
         listing_context = parse_search_listing_context(search_data)
-
-    candidates = []
-    for lid in listing_ids:
-        row = listing_context.get(str(lid)) or {}
-        candidates.append(
-            ListingSpec(
-                url=f"{base_origin}/rooms/{lid}",
-                title=str(row.get("title") or ""),
-                location=str(row.get("location") or search_location),
-                nightly_price=row.get("nightly_price"),
-                accommodates=row.get("accommodates"),
-                bedrooms=row.get("bedrooms"),
-                beds=row.get("beds"),
-                baths=row.get("baths"),
-                property_type=str(row.get("property_type") or ""),
-                rating=row.get("rating"),
-                reviews=row.get("reviews"),
-                lat=row.get("lat"),
-                lng=row.get("lng"),
-            )
+        logger.info(
+            "[criteria] Retry (no guestFavorite): listing_ids=%d context_entries=%d",
+            len(listing_ids), len(listing_context),
         )
-    candidates = [c for c in candidates if c.url]
-    priced_candidates = [
-        c for c in candidates if isinstance(c.nightly_price, (int, float)) and float(c.nightly_price) > 0
+    candidates = [
+        ListingSpec(
+            url=f"{base_origin}/rooms/{lid}",
+            title=str((listing_context.get(str(lid)) or {}).get("title") or ""),
+            location=search_location,
+            nightly_price=(listing_context.get(str(lid)) or {}).get("nightly_price"),
+        )
+        for lid in listing_ids
     ]
+    logger.info(
+        "[criteria] candidates before price filter=%d after=%d",
+        len(candidates), len([c for c in candidates if c.url and c.nightly_price]),
+    )
+    candidates = [c for c in candidates if c.url and c.nightly_price]
     if not candidates:
         no_results_hint = (
             f"No listings found for ZIP code '{search_location}'. Try using the city name instead."

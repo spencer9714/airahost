@@ -203,17 +203,16 @@ def _parse_dollar_amount_currency(text: str) -> tuple[Optional[float], Optional[
     if not isinstance(text, str) or not text.strip():
         return None, None
     s = text.replace("\xa0", " ").strip()
-    # Strict shape:
-    #   "$241 CAD", "US$241 CAD total", "CA$248 CAD"
-    # Must include "<space><string>" after numeric amount.
-    m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+([^\d\s]+)", s)
+    # Search for "$<amount>" with optional trailing currency token.
+    # US Airbnb omits the currency suffix ("$1,661") while CA/AU use it ("$173 CAD").
+    m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s+([^\d\s]+))?", s)
     if not m:
         return None, None
     try:
         amount = float(m.group(1).replace(",", ""))
     except Exception:
         return None, None
-    currency = str(m.group(2)).strip().upper() or None
+    currency = str(m.group(2) or "USD").strip().upper()
     return (amount if amount > 0 else None), currency
 
 
@@ -744,12 +743,14 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                     if strict_val is not None:
                         if strict_ccy and not row.get("currency"):
                             row["currency"] = strict_ccy
-                        qualifier_text = f"{qualifier} {price_text}".lower()
-                        nights_hint = max(
-                            _extract_price_nights(qualifier_text),
-                            _extract_price_nights(price_text),
-                        )
-                        if "night" in qualifier_text or "/ night" in qualifier_text or "per night" in qualifier_text:
+                        # "for N nights" → total price; derive nightly.
+                        _for_n = re.search(r"\bfor\s+(\d+)\s+nights?\b", qualifier)
+                        if _for_n:
+                            _n = int(_for_n.group(1))
+                            row["total_price"] = strict_val
+                            row["price_nights"] = _n
+                            row["nightly_price"] = round(strict_val / _n, 2)
+                        elif "night" in qualifier:
                             row["nightly_price"] = strict_val
                             row["price_nights"] = 1
                         elif "total" in qualifier_text or nights_hint > 1:
