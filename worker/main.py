@@ -1192,9 +1192,9 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     f"falling back to live scrape): {_reu_exc}"
                 )
 
-        if not _obs_reuse_succeeded and primary_benchmark_url and input_mode in ("criteria", "criteria-by-city", "criteria-by-zip"):
+        if not _obs_reuse_succeeded and primary_benchmark_url:
             # Mode C: Benchmark-first — use pinned comp as primary anchor.
-            # Only for criteria modes; URL mode already has its own listing to scrape.
+            # Runs for any input mode when a benchmark is pinned.
             logger.info(
                 f"[{report_id}] Mode C (benchmark-first): {primary_benchmark_url}"
             )
@@ -1212,6 +1212,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     max_runtime_seconds=MAX_RUNTIME_SECONDS,
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                    target_url=listing_url,
                     secondary_benchmark_urls=secondary_benchmark_urls or None,
                     user_attributes=attributes,
                     fallback_address=address,

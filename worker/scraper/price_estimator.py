@@ -1793,6 +1793,7 @@ def run_benchmark_scrape(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     nightly_plan: Optional[Any] = None,
     fallback_address: Optional[str] = None,
+    target_url: Optional[str] = None,
 ) -> tuple:
     """
     Benchmark-first pipeline.
@@ -1888,8 +1889,9 @@ def run_benchmark_scrape(
             if target_spec_override is not None:
                 target = target_spec_override
             else:
-                logger.info(f"[benchmark] Extracting spec from: {benchmark_url}")
-                target, warnings = extract_target_spec(client, benchmark_url)
+                spec_url = target_url or benchmark_url
+                logger.info(f"[benchmark] Extracting spec from: {spec_url}")
+                target, warnings = extract_target_spec(client, spec_url)
                 extraction_warnings.extend(warnings)
 
                 # Degraded-page detection + one retry (mirrors run_scrape).

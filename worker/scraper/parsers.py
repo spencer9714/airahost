@@ -664,6 +664,7 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
     listing_id -> {title, nightly_price, total_price}
     """
     context: Dict[str, Dict[str, Optional[float]]] = {}
+    nights_hint = 1
 
     # Exact extraction from staysSearch.results.searchResults[*]
     search_results = _get_nested(data, ["data", "presentation", "staysSearch", "results", "searchResults"])
@@ -753,7 +754,7 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                         elif "night" in qualifier:
                             row["nightly_price"] = strict_val
                             row["price_nights"] = 1
-                        elif "total" in qualifier_text or nights_hint > 1:
+                        elif "total" in qualifier or nights_hint > 1:
                             row["total_price"] = strict_val
                             row["price_nights"] = max(1, nights_hint)
                         else:

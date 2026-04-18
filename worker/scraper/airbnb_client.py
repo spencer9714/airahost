@@ -671,6 +671,15 @@ class AirbnbClient:
         return status_code, response_data
 
     @staticmethod
+    def _raw_param_exists(raw_params: Any, filter_name: str) -> bool:
+        if not isinstance(raw_params, list):
+            return False
+        for p in raw_params:
+            if isinstance(p, dict) and p.get("filterName") == filter_name:
+                return True
+        return False
+
+    @staticmethod
     def _set_raw_param(raw_params: Any, filter_name: str, filter_values: list[str]):
         if not isinstance(raw_params, list):
             return
@@ -681,20 +690,10 @@ class AirbnbClient:
         raw_params.append({"filterName": filter_name, "filterValues": filter_values})
 
     @staticmethod
-<<<<<<< HEAD
-    def _raw_param_exists(raw_params: Any, filter_name: str) -> bool:
-        if not isinstance(raw_params, list):
-            return False
-        for p in raw_params:
-            if isinstance(p, dict) and p.get("filterName") == filter_name:
-                return True
-        return False
-=======
     def _remove_raw_param(raw_params: Any, filter_name: str):
         if not isinstance(raw_params, list):
             return
         raw_params[:] = [p for p in raw_params if not (isinstance(p, dict) and p.get("filterName") == filter_name)]
->>>>>>> e60d59d154ea5ec5e3325151f3a2681c3b56c1c5
 
     def _apply_disable_map_search(self, payload: Dict[str, Any]) -> None:
         """Disable map-oriented search path while keeping persisted-query shape safe."""
