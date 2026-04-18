@@ -47,6 +47,14 @@ class AirbnbClient:
             )
         else:
             self.enable_ai_search = bool(enable_ai_cfg)
+        guest_fav_cfg = self.config.get("GUEST_FAVORITE_ONLY", None)
+        if guest_fav_cfg is None:
+            # Default ON for scraper comp queries unless explicitly disabled.
+            self.guest_favorite_only = bool(
+                str(os.getenv("AIRBNB_GUEST_FAVORITE_ONLY", "1")).strip().lower() in ("1", "true", "yes", "on")
+            )
+        else:
+            self.guest_favorite_only = bool(guest_fav_cfg)
         self.cache_path = self.config.get("SESSION_CACHE_PATH", ".airbnb_session_cache.json")
         self.session_max_age_seconds = int(self.config.get("SESSION_MAX_AGE_SECONDS", 6 * 60 * 60))
 
@@ -136,6 +144,7 @@ class AirbnbClient:
         clone.log_raw_payloads = self.log_raw_payloads
         clone.disable_map_search = self.disable_map_search
         clone.enable_ai_search = self.enable_ai_search
+        clone.guest_favorite_only = self.guest_favorite_only
         clone.cache_path = self.cache_path
         clone.session_max_age_seconds = self.session_max_age_seconds
         for c in self.session.cookies:
@@ -253,6 +262,8 @@ class AirbnbClient:
                     "adults": self.config.get("ADULTS", 1),
                     "search_type": "AUTOSUGGEST",
                 }
+                if self.guest_favorite_only:
+                    params["guest_favorite"] = "true"
                 search_url = f"{self.base_url}{search_path}?{urlencode(params)}"
 
                 page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
@@ -424,6 +435,12 @@ class AirbnbClient:
         logger.info("Replaying captured StaysSearch request...")
         payload = copy.deepcopy(self.captured_search_req["post_data"])
         self._apply_disable_map_search(payload)
+        if self.guest_favorite_only:
+            for req_key in ("staysSearchRequest", "staysMapSearchRequestV2"):
+                req = payload.get("variables", {}).get(req_key, {})
+                raw_params = req.get("rawParams")
+                if raw_params:
+                    self._set_raw_param(raw_params, "guestFavorite", ["true"])
 
         status_code, response_data = self._replay_request(self.captured_search_req, payload)
         if response_data.get("errors"):
@@ -471,7 +488,7 @@ class AirbnbClient:
         """
         Replay captured StaysSearch with selected rawParams overridden.
         Supported keys: checkin, checkout, adults, centerLat, centerLng, placeId,
-        query, itemsPerGrid, itemsOffset.
+        query, itemsPerGrid, itemsOffset, guestFavorite.
         """
         logger.info("Replaying captured StaysSearch with overrides...")
         payload = copy.deepcopy(self.captured_search_req["post_data"])
@@ -494,7 +511,19 @@ class AirbnbClient:
             }
             for key, raw_name in mapping.items():
                 if key in overrides and overrides[key] is not None:
-                    self._set_raw_param(raw_params, raw_name, [str(overrides[key])])
+                    val = overrides[key]
+                    if isinstance(val, bool):
+                        val = "true" if val else "false"
+                    self._set_raw_param(raw_params, raw_name, [str(val)])
+
+            # Default to Guest Favorite comps unless explicitly overridden.
+            if "guestFavorite" in overrides and overrides["guestFavorite"] is not None:
+                gfv = overrides["guestFavorite"]
+                if isinstance(gfv, bool):
+                    gfv = "true" if gfv else "false"
+                self._set_raw_param(raw_params, "guestFavorite", [str(gfv)])
+            elif self.guest_favorite_only:
+                self._set_raw_param(raw_params, "guestFavorite", ["true"])
 
             # Default to classic search behavior unless explicitly enabled.
             self._set_raw_param(
