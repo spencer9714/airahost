@@ -463,6 +463,12 @@ class AirbnbClient:
                 return
         raw_params.append({"filterName": filter_name, "filterValues": filter_values})
 
+    @staticmethod
+    def _remove_raw_param(raw_params: Any, filter_name: str):
+        if not isinstance(raw_params, list):
+            return
+        raw_params[:] = [p for p in raw_params if not (isinstance(p, dict) and p.get("filterName") == filter_name)]
+
     def _apply_disable_map_search(self, payload: Dict[str, Any]) -> None:
         """Disable map-oriented search path while keeping persisted-query shape safe."""
         if not self.disable_map_search:
@@ -499,6 +505,14 @@ class AirbnbClient:
             raw_params = req.get("rawParams")
             if not raw_params:
                 continue
+
+            # The captured template's placeId is tied to the city where the browser
+            # session was originally recorded.  Reusing it for a different city causes
+            # Airbnb to ignore the query/centerLat/centerLng overrides and return
+            # results for the wrong city (or nothing at all).  Strip it out whenever
+            # the caller has not supplied an explicit replacement placeId.
+            if "placeId" not in overrides:
+                self._remove_raw_param(raw_params, "placeId")
 
             mapping = {
                 "checkin": "checkin",

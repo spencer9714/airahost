@@ -3103,18 +3103,29 @@ def run_criteria_search(
 
     _p1_max_cards = nightly_plan.max_cards if nightly_plan is not None else max_cards
     search_start = time.time()
-    _, search_data = client.search_listings_with_overrides(
-        {
-            "checkin": checkin,
-            "checkout": checkout,
-            "adults": adults,
-            "query": search_location,
-            "itemsPerGrid": _p1_max_cards,
-        }
-    )
+    _p1_overrides: Dict[str, Any] = {
+        "checkin": checkin,
+        "checkout": checkout,
+        "adults": adults,
+        "query": search_location,
+        "itemsPerGrid": _p1_max_cards,
+    }
+    if target_lat is not None:
+        _p1_overrides["centerLat"] = target_lat
+    if target_lng is not None:
+        _p1_overrides["centerLng"] = target_lng
+    _, search_data = client.search_listings_with_overrides(_p1_overrides)
     timings["scroll_ms"] = round((time.time() - search_start) * 1000)
     listing_ids = parse_search_response(search_data)
     listing_context = parse_search_listing_context(search_data)
+
+    # Retry without guestFavorite if initial search is empty — dense urban/tech
+    # markets (e.g. Mountain View, CA) may have very few Guest Favorites.
+    if not listing_ids and client.guest_favorite_only:
+        logger.info("[criteria] 0 results with guestFavorite=true; retrying without filter")
+        _, search_data = client.search_listings_with_overrides({**_p1_overrides, "guestFavorite": False})
+        listing_ids = parse_search_response(search_data)
+        listing_context = parse_search_listing_context(search_data)
     candidates = [
         ListingSpec(
             url=f"{base_origin}/rooms/{lid}",
