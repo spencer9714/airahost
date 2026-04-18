@@ -3118,6 +3118,10 @@ def run_criteria_search(
     timings["scroll_ms"] = round((time.time() - search_start) * 1000)
     listing_ids = parse_search_response(search_data)
     listing_context = parse_search_listing_context(search_data)
+    logger.info(
+        "[criteria] Pass 1 search: listing_ids=%d context_entries=%d",
+        len(listing_ids), len(listing_context),
+    )
 
     # Retry without guestFavorite if initial search is empty — dense urban/tech
     # markets (e.g. Mountain View, CA) may have very few Guest Favorites.
@@ -3126,6 +3130,10 @@ def run_criteria_search(
         _, search_data = client.search_listings_with_overrides({**_p1_overrides, "guestFavorite": False})
         listing_ids = parse_search_response(search_data)
         listing_context = parse_search_listing_context(search_data)
+        logger.info(
+            "[criteria] Retry (no guestFavorite): listing_ids=%d context_entries=%d",
+            len(listing_ids), len(listing_context),
+        )
     candidates = [
         ListingSpec(
             url=f"{base_origin}/rooms/{lid}",
@@ -3135,6 +3143,10 @@ def run_criteria_search(
         )
         for lid in listing_ids
     ]
+    logger.info(
+        "[criteria] candidates before price filter=%d after=%d",
+        len(candidates), len([c for c in candidates if c.url and c.nightly_price]),
+    )
     candidates = [c for c in candidates if c.url and c.nightly_price]
     if not candidates:
         no_results_hint = (
