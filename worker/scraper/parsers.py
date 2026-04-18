@@ -153,18 +153,16 @@ def _parse_dollar_amount_currency(text: str) -> tuple[Optional[float], Optional[
     if not isinstance(text, str) or not text.strip():
         return None, None
     s = text.replace("\xa0", " ").strip()
-    # Search for "$<amount> <token>" anywhere in the string so variants like
-    # "CA$248 CAD" and "US$241 CAD total" still parse via "$248 CAD"/"$241 CAD".
-    m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+([^\d\s]+)", s)
+    # Search for "$<amount>" with optional trailing currency token.
+    # US Airbnb omits the currency suffix ("$1,661") while CA/AU use it ("$173 CAD").
+    m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s+([^\d\s]+))?", s)
     if not m:
         return None, None
     try:
         amount = float(m.group(1).replace(",", ""))
     except Exception:
         return None, None
-    currency = str(m.group(2) or "").strip().upper()
-    if not currency:
-        return None, None
+    currency = str(m.group(2) or "USD").strip().upper()
     return (amount if amount > 0 else None), currency
 
 
@@ -484,7 +482,14 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                     if strict_val is not None:
                         if strict_ccy and not row.get("currency"):
                             row["currency"] = strict_ccy
-                        if "night" in qualifier:
+                        # "for N nights" → total price; derive nightly.
+                        _for_n = re.search(r"\bfor\s+(\d+)\s+nights?\b", qualifier)
+                        if _for_n:
+                            _n = int(_for_n.group(1))
+                            row["total_price"] = strict_val
+                            row["price_nights"] = _n
+                            row["nightly_price"] = round(strict_val / _n, 2)
+                        elif "night" in qualifier:
                             row["nightly_price"] = strict_val
                             row["price_nights"] = 1
                         elif "total" in qualifier:
