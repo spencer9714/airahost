@@ -1051,7 +1051,7 @@ def run_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
-            "LOG_RAW_PAYLOADS": False,
+            "LOG_RAW_PAYLOADS": None,
         }
     )
     page = client
@@ -1802,7 +1802,7 @@ def run_benchmark_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
-            "LOG_RAW_PAYLOADS": False,
+            "LOG_RAW_PAYLOADS": None,
         }
     )
     if True:
@@ -3091,7 +3091,7 @@ def run_criteria_search(
             "CHECKOUT": checkout,
             "ADULTS": adults,
             "QUERY": search_location,
-            "LOG_RAW_PAYLOADS": False,
+            "LOG_RAW_PAYLOADS": None,
         }
     )
 
