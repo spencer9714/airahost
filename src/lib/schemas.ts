@@ -338,6 +338,8 @@ export interface ComparableListing {
   reviews: number | null;
   location: string | null;
   url: string | null;
+  /** True when this row is the user's pinned benchmark (primary or secondary). */
+  isPinnedBenchmark?: boolean;
   /**
    * Number of nights that the scraped Airbnb card price covered.
    * 1 = "for 1 night" or "/night" — price is already per-night, no change.
@@ -346,6 +348,11 @@ export interface ComparableListing {
    * Absent on old reports (treat as 1).
    */
   queryNights?: number;
+  /**
+   * Original trip-total amount when queryNights > 1 and nightlyPrice was
+   * normalized by division (e.g. $500 total for 2 nights -> $250 nightlyPrice).
+   */
+  queryTotalPrice?: number;
   /**
    * Number of sampled days on which this comp appeared in the pricing pool.
    * Higher = more consistently similar across dates. Present on new reports only.

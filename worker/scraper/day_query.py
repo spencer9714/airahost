@@ -1,27 +1,13 @@
 """
-Day-by-day 2-night-primary query engine.
+Day-by-day query engine.
 
-WHY 2-NIGHT-PRIMARY:
-Airbnb search cards display *total trip prices* for multi-night stays.  The
-HTTP parser detects "for N nights" totals and normalizes them to per-night
-rates, so 2-night query results are already normalized.
+Daily sampling strategy:
+  1. Query one-night inventory (checkin=day_i, checkout=day_i+1), target 10 comps.
+  2. Query two-night inventory (checkin=day_i, checkout=day_i+2), target 10 comps.
+  3. Merge pools for pricing and ranking (dedup by listing id).
 
-Using 2-night queries as the primary strategy improves comp pool coverage:
-listings with minimum_stay=2 only appear (and show a price) in queries that
-match their minimum stay.  A 1-night query silently excludes them, biasing
-the comp pool towards listings that accept single-night bookings.
-
-Strategy:
-  1. Try a 2-night query first (checkin=day_i, checkout=day_i+2).
-  2. Fall back to a 1-night query only when the 2-night search returns zero
-     priced comps (rare).
-
-Per-night normalization is handled in `comp_collection._map_search_row_to_spec`:
-when parsed context reports trip totals with `price_nights=N`, raw totals are
-divided by `N` before storing nightly price.
-
-priceByDate expansion (covering both nights of a 2-night query) is handled
-in price_estimator._build_daily_transparent_result via queryNights metadata.
+Per-night normalization is handled in `comp_collection._map_search_row_to_spec`.
+2-night totals are converted to nightly values before pricing/display.
 """
 
 from __future__ import annotations
@@ -71,6 +57,9 @@ DAY_MAX_CARDS = int(os.getenv("DAY_QUERY_MAX_CARDS", "30"))
 FIXED_COMP_DEEP_PAGES = int(os.getenv("FIXED_COMP_DEEP_PAGES", "3"))
 FIXED_COMP_DEEP_MIN_HITS = int(os.getenv("FIXED_COMP_DEEP_MIN_HITS", "4"))
 FIXED_COMP_MIN_PRICED = int(os.getenv("FIXED_COMP_MIN_PRICED", "4"))
+MAP_RADIUS_CAP_KM = 8.0  # ~5 miles
+DAY_ONE_NIGHT_COMP_TARGET = 10
+DAY_TWO_NIGHT_COMP_TARGET = 10
 
 # Relaxed similarity floor — used when the strict floor yields zero comps for a day.
 # Comps in range [SIMILARITY_FLOOR_FALLBACK, SIMILARITY_FLOOR) are accepted only when
@@ -188,21 +177,64 @@ def estimate_base_price_for_date(
 
     try:
         search_location = _get_locked_search_location(client, target) or target.location
-        # 2-night-primary / 1-night-fallback area search.
-        comps, query_nights_used = collect_search_comps(
+        query_center_lat = float(target.lat) if isinstance(target.lat, (int, float)) else None
+        query_center_lng = float(target.lng) if isinstance(target.lng, (int, float)) else None
+        map_radius_limit_km = MAP_RADIUS_CAP_KM
+        if isinstance(max_radius_km, (int, float)) and float(max_radius_km) > 0:
+            map_radius_limit_km = min(float(max_radius_km), MAP_RADIUS_CAP_KM)
+        # Daily compset: collect both 1-night and 2-night pools (10 each), then merge.
+        one_night_comps, _one_qn = collect_search_comps(
             client,
             search_location,
             base_origin,
             date_i,
             adults,
             max_scroll_rounds=max_scroll_rounds,
-            max_cards=max_cards,
+            max_cards=min(int(max_cards), DAY_ONE_NIGHT_COMP_TARGET),
             rate_limit_seconds=rate_limit_seconds,
             timeout_ms=PER_DAY_TIMEOUT_S * 1000,
             exclude_url=target.url,
-            log_prefix="day_query",
-            center_lat=None,
-            center_lng=None,
+            log_prefix="everyday_scrape_one_night",
+            center_lat=query_center_lat,
+            center_lng=query_center_lng,
+            map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
+            target_accommodates=target.accommodates,
+            prefer_one_night=True,
+        )
+        two_night_comps, _two_qn = collect_search_comps(
+            client,
+            search_location,
+            base_origin,
+            date_i,
+            adults,
+            max_scroll_rounds=max_scroll_rounds,
+            max_cards=min(int(max_cards), DAY_TWO_NIGHT_COMP_TARGET),
+            rate_limit_seconds=rate_limit_seconds,
+            timeout_ms=PER_DAY_TIMEOUT_S * 1000,
+            exclude_url=target.url,
+            log_prefix="everyday_scrape_two_night",
+            center_lat=query_center_lat,
+            center_lng=query_center_lng,
+            map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
+            target_accommodates=target.accommodates,
+            prefer_two_night=True,
+        )
+
+        comps_by_id: Dict[str, ListingSpec] = {}
+        for c in one_night_comps:
+            cid = build_comp_id(c.url or "")
+            if cid and cid not in comps_by_id:
+                comps_by_id[cid] = c
+        for c in two_night_comps:
+            cid = build_comp_id(c.url or "")
+            if cid and cid not in comps_by_id:
+                comps_by_id[cid] = c
+        comps = list(comps_by_id.values())
+        query_nights_used = 1 if one_night_comps else (2 if two_night_comps else 1)
+        mixed_two_night_already_attempted = True
+        logger.info(
+            f"[day_query] {checkin_str}: daily pools one_night={len(one_night_comps)} "
+            f"two_night={len(two_night_comps)} merged={len(comps)}"
         )
         # ── Phase 3A: Geographic distance filter ──────────────────
         # Applied before similarity scoring.  Requires both the target
@@ -217,6 +249,36 @@ def estimate_base_price_for_date(
                 c for c in comps
                 if build_comp_id(c.url or "") in fixed_comp_pool
             ]
+            if len(comps) == 0 and query_nights_used == 1 and not mixed_two_night_already_attempted:
+                logger.info(
+                    f"[day_query] {checkin_str}: fixed-pool hits=0 after 1-night search; "
+                    "forcing 2-night search retry"
+                )
+                two_night_comps, two_night_used = collect_search_comps(
+                    client,
+                    search_location,
+                    base_origin,
+                    date_i,
+                    adults,
+                    max_scroll_rounds=max_scroll_rounds,
+                    max_cards=max_cards,
+                    rate_limit_seconds=rate_limit_seconds,
+                    timeout_ms=PER_DAY_TIMEOUT_S * 1000,
+                    exclude_url=target.url,
+                    log_prefix="everyday_scrape_two_night_retry",
+                    center_lat=query_center_lat,
+                    center_lng=query_center_lng,
+                    map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
+                    target_accommodates=target.accommodates,
+                    prefer_two_night=True,
+                )
+                two_night_comps = [
+                    c for c in two_night_comps
+                    if build_comp_id(c.url or "") in fixed_comp_pool
+                ]
+                if two_night_comps:
+                    comps = two_night_comps
+                    query_nights_used = two_night_used
             min_hits = max(1, FIXED_COMP_DEEP_MIN_HITS)
             # Keep normal search path and cap deep paging to max 3 pages.
             deep_pages = min(3, max(1, FIXED_COMP_DEEP_PAGES))
@@ -237,15 +299,48 @@ def estimate_base_price_for_date(
                     rate_limit_seconds=rate_limit_seconds,
                     timeout_ms=PER_DAY_TIMEOUT_S * 1000,
                     exclude_url=target.url,
-                    log_prefix="day_query_deep",
+                    log_prefix="everyday_scrape_deep",
                     page_offsets=offsets,
-                    center_lat=None,
-                    center_lng=None,
+                    center_lat=query_center_lat,
+                    center_lng=query_center_lng,
+                    map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
+                    target_accommodates=target.accommodates,
                 )
                 deep_comps = [
                     c for c in deep_comps
                     if build_comp_id(c.url or "") in fixed_comp_pool
                 ]
+                if len(deep_comps) == 0 and deep_query_nights == 1 and not mixed_two_night_already_attempted:
+                    logger.info(
+                        f"[day_query] {checkin_str}: deep fixed-pool hits=0 after 1-night; "
+                        "forcing 2-night deep retry"
+                    )
+                    deep_two_night_comps, deep_two_night_used = collect_search_comps(
+                        client,
+                        search_location,
+                        base_origin,
+                        date_i,
+                        adults,
+                        max_scroll_rounds=max_scroll_rounds,
+                        max_cards=max_cards,
+                        rate_limit_seconds=rate_limit_seconds,
+                        timeout_ms=PER_DAY_TIMEOUT_S * 1000,
+                        exclude_url=target.url,
+                        log_prefix="everyday_scrape_deep_two_night_retry",
+                        page_offsets=offsets,
+                        center_lat=query_center_lat,
+                        center_lng=query_center_lng,
+                        map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
+                        target_accommodates=target.accommodates,
+                        prefer_two_night=True,
+                    )
+                    deep_two_night_comps = [
+                        c for c in deep_two_night_comps
+                        if build_comp_id(c.url or "") in fixed_comp_pool
+                    ]
+                    if deep_two_night_comps:
+                        deep_comps = deep_two_night_comps
+                        deep_query_nights = deep_two_night_used
                 if len(deep_comps) > len(comps):
                     comps = deep_comps
                     query_nights_used = deep_query_nights
@@ -498,15 +593,16 @@ def estimate_base_price_for_date(
         # Comps excluded by price sanity are tagged priceOutlier=True;
         # comps excluded by price band are tagged priceBandExcluded=True.
         top_comps_scored = above_floor[: min(max(3, top_k), len(above_floor))]
-        # Build date-specific deep link so manual click checks the same queried window.
-        _comp_checkout = (date_i + timedelta(days=max(1, int(query_nights_used or 1)))).isoformat()
+        # Build date-specific deep links using each comp's own queried stay length.
         top_comps = [
             (
                 lambda _p: {
                     **_p,
                     "url": (
                         f"{(c.url or '').split('?')[0]}"
-                        f"?check_in={checkin_str}&check_out={_comp_checkout}&adults={adults}"
+                        f"?check_in={checkin_str}&check_out="
+                        f"{(date_i + timedelta(days=max(1, int(c.scrape_nights or 1)))).isoformat()}"
+                        f"&adults={adults}"
                         if c.url else _p.get("url")
                     ),
                     **({"priceOutlier": True} if id(c) in excluded_ids else {}),

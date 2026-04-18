@@ -2,8 +2,8 @@
 Similarity scoring and filtering for comparable listings.
 
 Compares candidate listings against a target listing using weighted
-feature matching (property_type, bedrooms, baths, accommodates, beds,
-amenities). Supports multi-tier filtering (strict/medium/relaxed).
+feature matching (property_type, bedrooms, amenities). Supports multi-tier
+filtering (strict/medium/relaxed).
 
 Extracted from price_estimator.py for modularity.
 """
@@ -58,13 +58,13 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
     """
     Compute a 0-1 similarity score between target and candidate listings.
 
-    Weights (V1 — aligned with product priority):
+    Weights (priority order requested):
       - property_type: 3.0  (categorical; mismatch → 0.0, unknown → partial)
-      - bedrooms:      2.8  (tolerance 2)
-      - baths:         2.2  (tolerance 1.5)
-      - accommodates:  1.8  (tolerance 3)
-      - beds:          1.2  (tolerance 3)
-      - amenities:     1.0  (Jaccard overlap; auxiliary role)
+      - beds:          2.4  (tolerance 3)
+      - accommodates:  2.4  (tolerance 3)
+      - bedrooms:      1.8  (tolerance 2)
+      - baths:         1.2  (tolerance 1.5)
+      - amenities:     0.8  (Jaccard overlap; auxiliary role)
 
     Property-type mismatch scores 0.0 (not 0.15) because the hard gate in
     filter_similar_candidates already blocks clear type conflicts; this
@@ -83,10 +83,10 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
         s = max(0.0, 1.0 - diff / tol)
         score += s * w
 
-    add_num(target.bedrooms, cand.bedrooms, w=2.8, tol=2.0)
-    add_num(target.baths, cand.baths, w=2.2, tol=1.5)
-    add_num(target.accommodates, cand.accommodates, w=1.8, tol=3.0)
-    add_num(target.beds, cand.beds, w=1.2, tol=3.0)
+    add_num(target.beds, cand.beds, w=2.4, tol=3.0)
+    add_num(target.accommodates, cand.accommodates, w=2.4, tol=3.0)
+    add_num(target.bedrooms, cand.bedrooms, w=1.8, tol=2.0)
+    add_num(target.baths, cand.baths, w=1.2, tol=1.5)
 
     # Property-type: strongest categorical signal.
     # Both known → exact match scores 1.0, mismatch scores 0.0.
@@ -97,16 +97,16 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
     else:
         score += 0.35 * 3.0
 
-    # Amenity overlap: auxiliary signal (weight 1.0).
+    # Amenity overlap: auxiliary signal (weight 0.8).
     # If either side has no amenities, give partial credit rather than zero.
-    weight_sum += 1.0
+    weight_sum += 0.8
     t_set = set(target.amenities or [])
     c_set = set(cand.amenities or [])
     if t_set and c_set:
         overlap = len(t_set & c_set) / max(1, len(t_set | c_set))
-        score += overlap * 1.0
+        score += overlap * 0.8
     else:
-        score += 0.35 * 1.0
+        score += 0.35 * 0.8
 
     if weight_sum <= 0:
         return 0.0

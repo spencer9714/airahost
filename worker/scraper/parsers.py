@@ -66,6 +66,31 @@ def _decode_graphql_id(encoded: str) -> Optional[str]:
     return numeric if numeric.isdigit() else None
 
 
+def _extract_listing_id_from_search_result_item(r: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract listing id from either:
+    - demandStayListing.id (base64 global id), or
+    - SkinnyListingItem.listingId (already numeric string/int)
+    """
+    if not isinstance(r, dict):
+        return None
+
+    demand = r.get("demandStayListing")
+    if isinstance(demand, dict):
+        lid = _decode_graphql_id(demand.get("id"))
+        if lid:
+            return lid
+
+    raw_listing_id = r.get("listingId")
+    if isinstance(raw_listing_id, int):
+        return str(raw_listing_id)
+    if isinstance(raw_listing_id, str):
+        s = raw_listing_id.strip()
+        if s.isdigit():
+            return s
+    return None
+
+
 def parse_search_response(data: Dict[str, Any]) -> List[str]:
     """Extract listing IDs from staysSearch.results.searchResults[*].demandStayListing.id."""
     listing_ids: List[str] = []
@@ -74,16 +99,41 @@ def parse_search_response(data: Dict[str, Any]) -> List[str]:
         return listing_ids
 
     for r in results:
-        if not isinstance(r, dict):
-            continue
-        demand = r.get("demandStayListing")
-        if not isinstance(demand, dict):
-            continue
-        lid = _decode_graphql_id(demand.get("id"))
+        lid = _extract_listing_id_from_search_result_item(r)
         if lid and lid not in listing_ids:
             listing_ids.append(lid)
 
     return listing_ids
+
+
+def parse_search_total_listings(data: Dict[str, Any]) -> Optional[int]:
+    """
+    Extract Airbnb's reported total listings count from StaysSearch payload.
+
+    Source: data.presentation.staysSearch.results.filters.filterPanel.searchButtonText
+    Example values: "Show 309 places", "Show 1 place"
+    """
+    text = _get_nested(
+        data,
+        [
+            "data",
+            "presentation",
+            "staysSearch",
+            "results",
+            "filters",
+            "filterPanel",
+            "searchButtonText",
+        ],
+    )
+    if not isinstance(text, str) or not text.strip():
+        return None
+    m = re.search(r"(\d[\d,]*)", text)
+    if not m:
+        return None
+    try:
+        return int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
 
 
 def _parse_price_string(price_str: str) -> Optional[float]:
@@ -153,8 +203,9 @@ def _parse_dollar_amount_currency(text: str) -> tuple[Optional[float], Optional[
     if not isinstance(text, str) or not text.strip():
         return None, None
     s = text.replace("\xa0", " ").strip()
-    # Search for "$<amount> <token>" anywhere in the string so variants like
-    # "CA$248 CAD" and "US$241 CAD total" still parse via "$248 CAD"/"$241 CAD".
+    # Strict shape:
+    #   "$241 CAD", "US$241 CAD total", "CA$248 CAD"
+    # Must include "<space><string>" after numeric amount.
     m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+([^\d\s]+)", s)
     if not m:
         return None, None
@@ -162,25 +213,36 @@ def _parse_dollar_amount_currency(text: str) -> tuple[Optional[float], Optional[
         amount = float(m.group(1).replace(",", ""))
     except Exception:
         return None, None
-    currency = str(m.group(2) or "").strip().upper()
-    if not currency:
-        return None, None
+    currency = str(m.group(2)).strip().upper() or None
     return (amount if amount > 0 else None), currency
 
 
 _GUEST_RE = re.compile(r"(\d+)\s*(?:guests?|guest|people|person)\b", re.I)
 _BEDROOM_RE = re.compile(r"(\d+)\s*(?:bedrooms?|bedroom|br)\b", re.I)
 _BED_RE = re.compile(r"(\d+)\s*beds?\b", re.I)
-_BATH_RE = re.compile(r"(\d+(?:\.\d+)?)\s*baths?\b", re.I)
+_BATH_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:(?:private|shared|full|half)\s+)?baths?\b",
+    re.I,
+)
 _MIN_NIGHTS_RE = re.compile(r"(?:minimum|min\.?|at least)\s*(?:stay\s*of\s*)?(\d+)\s*nights?", re.I)
 
 
 def _normalize_property_type_from_text(text: str) -> str:
     t = str(text or "").lower()
+    # Any explicit "room in ..." style is typically not an entire place.
+    if re.search(r"\broom\s+in\b", t):
+        return "private_room"
     if "private room" in t:
         return "private_room"
     if "shared room" in t:
         return "shared_room"
+    # Search cards frequently use labels like "Home in X", "Guest suite in X",
+    # "Apartment in X" without the word "entire".
+    if re.search(
+        r"\b(home|house|apartment|apt|condo|loft|townhouse|villa|cottage|bungalow|cabin|guesthouse|guest suite|suite|tiny home|farm stay|hotel)\s+in\b",
+        t,
+    ):
+        return "entire_home"
     if re.search(r"\bentire\b", t):
         return "entire_home"
     return ""
@@ -398,6 +460,205 @@ def _extract_availability_context_from_search_result(r: Dict[str, Any]) -> Dict[
     return out
 
 
+def _normalize_property_type_from_room_type_value(value: str) -> Optional[str]:
+    t = str(value or "").strip().lower()
+    if not t:
+        return None
+    if "entire" in t or t in {"home", "house", "apartment", "apt"}:
+        return "entire_home"
+    if "private room" in t:
+        return "private_room"
+    if "shared room" in t:
+        return "shared_room"
+    return None
+
+
+def _extract_search_global_context(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract search-level fallback context from StaysSearch payload.
+
+    Priority:
+      1) results.filterState (authoritative selected values)
+      2) results.searchInput.staysSearchInput.guests.adults.searchParams.params[*]
+      3) results.filters.filterPanel...ROOMS_AND_BEDS...searchParams.params[*]
+    """
+    out: Dict[str, Any] = {
+        "location": None,
+        "accommodates": None,
+        "bedrooms": None,
+        "beds": None,
+        "baths": None,
+        "property_type": None,
+    }
+
+    results_root = _get_nested(data, ["data", "presentation", "staysSearch", "results"])
+    if not isinstance(results_root, dict):
+        return out
+
+    # Location fallback from logging metadata (commonly present for map area searches).
+    if not out["location"]:
+        rmd = _get_nested(results_root, ["loggingMetadata", "remarketingLoggingData"])
+        if isinstance(rmd, dict):
+            canonical = rmd.get("canonicalLocation")
+            if isinstance(canonical, str) and canonical.strip():
+                out["location"] = canonical.strip()
+            else:
+                city = rmd.get("city")
+                state = rmd.get("state")
+                country = rmd.get("country")
+                parts = [
+                    p.strip()
+                    for p in (city, state, country)
+                    if isinstance(p, str) and p.strip()
+                ]
+                if parts:
+                    out["location"] = ", ".join(parts)
+
+    filter_state = results_root.get("filterState")
+    if isinstance(filter_state, list):
+        for item in filter_state:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            value = item.get("value")
+            if not key:
+                continue
+
+            if key == "query" and not out["location"]:
+                if isinstance(value, dict):
+                    s = value.get("stringValue")
+                    if isinstance(s, str) and s.strip():
+                        out["location"] = s.strip()
+
+            if key == "adults" and out["accommodates"] is None:
+                if isinstance(value, dict):
+                    iv = value.get("integerValue")
+                    if isinstance(iv, (int, float)) and int(iv) > 0:
+                        out["accommodates"] = int(iv)
+
+            if key == "min_bedrooms" and out["bedrooms"] is None:
+                if isinstance(value, dict):
+                    iv = value.get("integerValue")
+                    if isinstance(iv, (int, float)) and int(iv) >= 0:
+                        out["bedrooms"] = int(iv)
+
+            if key == "min_beds" and out["beds"] is None:
+                if isinstance(value, dict):
+                    iv = value.get("integerValue")
+                    if isinstance(iv, (int, float)) and int(iv) >= 0:
+                        out["beds"] = int(iv)
+
+            if key == "min_bathrooms" and out["baths"] is None:
+                if isinstance(value, dict):
+                    iv = value.get("integerValue")
+                    if isinstance(iv, (int, float)) and float(iv) >= 0:
+                        out["baths"] = float(iv)
+
+            if key == "room_types" and not out["property_type"]:
+                if isinstance(value, dict):
+                    vals = value.get("stringValues")
+                    if isinstance(vals, list):
+                        for raw in vals:
+                            ptype = _normalize_property_type_from_room_type_value(str(raw or ""))
+                            if ptype:
+                                out["property_type"] = ptype
+                                break
+
+            if key == "refinement_paths" and not out["property_type"]:
+                if isinstance(value, dict):
+                    vals = value.get("stringValues")
+                    if isinstance(vals, list):
+                        normalized_paths = {str(v or "").strip().lower() for v in vals}
+                        if "/homes" in normalized_paths:
+                            out["property_type"] = "entire_home"
+                        elif "/rooms" in normalized_paths:
+                            out["property_type"] = "private_room"
+
+    # guests.adults.searchParams.params[*].key == "adults"
+    if out["accommodates"] is None:
+        adults_params = _get_nested(
+            data,
+            [
+                "data",
+                "presentation",
+                "staysSearch",
+                "results",
+                "searchInput",
+                "staysSearchInput",
+                "guests",
+                "adults",
+                "searchParams",
+                "params",
+            ],
+        )
+        if isinstance(adults_params, list):
+            for p in adults_params:
+                if not isinstance(p, dict):
+                    continue
+                if str(p.get("key") or "").strip() != "adults":
+                    continue
+                v = p.get("value")
+                if isinstance(v, dict):
+                    sv = v.get("stringValue")
+                    if isinstance(sv, str) and sv.strip().isdigit():
+                        out["accommodates"] = int(sv.strip())
+                        break
+
+    # Rooms and beds panel stepper params (Bedrooms/Beds/Bathrooms).
+    panel_sections = _get_nested(
+        data,
+        [
+            "data",
+            "presentation",
+            "staysSearch",
+            "results",
+            "filters",
+            "filterPanel",
+            "filterPanelSections",
+            "sections",
+        ],
+    )
+    if isinstance(panel_sections, list):
+        for sec in panel_sections:
+            if not isinstance(sec, dict):
+                continue
+            sec_id = str(sec.get("sectionId") or "").upper()
+            if sec_id != "FILTER_SECTION_CONTAINER:ROOMS_AND_BEDS_WITH_SUBCATEGORY":
+                continue
+            sec_data = sec.get("sectionData")
+            if not isinstance(sec_data, dict):
+                continue
+            items = sec_data.get("discreteFilterItems")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                params = _get_nested(item, ["searchParams", "params"])
+                if not isinstance(params, list):
+                    continue
+                for p in params:
+                    if not isinstance(p, dict):
+                        continue
+                    key = str(p.get("key") or "").strip()
+                    v = p.get("value")
+                    sv: Optional[str] = None
+                    if isinstance(v, dict):
+                        raw = v.get("stringValue")
+                        if isinstance(raw, str):
+                            sv = raw.strip()
+                    if not sv:
+                        continue
+                    if key == "min_bathrooms" and out["baths"] is None and sv.replace(".", "", 1).isdigit():
+                        out["baths"] = float(sv)
+                    elif key == "min_bedrooms" and out["bedrooms"] is None and sv.isdigit():
+                        out["bedrooms"] = int(sv)
+                    elif key == "min_beds" and out["beds"] is None and sv.isdigit():
+                        out["beds"] = int(sv)
+
+    return out
+
+
 def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """
     Build fallback metadata from StaysSearch response:
@@ -410,14 +671,13 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
     if not isinstance(search_results, list):
         return context
 
+    global_ctx = _extract_search_global_context(data)
+
     for r in search_results:
         if not isinstance(r, dict):
             continue
 
-        demand = r.get("demandStayListing")
-        if not isinstance(demand, dict):
-            continue
-        listing_id = _decode_graphql_id(demand.get("id"))
+        listing_id = _extract_listing_id_from_search_result_item(r)
         if not listing_id:
             continue
 
@@ -484,11 +744,21 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                     if strict_val is not None:
                         if strict_ccy and not row.get("currency"):
                             row["currency"] = strict_ccy
-                        if "night" in qualifier:
+                        qualifier_text = f"{qualifier} {price_text}".lower()
+                        nights_hint = max(
+                            _extract_price_nights(qualifier_text),
+                            _extract_price_nights(price_text),
+                        )
+                        if "night" in qualifier_text or "/ night" in qualifier_text or "per night" in qualifier_text:
                             row["nightly_price"] = strict_val
                             row["price_nights"] = 1
-                        elif "total" in qualifier:
+                        elif "total" in qualifier_text or nights_hint > 1:
                             row["total_price"] = strict_val
+                            row["price_nights"] = max(1, nights_hint)
+                        else:
+                            # Conservative fallback: treat unknown qualifier as nightly
+                            # so pricing isn't dropped when Airbnb omits qualifier text.
+                            row["nightly_price"] = strict_val
                             row["price_nights"] = 1
 
         # Structural/context fields used for similarity scoring.
@@ -500,6 +770,14 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                     row[key] = v
         if not row.get("amenities") and isinstance(derived.get("amenities"), list):
             row["amenities"] = derived["amenities"]
+
+        # Final fallback from search-level context (same request/filter state).
+        # Applied only for missing values in skinny listing cards.
+        for key in ("location", "accommodates", "bedrooms", "beds", "baths", "property_type"):
+            if row.get(key) in (None, "", 0):
+                v = global_ctx.get(key)
+                if v not in (None, "", 0):
+                    row[key] = v
 
     return context
 
@@ -539,37 +817,235 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
         "where you'll sleep",
     }
 
+    def _extract_overview_v2_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract structural/location context from
+        sections.sbuiData.sectionConfiguration.root.sections[*].sectionData
+        for OVERVIEW_DEFAULT_V2.
+        """
+        out: Dict[str, Any] = {
+            "location": None,
+            "city": None,
+            "state": None,
+            "country": None,
+            "accommodates": None,
+            "bedrooms": None,
+            "beds": None,
+            "baths": None,
+            "property_type": None,
+        }
+
+        root_sections = _get_nested(
+            payload,
+            [
+                "data",
+                "presentation",
+                "stayProductDetailPage",
+                "sections",
+                "sbuiData",
+                "sectionConfiguration",
+                "root",
+                "sections",
+            ],
+        )
+        if not isinstance(root_sections, list):
+            root_sections = _get_nested(
+                payload,
+                [
+                    "data",
+                    "presentation",
+                    "stayproductdetailpage",
+                    "sections",
+                    "sbuiData",
+                    "sectionConfiguration",
+                    "root",
+                    "sections",
+                ],
+            )
+        if not isinstance(root_sections, list):
+            return out
+
+        for entry in root_sections:
+            if not isinstance(entry, dict):
+                continue
+            section_id = str(entry.get("sectionId") or "").strip().upper()
+            if section_id != "OVERVIEW_DEFAULT_V2":
+                continue
+            section_data = entry.get("sectionData")
+            if not isinstance(section_data, dict):
+                continue
+
+            title = section_data.get("title")
+            if isinstance(title, str) and title.strip():
+                t = title.strip()
+                m = re.search(r"^\s*(.+?)\s+in\s+(.+?)\s*$", t, re.I)
+                if m:
+                    ptype = m.group(1).strip()
+                    loc = m.group(2).strip()
+                    if ptype:
+                        out["property_type"] = ptype
+                    if loc:
+                        out["location"] = loc
+                        parts = [p.strip() for p in loc.split(",") if p and p.strip()]
+                        if len(parts) >= 1:
+                            out["city"] = parts[0]
+                        if len(parts) >= 2:
+                            out["state"] = parts[1]
+                        if len(parts) >= 3:
+                            out["country"] = parts[-1]
+
+            overview_items = section_data.get("overviewItems")
+            if isinstance(overview_items, list):
+                for item in overview_items:
+                    text = ""
+                    if isinstance(item, dict):
+                        raw = item.get("title")
+                        if isinstance(raw, str):
+                            text = raw.strip()
+                    elif isinstance(item, str):
+                        text = item.strip()
+                    if not text:
+                        continue
+
+                    if out["accommodates"] is None:
+                        m = _GUEST_RE.search(text)
+                        if m:
+                            try:
+                                out["accommodates"] = int(m.group(1))
+                            except Exception:
+                                pass
+
+                    if out["bedrooms"] is None:
+                        m = _BEDROOM_RE.search(text)
+                        if m:
+                            try:
+                                out["bedrooms"] = int(m.group(1))
+                            except Exception:
+                                pass
+
+                    if out["beds"] is None:
+                        m = _BED_RE.search(text)
+                        if m:
+                            try:
+                                out["beds"] = int(m.group(1))
+                            except Exception:
+                                pass
+
+                    if out["baths"] is None:
+                        m = _BATH_RE.search(text)
+                        if m:
+                            try:
+                                out["baths"] = float(m.group(1))
+                            except Exception:
+                                pass
+            break
+
+        return out
+
+    def _extract_metadata_sharing_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract metadata.sharingConfig fields (location/propertyType/personCapacity).
+        Airbnb payloads can place metadata under stayProductDetailPage.sections.metadata
+        (common) with occasional shape variations.
+        """
+        out: Dict[str, Any] = {
+            "location": None,
+            "city": None,
+            "state": None,
+            "country": None,
+            "property_type": None,
+            "accommodates": None,
+        }
+
+        metadata_obj: Optional[Dict[str, Any]] = None
+
+        # Primary shape (from your payload):
+        # data.presentation.stayProductDetailPage.sections.metadata
+        sections_container = _get_nested(
+            payload,
+            ["data", "presentation", "stayProductDetailPage", "sections"],
+        )
+        if not isinstance(sections_container, dict):
+            sections_container = _get_nested(
+                payload,
+                ["data", "presentation", "stayproductdetailpage", "sections"],
+            )
+
+        if isinstance(sections_container, dict):
+            md = sections_container.get("metadata")
+            if isinstance(md, dict):
+                metadata_obj = md
+
+        # Alternate paths seen in some payload variants.
+        if not isinstance(metadata_obj, dict):
+            metadata_paths = (
+                ["data", "presentation", "stayProductDetailPage", "metadata"],
+                ["data", "presentation", "stayproductdetailpage", "metadata"],
+            )
+            for path in metadata_paths:
+                node = _get_nested(payload, path)
+                if isinstance(node, dict):
+                    metadata_obj = node
+                    break
+
+        # Last resort: find a dict explicitly marked as StayPDPMetadata under sections.
+        if not isinstance(metadata_obj, dict) and isinstance(sections_container, dict):
+            for d in _walk_dicts(sections_container):
+                if not isinstance(d, dict):
+                    continue
+                if d.get("__typename") == "StayPDPMetadata":
+                    metadata_obj = d
+                    break
+
+        if not isinstance(metadata_obj, dict):
+            return out
+
+        sharing = metadata_obj.get("sharingConfig")
+        if not isinstance(sharing, dict):
+            return out
+
+        loc = sharing.get("location")
+        if isinstance(loc, str) and loc.strip():
+            out["location"] = loc.strip()
+            parts = [p.strip() for p in out["location"].split(",") if p and p.strip()]
+            if len(parts) >= 1:
+                out["city"] = parts[0]
+            if len(parts) >= 2:
+                out["state"] = parts[1]
+            if len(parts) >= 3:
+                out["country"] = parts[-1]
+
+        ptype = sharing.get("propertyType")
+        if isinstance(ptype, str) and ptype.strip():
+            out["property_type"] = ptype.strip()
+
+        cap = sharing.get("personCapacity")
+        if isinstance(cap, (int, float)) and int(cap) > 0:
+            out["accommodates"] = int(cap)
+
+        return out
+
     # 1) Title extraction: data.presentation.stayProductDetailPage.sections.sections[*].section.listingTitle
     sections_root = _get_nested(data, ["data", "presentation", "stayProductDetailPage", "sections", "sections"])
     if not isinstance(sections_root, list):
         sections_root = _get_nested(data, ["data", "presentation", "stayproductdetailpage", "sections", "sections"])
 
-    # 0) Primary location extraction from LOCATION_DEFAULT:
-    # "Where you'll be" -> section.subtitle (e.g., "Mississauga, Ontario, Canada")
-    if isinstance(sections_root, list):
-        for entry in sections_root:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("sectionId") not in ("LOCATION_DEFAULT", "LOCATION_PDP"):
-                continue
-            sec = entry.get("section")
-            if not isinstance(sec, dict):
-                continue
-            subtitle = sec.get("subtitle")
-            if not (isinstance(subtitle, str) and subtitle.strip()):
-                continue
+    # 0) Primary structural/location extraction from metadata.sharingConfig.
+    metadata_ctx = _extract_metadata_sharing_config(data)
+    for key in ("location", "city", "state", "country", "accommodates", "property_type"):
+        value = metadata_ctx.get(key)
+        if value not in (None, "", 0):
+            result[key] = value
 
-            loc = subtitle.strip()
-            result["location"] = loc
+    # 0b) Structural/location extraction from SBUI overview section.
+    # This is where Airbnb commonly exposes "3 guests · 1 bedroom · 2 beds · 1 bath".
+    overview_ctx = _extract_overview_v2_context(data)
+    for key in ("location", "city", "state", "country", "accommodates", "bedrooms", "beds", "baths", "property_type"):
+        if result.get(key) in (None, "", 0):
+            value = overview_ctx.get(key)
+            if value not in (None, "", 0):
+                result[key] = value
 
-            parts = [p.strip() for p in loc.split(",") if p and p.strip()]
-            if len(parts) >= 1 and not result["city"]:
-                result["city"] = parts[0]
-            if len(parts) >= 2 and not result["state"]:
-                result["state"] = parts[1]
-            if len(parts) >= 3 and not result["country"]:
-                result["country"] = parts[-1]
-            break
 
     if isinstance(sections_root, list):
         for entry in sections_root:
@@ -604,120 +1080,65 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
         if result["title"]:
             break
 
-    # 2) Structural extraction (capacity/layout/property type).
+    # 2) Minimal metadata extraction (postal/country codes only).
+    # Core structural/location fields are intentionally sourced ONLY from:
+    #   - metadata.sharingConfig
+    #   - sbuiData OVERVIEW_DEFAULT_V2
     for d in _walk_dicts(data):
-        if result["accommodates"] is None:
-            for key in ("personCapacity", "maxGuestCapacity", "maxGuests", "guestCapacity"):
-                val = d.get(key)
-                if isinstance(val, (int, float)) and int(val) > 0:
-                    result["accommodates"] = int(val)
-                    break
-
-        if result["bedrooms"] is None:
-            for key in ("bedroomCount", "bedrooms", "numBedrooms"):
-                val = d.get(key)
-                if isinstance(val, (int, float)) and int(val) >= 0:
-                    result["bedrooms"] = int(val)
-                    break
-
-        if result["beds"] is None:
-            for key in ("bedCount", "beds", "numBeds"):
-                val = d.get(key)
-                if isinstance(val, (int, float)) and int(val) >= 0:
-                    result["beds"] = int(val)
-                    break
-
-        if result["baths"] is None:
-            for key in ("bathroomCount", "bathrooms", "numBathrooms"):
-                val = d.get(key)
-                if isinstance(val, (int, float)) and float(val) >= 0:
-                    result["baths"] = float(val)
-                    break
-
-        if not result["property_type"]:
-            for key in ("roomTypeCategory", "spaceType", "propertyType", "propertyTypeLabel", "typeName"):
-                val = d.get(key)
-                if isinstance(val, str) and val.strip():
-                    result["property_type"] = val.strip()
-                    break
-
-        if not result["location"]:
-            city = d.get("city") if isinstance(d.get("city"), str) else None
-            state = d.get("state") if isinstance(d.get("state"), str) else None
-            country = d.get("country") if isinstance(d.get("country"), str) else None
-            parts = [p.strip() for p in (city, state, country) if isinstance(p, str) and p.strip()]
-            if parts:
-                result["location"] = ", ".join(parts)
-
-        if not result["city"] and isinstance(d.get("city"), str) and d.get("city").strip():
-            result["city"] = d.get("city").strip()
-        if not result["state"] and isinstance(d.get("state"), str) and d.get("state").strip():
-            result["state"] = d.get("state").strip()
         if not result["postal_code"] and isinstance(d.get("postalCode"), str) and d.get("postalCode").strip():
             result["postal_code"] = d.get("postalCode").strip()
-        if not result["country"] and isinstance(d.get("country"), str) and d.get("country").strip():
-            result["country"] = d.get("country").strip()
         if not result["country_code"] and isinstance(d.get("countryCode"), str) and d.get("countryCode").strip():
             result["country_code"] = d.get("countryCode").strip().upper()
-
-        # JSON-LD style address fields occasionally appear in PDP payload trees.
-        if not result["city"] and isinstance(d.get("addressLocality"), str) and d.get("addressLocality").strip():
-            result["city"] = d.get("addressLocality").strip()
-        if not result["state"] and isinstance(d.get("addressRegion"), str) and d.get("addressRegion").strip():
-            result["state"] = d.get("addressRegion").strip()
-        if not result["country"] and isinstance(d.get("addressCountry"), str) and d.get("addressCountry").strip():
-            result["country"] = d.get("addressCountry").strip()
         if not result["postal_code"] and isinstance(d.get("postalCode"), str) and d.get("postalCode").strip():
             result["postal_code"] = d.get("postalCode").strip()
 
-    # 2b) Metadata fallback: sharingConfig.location is often present even when
-    # section-level city/state fields are absent.
-    if not result["location"]:
-        for path in (
-            ["data", "presentation", "stayProductDetailPage", "sections", "metadata", "sharingConfig", "location"],
-            ["data", "presentation", "stayproductdetailpage", "sections", "metadata", "sharingConfig", "location"],
-        ):
-            val = _get_nested(data, path)
-            if isinstance(val, str) and val.strip():
-                result["location"] = val.strip()
-                break
-        # If we only got a city-like token, populate city too.
-        if result["location"] and not result["city"] and "," not in result["location"]:
-            result["city"] = result["location"]
-
     # 3) Strict booking section parser only.
-    # Accept both BOOK_IT_FLOATING_FOOTER and BOOK_IT_SIDEBAR.
+    # Primary source: section.structuredDisplayPrice.primaryLine.price
+    # Priority: BOOK_IT_FLOATING_FOOTER -> BOOK_IT_SIDEBAR -> any section with price.
     if isinstance(sections_root, list):
         section_priority = ("BOOK_IT_FLOATING_FOOTER", "BOOK_IT_SIDEBAR")
         section_by_id: Dict[str, Dict[str, Any]] = {}
+        all_entries: List[Dict[str, Any]] = []
         for entry in sections_root:
             if not isinstance(entry, dict):
                 continue
+            all_entries.append(entry)
             sid = entry.get("sectionId")
             if isinstance(sid, str):
                 section_by_id[sid] = entry
 
-        for sid in section_priority:
-            entry = section_by_id.get(sid)
-            if not isinstance(entry, dict):
-                continue
+        def _apply_booking_price_from_entry(entry: Dict[str, Any], *, require_available: bool) -> bool:
             sec = entry.get("section")
             if not isinstance(sec, dict):
-                continue
-            if sec.get("available") is not True:
-                continue
+                return False
+            if require_available and sec.get("available") is not True:
+                return False
             sdp = sec.get("structuredDisplayPrice")
             if not isinstance(sdp, dict):
-                continue
+                return False
             primary = sdp.get("primaryLine")
             if not isinstance(primary, dict):
-                continue
-            price_text = primary.get("price")
-            if not isinstance(price_text, str):
-                continue
-            amount, ccy = _parse_dollar_amount_currency(price_text)
+                return False
+
+            # Airbnb can omit `price` for some PDP contexts while still exposing
+            # amount text in `discountedPrice` or `accessibilityLabel`.
+            price_candidates: List[str] = []
+            for key in ("price", "discountedPrice", "accessibilityLabel"):
+                v = primary.get(key)
+                if isinstance(v, str) and v.strip():
+                    price_candidates.append(v.strip())
+
+            amount: Optional[float] = None
+            ccy: Optional[str] = None
+            for candidate in price_candidates:
+                parsed_amount, parsed_ccy = _parse_dollar_amount_currency(candidate)
+                if parsed_amount is None:
+                    continue
+                amount = parsed_amount
+                ccy = parsed_ccy
+                break
             if amount is None:
-                continue
+                return False
             qualifier = str(primary.get("qualifier") or "").lower()
             if "night" in qualifier:
                 result["nightly_price"] = amount
@@ -729,7 +1150,31 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
                     result["nightly_price"] = amount
             if ccy:
                 result["currency"] = ccy
-            break
+            return True
+
+        parsed_price = False
+        for require_available in (True, False):
+            if parsed_price:
+                break
+            for sid in section_priority:
+                entry = section_by_id.get(sid)
+                if isinstance(entry, dict) and _apply_booking_price_from_entry(entry, require_available=require_available):
+                    parsed_price = True
+                    break
+
+        if not parsed_price:
+            priority_set = set(section_priority)
+            fallback_entries = [
+                e for e in all_entries
+                if not isinstance(e.get("sectionId"), str) or e.get("sectionId") not in priority_set
+            ]
+            for require_available in (True, False):
+                if parsed_price:
+                    break
+                for entry in fallback_entries:
+                    if _apply_booking_price_from_entry(entry, require_available=require_available):
+                        parsed_price = True
+                        break
 
     # 6) Amenities from common shapes (exclude "not included"/unavailable amenities).
     amenity_names = set()
@@ -814,3 +1259,109 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
         result["title"] = f"Listing {listing_id}"
 
     return result
+
+
+def parse_pdp_baths_property_type_fast(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fast-path PDP extractor for compset enrichment.
+
+    Reads only:
+      - metadata.sharingConfig.propertyType
+      - sbuiData.sectionConfiguration.root.sections[*] OVERVIEW_DEFAULT_V2.overviewItems[*].title (bath)
+
+    Returns:
+      {"baths": Optional[float], "property_type": Optional[str]}
+    """
+    out: Dict[str, Any] = {"baths": None, "property_type": None}
+
+    # 1) Property type from metadata.sharingConfig (preferred).
+    sharing = _get_nested(
+        data,
+        [
+            "data",
+            "presentation",
+            "stayProductDetailPage",
+            "sections",
+            "metadata",
+            "sharingConfig",
+        ],
+    )
+    if not isinstance(sharing, dict):
+        sharing = _get_nested(
+            data,
+            [
+                "data",
+                "presentation",
+                "stayproductdetailpage",
+                "sections",
+                "metadata",
+                "sharingConfig",
+            ],
+        )
+    if isinstance(sharing, dict):
+        ptype = sharing.get("propertyType")
+        if isinstance(ptype, str) and ptype.strip():
+            out["property_type"] = ptype.strip()
+
+    # 2) Bath count from OVERVIEW_DEFAULT_V2.overviewItems[*].title.
+    root_sections = _get_nested(
+        data,
+        [
+            "data",
+            "presentation",
+            "stayProductDetailPage",
+            "sections",
+            "sbuiData",
+            "sectionConfiguration",
+            "root",
+            "sections",
+        ],
+    )
+    if not isinstance(root_sections, list):
+        root_sections = _get_nested(
+            data,
+            [
+                "data",
+                "presentation",
+                "stayproductdetailpage",
+                "sections",
+                "sbuiData",
+                "sectionConfiguration",
+                "root",
+                "sections",
+            ],
+        )
+
+    if isinstance(root_sections, list):
+        for entry in root_sections:
+            if not isinstance(entry, dict):
+                continue
+            section_id = str(entry.get("sectionId") or "").strip().upper()
+            if section_id != "OVERVIEW_DEFAULT_V2":
+                continue
+            section_data = entry.get("sectionData")
+            if not isinstance(section_data, dict):
+                break
+            items = section_data.get("overviewItems")
+            if not isinstance(items, list):
+                break
+            for item in items:
+                text = ""
+                if isinstance(item, dict):
+                    t = item.get("title")
+                    if isinstance(t, str):
+                        text = t.strip()
+                elif isinstance(item, str):
+                    text = item.strip()
+                if not text:
+                    continue
+                m = _BATH_RE.search(text)
+                if m:
+                    try:
+                        out["baths"] = float(m.group(1))
+                    except Exception:
+                        pass
+                    break
+            break
+
+    return out

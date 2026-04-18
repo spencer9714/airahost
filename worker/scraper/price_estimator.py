@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from worker.core.concurrent_runner import execute_day_queries_concurrently
 from worker.core.comp_utils import build_comp_id
-from worker.core.geo_filter import apply_geo_filter, haversine_km, DEFAULT_MAX_RADIUS_KM
+from worker.core.geo_filter import apply_geo_filter, haversine_km
 from worker.core.similarity import (
     SIMILARITY_FLOOR,
     comp_urls_match,
@@ -36,7 +36,10 @@ from worker.core.similarity import (
     similarity_score,
 )
 from worker.scraper.airbnb_client import AirbnbClient
-from worker.scraper.parsers import parse_search_listing_context, parse_search_response
+from worker.scraper.parsers import (
+    parse_search_listing_context,
+    parse_search_response,
+)
 from worker.scraper.comp_collection import collect_search_comps
 from worker.scraper.day_query import (
     DAY_MAX_CARDS,
@@ -292,11 +295,13 @@ def _build_daily_transparent_result(
                     "amenities": list(payload.get("amenities") or []),
                     "location": payload.get("location"),
                     "url": payload.get("url"),
+                    "queryNights": int(payload.get("query_nights") or 1),
+                    "queryTotalPrice": payload.get("query_total_price"),
                 },
                 "score_sum": float(payload.get("similarity") or 0.0),
                 "count": 0,
                 "price_by_date": {},
-                "max_query_nights": 1,
+                "max_query_nights": int(payload.get("query_nights") or 1),
             }
 
     for day_result in all_day_results:
@@ -572,21 +577,67 @@ def _build_fixed_comp_pool(
     )
     _pages = max(1, int(page_count))
     _page_offsets = [i * max(1, int(max_cards)) for i in range(_pages)]
-    comps, _qn = collect_search_comps(
+    query_center_lat = float(target.lat) if isinstance(target.lat, (int, float)) else None
+    query_center_lng = float(target.lng) if isinstance(target.lng, (int, float)) else None
+    map_radius_limit_km = 8.0  # ~5 miles
+    if isinstance(max_radius_km, (int, float)) and float(max_radius_km) > 0:
+        map_radius_limit_km = min(float(max_radius_km), 8.0)
+    one_night_comps, _one_qn = collect_search_comps(
         client,
         search_location,
         base_origin,
         anchor_date,
         adults,
         max_scroll_rounds=max_scroll_rounds,
-        max_cards=max_cards,
+        max_cards=min(int(max_cards), 10),
         rate_limit_seconds=rate_limit_seconds,
         timeout_ms=15000,
         exclude_url=target.url,
-        log_prefix="fixed_pool",
+        log_prefix="fixed_pool_one_night",
         page_offsets=_page_offsets,
-        center_lat=None,
-        center_lng=None,
+        center_lat=query_center_lat,
+        center_lng=query_center_lng,
+        map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
+        target_accommodates=target.accommodates,
+        pdp_structural_enrichment=True,
+        prefer_one_night=True,
+    )
+    two_night_comps, _two_qn = collect_search_comps(
+        client,
+        search_location,
+        base_origin,
+        anchor_date,
+        adults,
+        max_scroll_rounds=max_scroll_rounds,
+        max_cards=min(int(max_cards), 10),
+        rate_limit_seconds=rate_limit_seconds,
+        timeout_ms=15000,
+        exclude_url=target.url,
+        log_prefix="fixed_pool_two_night",
+        page_offsets=_page_offsets,
+        center_lat=query_center_lat,
+        center_lng=query_center_lng,
+        map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
+        target_accommodates=target.accommodates,
+        pdp_structural_enrichment=True,
+        prefer_two_night=True,
+    )
+    comps_by_id: Dict[str, ListingSpec] = {}
+    for c in one_night_comps:
+        cid = build_comp_id(c.url or "")
+        if cid and cid not in comps_by_id:
+            comps_by_id[cid] = c
+    for c in two_night_comps:
+        cid = build_comp_id(c.url or "")
+        if cid and cid not in comps_by_id:
+            comps_by_id[cid] = c
+    comps = list(comps_by_id.values())
+    logger.info(
+        "[fixed_pool] %s: one_night=%s two_night=%s merged=%s",
+        anchor_date.isoformat() if hasattr(anchor_date, "isoformat") else str(anchor_date),
+        len(one_night_comps),
+        len(two_night_comps),
+        len(comps),
     )
     if not comps:
         empty = {}
@@ -618,6 +669,12 @@ def _build_fixed_comp_pool(
             "reviews": comp.reviews,
             "amenities": list(comp.amenities or []),
             "currency": comp.currency,
+            "query_nights": int(comp.scrape_nights or 1),
+            "query_total_price": (
+                round(float(comp.query_total_price), 2)
+                if isinstance(comp.query_total_price, (int, float)) and comp.query_total_price > 0
+                else None
+            ),
             "lat": comp.lat,
             "lng": comp.lng,
         }
@@ -638,6 +695,13 @@ def _merge_fixed_comp_entry(existing: Dict[str, Any], incoming: Dict[str, Any]) 
     for key in ("url", "title", "location", "property_type", "currency"):
         if not out.get(key) and incoming.get(key):
             out[key] = incoming.get(key)
+    # Preserve explicit multi-night provenance for frontend labeling.
+    out["query_nights"] = max(
+        int(out.get("query_nights") or 1),
+        int(incoming.get("query_nights") or 1),
+    )
+    if (not isinstance(out.get("query_total_price"), (int, float)) or float(out.get("query_total_price") or 0) <= 0) and isinstance(incoming.get("query_total_price"), (int, float)):
+        out["query_total_price"] = incoming.get("query_total_price")
     for key in ("accommodates", "bedrooms", "beds", "baths", "rating", "reviews", "lat", "lng"):
         if out.get(key) is None and incoming.get(key) is not None:
             out[key] = incoming.get(key)
@@ -1272,7 +1336,7 @@ def run_scrape(
                     anchor_url,
                 )
 
-            # Search comps by address query only (no geo/radius constraints).
+            # Map bounds disabled for now.
             _effective_radius: Optional[float] = None
 
             if not target.location:
@@ -1960,8 +2024,8 @@ def run_benchmark_scrape(
                     target.lat = target_lat
                     target.lng = target_lng
 
-            # Resolve adaptive radius
-            _effective_radius = max_radius_km if max_radius_km is not None else DEFAULT_MAX_RADIUS_KM
+            # Map bounds disabled for now.
+            _effective_radius = None
 
             # ── Benchmark-to-target similarity (computed once per job) ────────
             # Compare the benchmark listing's extracted spec against the user's
@@ -3103,28 +3167,58 @@ def run_criteria_search(
 
     _p1_max_cards = nightly_plan.max_cards if nightly_plan is not None else max_cards
     search_start = time.time()
-    _, search_data = client.search_listings_with_overrides(
-        {
-            "checkin": checkin,
-            "checkout": checkout,
-            "adults": adults,
-            "query": search_location,
-            "itemsPerGrid": _p1_max_cards,
-        }
-    )
+    strict_pass_overrides = {
+        "checkin": checkin,
+        "checkout": checkout,
+        "adults": adults,
+        "query": search_location,
+        "itemsPerGrid": _p1_max_cards,
+    }
+
+    _, search_data = client.search_listings_with_overrides(strict_pass_overrides)
     timings["scroll_ms"] = round((time.time() - search_start) * 1000)
     listing_ids = parse_search_response(search_data)
     listing_context = parse_search_listing_context(search_data)
-    candidates = [
-        ListingSpec(
-            url=f"{base_origin}/rooms/{lid}",
-            title=str((listing_context.get(str(lid)) or {}).get("title") or ""),
-            location=search_location,
-            nightly_price=(listing_context.get(str(lid)) or {}).get("nightly_price"),
+
+    if not listing_ids:
+        logger.info(
+            "[criteria] pass-1 strict query returned no listings; retrying with location_search/location overrides"
         )
-        for lid in listing_ids
+        relaxed_overrides = dict(strict_pass_overrides)
+        relaxed_overrides.update(
+            {
+                "locationSearch": search_location,
+                "location": search_location,
+            }
+        )
+        _, search_data = client.search_listings_with_overrides(relaxed_overrides)
+        listing_ids = parse_search_response(search_data)
+        listing_context = parse_search_listing_context(search_data)
+
+    candidates = []
+    for lid in listing_ids:
+        row = listing_context.get(str(lid)) or {}
+        candidates.append(
+            ListingSpec(
+                url=f"{base_origin}/rooms/{lid}",
+                title=str(row.get("title") or ""),
+                location=str(row.get("location") or search_location),
+                nightly_price=row.get("nightly_price"),
+                accommodates=row.get("accommodates"),
+                bedrooms=row.get("bedrooms"),
+                beds=row.get("beds"),
+                baths=row.get("baths"),
+                property_type=str(row.get("property_type") or ""),
+                rating=row.get("rating"),
+                reviews=row.get("reviews"),
+                lat=row.get("lat"),
+                lng=row.get("lng"),
+            )
+        )
+    candidates = [c for c in candidates if c.url]
+    priced_candidates = [
+        c for c in candidates if isinstance(c.nightly_price, (int, float)) and float(c.nightly_price) > 0
     ]
-    candidates = [c for c in candidates if c.url and c.nightly_price]
     if not candidates:
         no_results_hint = (
             f"No listings found for ZIP code '{search_location}'. Try using the city name instead."
@@ -3140,6 +3234,12 @@ def run_criteria_search(
             "comparableListings": None,
             "debug": {"source": "criteria", "error": no_results_hint, "searchMode": search_mode, "extractionWarnings": [], "timingsMs": timings},
         }
+    if not priced_candidates:
+        logger.info(
+            "[criteria] pass-1 search returned %s listing ids but no initial price fields; "
+            "continuing anchor selection using structural metadata only",
+            len(candidates),
+        )
 
     _target_raw_city = _city
     _target_raw_state = _state
@@ -3212,6 +3312,7 @@ def run_criteria_search(
     scrape_transparent["debug"]["anchor_url"] = best_match.url
     scrape_transparent["debug"]["anchor_score"] = round(best_score, 3)
     scrape_transparent["debug"]["initial_candidates"] = len(candidates)
+    scrape_transparent["debug"]["initial_priced_candidates"] = len(priced_candidates)
     # Anchor geo-selection metadata (filled by _select_anchor_candidate)
     scrape_transparent["debug"]["anchorCoordMapSize"] = len(coord_map)
     scrape_transparent["debug"]["anchorCoordsAssigned"] = n_coords_assigned
@@ -3241,9 +3342,3 @@ def _empty_transparent(source: str, error: str) -> Dict[str, Any]:
             "timingsMs": {},
         },
     }
-
-
-
-
-
-

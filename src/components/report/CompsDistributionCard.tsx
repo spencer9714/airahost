@@ -68,6 +68,9 @@ export function CompsDistributionCard({
   distribution: PriceDistribution;
 }) {
   const badge = STAGE_BADGES[comps.filterStage] ?? STAGE_BADGES.empty;
+  const initialCollected = Math.max(0, Number(comps.collected) || 0);
+  const finalUsed = Math.max(0, Number(comps.usedForPricing) || 0);
+  const filteredOut = Math.max(0, initialCollected - finalUsed);
 
   return (
     <Card>
@@ -85,17 +88,17 @@ export function CompsDistributionCard({
       {/* Funnel */}
       <div className="mb-4 flex items-center gap-2 text-sm">
         <div className="rounded-lg border border-border px-3 py-1.5 text-center">
-          <p className="text-lg font-bold">{comps.collected}</p>
+          <p className="text-lg font-bold">{initialCollected}</p>
           <p className="text-xs text-muted">Collected</p>
         </div>
         <span className="text-muted">&rarr;</span>
         <div className="rounded-lg border border-border px-3 py-1.5 text-center">
-          <p className="text-lg font-bold">{comps.afterFiltering}</p>
+          <p className="text-lg font-bold">{filteredOut}</p>
           <p className="text-xs text-muted">Filtered</p>
         </div>
         <span className="text-muted">&rarr;</span>
         <div className="rounded-lg border border-accent/30 bg-accent/5 px-3 py-1.5 text-center">
-          <p className="text-lg font-bold">{comps.usedForPricing}</p>
+          <p className="text-lg font-bold">{finalUsed}</p>
           <p className="text-xs text-muted">Used</p>
         </div>
       </div>

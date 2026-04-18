@@ -44,3 +44,5 @@ __pycache__/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.airbnb_session_cache.json

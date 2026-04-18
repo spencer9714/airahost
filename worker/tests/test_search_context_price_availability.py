@@ -1,5 +1,6 @@
 from worker.scraper.parsers import (
     _extract_availability_context_from_search_result,
+    parse_pdp_baths_property_type_fast,
     parse_pdp_response,
     parse_search_listing_context,
     _parse_price_with_prefix,
@@ -72,6 +73,40 @@ def test_parse_search_context_uses_structured_primary_price_when_available():
     assert row["is_available"] is True
     assert row["total_price"] == 173.0
     assert row["currency"] == "CAD"
+
+
+def test_parse_search_context_supports_skinny_listing_item_listing_id():
+    payload = {
+        "data": {
+            "presentation": {
+                "staysSearch": {
+                    "results": {
+                        "searchResults": [
+                            {
+                                "__typename": "SkinnyListingItem",
+                                "listingId": "958866016198543537",
+                                "title": "Home in Half Moon Bay",
+                                "subtitle": "1 bedroom · 1 private bath",
+                                "structuredDisplayPrice": {
+                                    "primaryLine": {
+                                        "accessibilityLabel": "$173 CAD total",
+                                        "price": "$173 CAD",
+                                        "qualifier": "total",
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    ctx = parse_search_listing_context(payload)
+    row = ctx["958866016198543537"]
+    assert row["total_price"] == 173.0
+    assert row["property_type"] == "entire_home"
+    assert row["baths"] == 1.0
 
 
 def test_parse_search_context_parses_currency_prefix_variant_ca_dollar():
@@ -191,6 +226,97 @@ def test_parse_search_context_uses_discounted_primary_price_when_available():
     assert row["currency"] == "CAD"
 
 
+def test_parse_search_context_falls_back_to_stayssearch_filter_state_and_search_input():
+    payload = {
+        "data": {
+            "presentation": {
+                "staysSearch": {
+                    "results": {
+                        "searchResults": [
+                            {
+                                "__typename": "SkinnyListingItem",
+                                "listingId": "958866016198543537",
+                            }
+                        ],
+                        "searchInput": {
+                            "staysSearchInput": {
+                                "guests": {
+                                    "adults": {
+                                        "searchParams": {
+                                            "params": [
+                                                {
+                                                    "key": "adults",
+                                                    "value": {"stringValue": "3"},
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "filterState": [
+                            {
+                                "key": "query",
+                                "value": {"stringValue": "Belmont, California"},
+                            },
+                            {
+                                "key": "room_types",
+                                "value": {"stringValues": ["Entire home/apt"]},
+                            },
+                            {
+                                "key": "min_bathrooms",
+                                "value": {"integerValue": 1},
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+    }
+
+    ctx = parse_search_listing_context(payload)
+    row = ctx["958866016198543537"]
+    assert row["location"] == "Belmont, California"
+    assert row["accommodates"] == 3
+    assert row["baths"] == 1.0
+    assert row["property_type"] == "entire_home"
+
+
+def test_parse_search_context_uses_logging_metadata_location_and_homes_refinement_for_type():
+    payload = {
+        "data": {
+            "presentation": {
+                "staysSearch": {
+                    "results": {
+                        "searchResults": [
+                            {
+                                "__typename": "SkinnyListingItem",
+                                "listingId": "1299373509745874199",
+                            }
+                        ],
+                        "loggingMetadata": {
+                            "remarketingLoggingData": {
+                                "canonicalLocation": "Belmont, CA"
+                            }
+                        },
+                        "filterState": [
+                            {
+                                "key": "refinement_paths",
+                                "value": {"stringValues": ["/homes"]},
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+    }
+
+    ctx = parse_search_listing_context(payload)
+    row = ctx["1299373509745874199"]
+    assert row["location"] == "Belmont, CA"
+    assert row["property_type"] == "entire_home"
+
+
 def test_parse_pdp_response_uses_book_it_floating_footer_structure_only():
     payload = {
         "data": {
@@ -259,3 +385,309 @@ def test_parse_pdp_response_uses_book_it_sidebar_when_footer_absent():
     assert out["total_price"] == 480.0
     assert out["nightly_price"] == 480.0
     assert out["currency"] == "CAD"
+
+
+def test_parse_pdp_response_falls_back_to_any_section_with_structured_display_price():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "sections": [
+                            {
+                                "sectionId": "BOOK_IT_NAV",
+                                "section": {
+                                    "structuredDisplayPrice": {
+                                        "primaryLine": {
+                                            "price": "$330 CAD",
+                                            "qualifier": "total",
+                                        }
+                                    },
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    out = parse_pdp_response(payload, "1629301846268091180", "https://www.airbnb.ca")
+    assert out["total_price"] == 330.0
+    assert out["nightly_price"] == 330.0
+    assert out["currency"] == "CAD"
+
+
+def test_parse_pdp_response_uses_primary_line_price_even_if_available_is_false():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "sections": [
+                            {
+                                "sectionId": "BOOK_IT_FLOATING_FOOTER",
+                                "section": {
+                                    "available": False,
+                                    "structuredDisplayPrice": {
+                                        "primaryLine": {
+                                            "price": "$295 CAD",
+                                            "qualifier": "total",
+                                        }
+                                    },
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    out = parse_pdp_response(payload, "1629301846268091180", "https://www.airbnb.ca")
+    assert out["total_price"] == 295.0
+    assert out["nightly_price"] == 295.0
+    assert out["currency"] == "CAD"
+
+
+def test_parse_pdp_response_falls_back_to_primary_accessibility_label():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "sections": [
+                            {
+                                "sectionId": "BOOK_IT_FLOATING_FOOTER",
+                                "section": {
+                                    "available": True,
+                                    "structuredDisplayPrice": {
+                                        "primaryLine": {
+                                            "price": None,
+                                            "discountedPrice": None,
+                                            "accessibilityLabel": "$330 CAD total",
+                                            "qualifier": "total",
+                                        }
+                                    },
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    out = parse_pdp_response(payload, "1629301846268091180", "https://www.airbnb.ca")
+    assert out["total_price"] == 330.0
+    assert out["nightly_price"] == 330.0
+    assert out["currency"] == "CAD"
+
+
+def test_parse_pdp_response_reads_overview_v2_capacity_layout_and_location():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "sbuiData": {
+                            "sectionConfiguration": {
+                                "root": {
+                                    "sections": [
+                                        {
+                                            "sectionId": "OVERVIEW_DEFAULT_V2",
+                                            "sectionData": {
+                                                "title": "Entire guest suite in Belmont, California, United States",
+                                                "overviewItems": [
+                                                    {"title": "3 guests"},
+                                                    {"title": "1 bedroom"},
+                                                    {"title": "2 beds"},
+                                                    {"title": "1 bath"},
+                                                ],
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out = parse_pdp_response(payload, "50490675", "https://www.airbnb.ca")
+    assert out["location"] == "Belmont, California, United States"
+    assert out["city"] == "Belmont"
+    assert out["state"] == "California"
+    assert out["country"] == "United States"
+    assert out["property_type"] == "Entire guest suite"
+    assert out["accommodates"] == 3
+    assert out["bedrooms"] == 1
+    assert out["beds"] == 2
+    assert out["baths"] == 1.0
+
+
+def test_parse_pdp_response_reads_location_from_metadata_sharing_config():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "metadata": {
+                            "sharingConfig": {
+                                "location": "Belmont",
+                                "propertyType": "Entire guest suite",
+                                "personCapacity": 3,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out = parse_pdp_response(payload, "50490675", "https://www.airbnb.ca")
+    assert out["location"] == "Belmont"
+    assert out["city"] == "Belmont"
+    assert out["property_type"] == "Entire guest suite"
+    assert out["accommodates"] == 3
+
+
+def test_parse_pdp_response_does_not_use_legacy_location_or_structural_fallbacks():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "sections": [
+                            {
+                                "sectionId": "LOCATION_DEFAULT",
+                                "section": {"subtitle": "Old City, Old State, Old Country"},
+                            }
+                        ],
+                        "metadata": {},
+                        "sbuiData": {"sectionConfiguration": {"root": {"sections": []}}},
+                    }
+                }
+            }
+        },
+        "personCapacity": 9,
+        "beds": 7,
+        "bathrooms": 3,
+    }
+
+    out = parse_pdp_response(payload, "999", "https://www.airbnb.ca")
+    assert out["location"] is None
+    assert out["accommodates"] is None
+    assert out["beds"] is None
+    assert out["baths"] is None
+
+
+def test_parse_pdp_response_prefers_property_type_from_metadata_sharing_config():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "metadata": {
+                            "sharingConfig": {
+                                "location": "Belmont",
+                                "propertyType": "Entire guest suite",
+                                "personCapacity": 3,
+                            }
+                        },
+                        "sbuiData": {
+                            "sectionConfiguration": {
+                                "root": {
+                                    "sections": [
+                                        {
+                                            "sectionId": "OVERVIEW_DEFAULT_V2",
+                                            "sectionData": {
+                                                "title": "Private room in Belmont, California, United States",
+                                                "overviewItems": [{"title": "1 bedroom"}],
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    out = parse_pdp_response(payload, "50490675", "https://www.airbnb.ca")
+    assert out["property_type"] == "Entire guest suite"
+
+
+def test_parse_pdp_response_reads_metadata_from_sections_container_shape():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "__typename": "StayPDPSections",
+                        "sections": [],
+                        "metadata": {
+                            "__typename": "StayPDPMetadata",
+                            "sharingConfig": {
+                                "__typename": "PdpSharingConfig",
+                                "propertyType": "Entire guest suite",
+                                "location": "Belmont",
+                                "personCapacity": 3,
+                            },
+                        },
+                        "sbuiData": {"sectionConfiguration": {"root": {"sections": []}}},
+                    }
+                }
+            }
+        }
+    }
+
+    out = parse_pdp_response(payload, "50490675", "https://www.airbnb.ca")
+    assert out["location"] == "Belmont"
+    assert out["city"] == "Belmont"
+    assert out["property_type"] == "Entire guest suite"
+    assert out["accommodates"] == 3
+
+
+def test_parse_pdp_baths_property_type_fast_reads_only_required_fields():
+    payload = {
+        "data": {
+            "presentation": {
+                "stayProductDetailPage": {
+                    "sections": {
+                        "metadata": {
+                            "sharingConfig": {
+                                "propertyType": "Entire guest suite",
+                            }
+                        },
+                        "sbuiData": {
+                            "sectionConfiguration": {
+                                "root": {
+                                    "sections": [
+                                        {
+                                            "sectionId": "OVERVIEW_DEFAULT_V2",
+                                            "sectionData": {
+                                                "overviewItems": [
+                                                    {"title": "3 guests"},
+                                                    {"title": "1 bedroom"},
+                                                    {"title": "2 beds"},
+                                                    {"title": "1 bath"},
+                                                ]
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+    out = parse_pdp_baths_property_type_fast(payload)
+    assert out["property_type"] == "Entire guest suite"
+    assert out["baths"] == 1.0

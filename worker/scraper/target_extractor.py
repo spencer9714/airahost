@@ -44,6 +44,9 @@ class ListingSpec:
     baths: Optional[float] = None
     property_type: str = ""
     nightly_price: Optional[float] = None
+    # Original trip total amount when nightly_price was derived by dividing
+    # a multi-night card total (e.g. "$500 for 2 nights" -> 250/night).
+    query_total_price: Optional[float] = None
     currency: str = "USD"
     rating: Optional[float] = None
     reviews: Optional[int] = None
@@ -787,6 +790,14 @@ _TRIP_TOTAL_RE = re.compile(
     re.I,
 )
 
+# Matches booking-widget trip total like:
+#   "$330 CAD total" / "$330 total"
+# Currency token is intentionally permissive (any 3-letter code) and optional.
+_TOTAL_WIDGET_RE = re.compile(
+    r"\$\s*(\d{1,6}(?:,\d{3})?)(?:\s+[A-Z]{3})?\s+total\b",
+    re.I,
+)
+
 # JavaScript run inside the browser to classify price candidates in the booking widget.
 # For each price element found near a "/night" label it records:
 #   value       — numeric price
@@ -1076,6 +1087,14 @@ def extract_nightly_price_from_listing_page(
     Extraction layers run in confidence order and stop at first success.
     One retry is attempted on navigation failure before giving up.
     """
+    try:
+        stay_nights = max(
+            1,
+            (dt.strptime(checkout, "%Y-%m-%d") - dt.strptime(checkin, "%Y-%m-%d")).days,
+        )
+    except Exception:
+        stay_nights = 1
+
     if hasattr(page, "get_listing_details"):
         listing_id = extract_listing_id_from_url(listing_url)
         if not listing_id:
@@ -1093,8 +1112,7 @@ def extract_nightly_price_from_listing_page(
                 return float(nightly), "high"
             total = parsed.get("total_price")
             if isinstance(total, (int, float)) and total > 0:
-                nights = max(1, (dt.strptime(checkout, "%Y-%m-%d") - dt.strptime(checkin, "%Y-%m-%d")).days)
-                return round(float(total) / nights, 2), "medium"
+                return round(float(total) / stay_nights, 2), "medium"
         except Exception:
             return None, "failed"
         return None, "failed"
@@ -1103,7 +1121,7 @@ def extract_nightly_price_from_listing_page(
     # Reconstruct with only check_in / check_out — drop any pre-existing params.
     url_with_dates = (
         f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        f"?check_in={checkin}&check_out={checkout}&adults=2"
+        f"?check_in={checkin}&check_out={checkout}"
     )
 
     # Navigate with one retry on transient failure
@@ -1280,6 +1298,24 @@ def extract_nightly_price_from_listing_page(
                         f"(last of {len(text_matches)} matches)"
                     )
                     return price, "medium"
+                total_matches: List[Tuple[int, float]] = []
+                for m in _TOTAL_WIDGET_RE.finditer(widget_text):
+                    try:
+                        total_price = float(m.group(1).replace(",", ""))
+                    except Exception:
+                        continue
+                    if 10 <= total_price <= 200000:
+                        total_matches.append((m.start(), total_price))
+                if total_matches:
+                    total_matches.sort(key=lambda x: x[0])
+                    total_price = total_matches[-1][1]
+                    nightly = round(total_price / stay_nights, 2)
+                    if 10 <= nightly <= 10000:
+                        logger.info(
+                            f"[price_extract] L2 widget-total price=${nightly} "
+                            f"(total={total_price}, nights={stay_nights}, matches={len(total_matches)})"
+                        )
+                        return nightly, "medium"
                 else:
                     logger.warning(
                         f"[price_extract] L2 widget found, labels={labels_found or '(none)'}, "

@@ -83,6 +83,7 @@ def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
     # - Enforce [10, 10000] guard
     # - If nightly_price is provided directly, accept as-is (legacy callers)
     nightly_price = card.get("nightly_price")
+    query_total_price = None
     if nightly_price is None:
         price_value = card.get("price_value")
         pv = _to_float(price_value)
@@ -93,6 +94,7 @@ def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
                 nights = int(card.get("price_nights") or scrape_nights or 1)
                 nights = max(1, nights)
                 nightly_price = round(pv / nights, 2)
+                query_total_price = pv
             else:
                 nightly_price = pv
         else:
@@ -108,6 +110,7 @@ def parse_card_to_spec(card: Dict[str, Any]) -> ListingSpec:
         baths=baths,
         property_type=str(card.get("property_type") or ""),
         nightly_price=nightly_price,
+        query_total_price=query_total_price,
         rating=card.get("rating"),
         reviews=card.get("reviews"),
         amenities=list(card.get("amenities") or []),

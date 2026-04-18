@@ -26,6 +26,7 @@ import type {
   PriceDistribution,
   DateMode,
   ComparableListing,
+  BenchmarkInfo,
 } from "@/lib/schemas";
 
 // latestReport is always status="ready" when non-null — the API now guarantees this.
@@ -53,6 +54,7 @@ type LatestReport = {
     estimatedMonthlyRevenue?: number;
     recommendedPrice?: RecommendedPrice;
     compsSummary?: CompsSummary;
+    benchmarkInfo?: BenchmarkInfo | null;
     comparableListings?: ComparableListing[] | null;
     priceDistribution?: PriceDistribution;
     // Live price intelligence (added by worker)
@@ -467,11 +469,24 @@ export default function DashboardPage() {
     return Array.isArray(raw) && raw.length > 0 ? (raw as ComparableListing[]) : null;
   }, [activeReport]);
 
+  const activeBenchmarkInfo = useMemo((): BenchmarkInfo | null => {
+    return (activeReport?.result_summary?.benchmarkInfo as BenchmarkInfo | null | undefined) ?? null;
+  }, [activeReport]);
+
   const activePinnedUrls = useMemo(() => {
     const comps = activeListing?.input_attributes.preferredComps;
-    if (!Array.isArray(comps)) return [];
-    return comps.filter((c) => c.enabled !== false && c.listingUrl).map((c) => c.listingUrl!);
-  }, [activeListing]);
+    const urls = Array.isArray(comps)
+      ? comps.filter((c) => c.enabled !== false && c.listingUrl).map((c) => c.listingUrl!)
+      : [];
+    const bmUrl = activeBenchmarkInfo?.benchmarkUrl;
+    if (typeof bmUrl === "string" && bmUrl.trim()) {
+      const exists = urls.some(
+        (u) => u.split("?")[0].toLowerCase() === bmUrl.split("?")[0].toLowerCase()
+      );
+      if (!exists) urls.unshift(bmUrl);
+    }
+    return urls;
+  }, [activeListing, activeBenchmarkInfo]);
 
   // Snap the focused date to the nearest date that has comp price data.
   // Most reports only sample a few dates across 30 days, so this is essential.
@@ -824,6 +839,7 @@ export default function DashboardPage() {
                       <ComparableListingsSection
                         listings={activeComparableListings}
                         comps={activeSummary?.compsSummary ?? null}
+                        benchmarkInfo={activeBenchmarkInfo}
                         embedded={true}
                         pinnedUrls={activePinnedUrls}
                         selectedDate={snappedFocusedDate}

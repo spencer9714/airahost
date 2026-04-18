@@ -167,6 +167,12 @@ def to_comparable_payload(
     # priceByDate expansion in _build_daily_transparent_result cover both nights.
     if spec.scrape_nights > 1:
         payload["queryNights"] = spec.scrape_nights
+        total = spec.query_total_price
+        if not isinstance(total, (int, float)) or total <= 0:
+            if isinstance(spec.nightly_price, (int, float)) and spec.nightly_price > 0:
+                total = float(spec.nightly_price) * float(spec.scrape_nights)
+        if isinstance(total, (int, float)) and total > 0:
+            payload["queryTotalPrice"] = round(float(total), 2)
 
     if include_geo:
         if spec.distance_to_target_km is not None:

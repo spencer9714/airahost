@@ -302,6 +302,9 @@ def estimate_benchmark_price_for_date(
             max_cards=max_cards,
             rate_limit_seconds=rate_limit_seconds,
             log_prefix="benchmark",
+            target_accommodates=target.accommodates,
+            target_beds=target.beds,
+            target_baths=target.baths,
         )
 
         # ── Geographic distance filter ────────────────────────────────────
@@ -394,15 +397,29 @@ def estimate_benchmark_price_for_date(
         # market_median, market_adj_pct, or final_price.
         secondary_prices: Dict[str, Optional[float]] = {}
         for sec_url in (secondary_benchmark_urls or []):
-            sec_match = next(
-                (c for c in comps if c.url and comp_urls_match(c.url, sec_url)),
-                None,
-            )
-            secondary_prices[sec_url] = (
-                sec_match.nightly_price
-                if sec_match and sec_match.nightly_price and sec_match.nightly_price > 0
-                else None
-            )
+            sec_price: Optional[float] = None
+            try:
+                time.sleep(min(rate_limit_seconds * 0.35, 0.35))
+                sec_price, _sec_confidence = _extract_benchmark_price_with_min_stay_fallback(
+                    client, sec_url, checkin_str, _bm_checkout_str
+                )
+                if isinstance(sec_price, (int, float)) and sec_price > 0:
+                    sec_price = round(float(sec_price), 2)
+            except Exception as _sec_exc:
+                logger.debug(
+                    f"[benchmark] {checkin_str}: secondary PDP fetch failed for {sec_url}: {_sec_exc}"
+                )
+                sec_price = None
+
+            if sec_price is None:
+                sec_match = next(
+                    (c for c in comps if c.url and comp_urls_match(c.url, sec_url)),
+                    None,
+                )
+                if sec_match and sec_match.nightly_price and sec_match.nightly_price > 0:
+                    sec_price = round(float(sec_match.nightly_price), 2)
+
+            secondary_prices[sec_url] = sec_price
 
         # ── Stage 2: market comps (exclude primary benchmark only) ────────
         # Secondary comps deliberately remain in market_comps so they

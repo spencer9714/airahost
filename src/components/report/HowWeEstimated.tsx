@@ -115,6 +115,8 @@ function BenchmarkBlock({ info }: { info: BenchmarkInfo }) {
 
   // ── Signal 1: fetch confidence ──────────────────────────────────
   const totalDays = info.fetchStats?.totalDays ?? 0;
+  const failedDays = info.fetchStats?.failed ?? 0;
+  const primaryDaysFound = Math.max(0, totalDays - failedDays);
   const highDays  = info.fetchStats?.highConfidenceDays ?? 0;
   const lowDays   = info.fetchStats?.lowConfidenceDays  ?? 0;
   const highPct = totalDays > 0 ? highDays / totalDays : 0;
@@ -256,10 +258,8 @@ function BenchmarkBlock({ info }: { info: BenchmarkInfo }) {
         <BenchmarkListingRow
           url={info.benchmarkUrl}
           avgPrice={info.avgBenchmarkPrice}
-          daysFound={
-            (info.fetchStats?.searchHits ?? 0) + (info.fetchStats?.directFetches ?? 0)
-          }
-          totalDays={info.fetchStats?.totalDays ?? 0}
+          daysFound={primaryDaysFound}
+          totalDays={totalDays}
           label="Primary"
           isPrimary
         />
@@ -375,10 +375,17 @@ export function HowWeEstimated({
   // Pinned comp URLs (from report input) to mark in comparable list
   const pinnedUrls: string[] = (() => {
     const compsArr = report.inputAttributes?.preferredComps;
-    if (!Array.isArray(compsArr)) return [];
-    return compsArr
+    const base = Array.isArray(compsArr)
+      ? compsArr
       .filter((c) => c.enabled !== false && c.listingUrl)
-      .map((c) => c.listingUrl);
+      .map((c) => c.listingUrl)
+      : [];
+    const bmUrl = benchmarkInfo?.benchmarkUrl;
+    if (typeof bmUrl === "string" && bmUrl.trim()) {
+      const exists = base.some((u) => u.split("?")[0].toLowerCase() === bmUrl.split("?")[0].toLowerCase());
+      if (!exists) base.unshift(bmUrl);
+    }
+    return base;
   })();
 
   const usedForPricing = comps?.usedForPricing ?? 0;
@@ -459,6 +466,7 @@ export function HowWeEstimated({
               <ComparableListingsSection
                 listings={comparableListings ?? null}
                 comps={comps ?? null}
+                benchmarkInfo={benchmarkInfo}
                 pinnedUrls={pinnedUrls}
                 selectedDate={selectedDate ?? null}
                 clickedDate={clickedDate ?? null}

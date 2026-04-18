@@ -420,6 +420,86 @@ export default function ResultsPage({
     return best;
   }, [clickedDate, report]);
 
+  const contextualBenchmarkInfo = useMemo((): BenchmarkInfo | null => {
+    return (report?.benchmarkInfo ?? report?.resultSummary?.benchmarkInfo ?? null) as BenchmarkInfo | null;
+  }, [report]);
+
+  const contextualPinnedUrls = useMemo((): string[] => {
+    if (!report) return [];
+    const comps = report.inputAttributes?.preferredComps;
+    const base = Array.isArray(comps)
+      ? comps
+        .filter((c) => c.enabled !== false && c.listingUrl)
+        .map((c) => c.listingUrl!)
+      : [];
+    const bmUrl = contextualBenchmarkInfo?.benchmarkUrl;
+    if (typeof bmUrl === "string" && bmUrl.trim()) {
+      const exists = base.some(
+        (u) => u.split("?")[0].toLowerCase() === bmUrl.split("?")[0].toLowerCase()
+      );
+      if (!exists) base.unshift(bmUrl);
+    }
+    return base;
+  }, [report, contextualBenchmarkInfo]);
+
+  const contextualComparableListings = useMemo((): ComparableListing[] | null => {
+    if (!report) return null;
+    const rawListings = (
+      report.comparableListings ?? report.resultSummary?.comparableListings ?? []
+    ) as ComparableListing[];
+    const bmUrl = contextualBenchmarkInfo?.benchmarkUrl;
+    if (!bmUrl) return rawListings;
+
+    const normalize = (url: string) => url.split("?")[0].toLowerCase();
+    const roomIdFromUrl = (url: string | null | undefined): string | null => {
+      if (!url) return null;
+      const m = url.match(/\/rooms\/(\d+)/);
+      return m ? m[1] : null;
+    };
+    const bmNorm = normalize(bmUrl);
+    const bmRoomId = roomIdFromUrl(bmUrl);
+
+    const flagged = rawListings.map((listing) => {
+      const sameUrl = !!(listing.url && normalize(listing.url) === bmNorm);
+      const sameRoomId = !!(
+        bmRoomId &&
+        listing.url &&
+        roomIdFromUrl(listing.url) === bmRoomId
+      );
+      const alreadyPinned =
+        (listing as ComparableListing & { isPinnedBenchmark?: boolean }).isPinnedBenchmark === true;
+      if (sameUrl || sameRoomId || alreadyPinned) {
+        return { ...listing, isPinnedBenchmark: true };
+      }
+      return listing;
+    });
+
+    const existingIdx = flagged.findIndex(
+      (listing) =>
+        (bmRoomId != null &&
+          roomIdFromUrl(listing.url ?? null) === bmRoomId) ||
+        (listing.url && normalize(listing.url) === bmNorm) ||
+        (listing as ComparableListing & { isPinnedBenchmark?: boolean }).isPinnedBenchmark === true
+    );
+    if (existingIdx >= 0) {
+      const existing = flagged[existingIdx];
+      const rest = flagged.filter((_, idx) => idx !== existingIdx);
+      const hydrated: ComparableListing = {
+        ...existing,
+        isPinnedBenchmark: true,
+        url: existing.url ?? bmUrl,
+        title: existing.title || "",
+        nightlyPrice:
+          typeof existing.nightlyPrice === "number" && existing.nightlyPrice > 0
+            ? existing.nightlyPrice
+            : (contextualBenchmarkInfo?.avgBenchmarkPrice ?? 0),
+      };
+      return [hydrated, ...rest];
+    }
+
+    return flagged;
+  }, [report, contextualBenchmarkInfo]);
+
   const fetchReport = useCallback(async () => {
     try {
       const res = await fetch(`/api/r/${shareId}`);
@@ -890,10 +970,7 @@ export default function ResultsPage({
               heatmap when a date is focused. This is the primary comps experience
               on the report page; HowWeEstimated will hide its duplicate comps block. */}
           {(() => {
-            const compsListings =
-              report.comparableListings ??
-              report.resultSummary?.comparableListings ??
-              null;
+            const compsListings = contextualComparableListings;
             const comps =
               report.compsSummary ?? report.resultSummary?.compsSummary ?? null;
             if (!clickedDate || !compsListings || compsListings.length === 0) return null;
@@ -926,7 +1003,9 @@ export default function ResultsPage({
                   <ComparableListingsSection
                     listings={compsListings as ComparableListing[]}
                     comps={comps}
+                    benchmarkInfo={contextualBenchmarkInfo}
                     embedded={true}
+                    pinnedUrls={contextualPinnedUrls}
                     selectedDate={snappedDate}
                     clickedDate={clickedDate}
                   />
