@@ -23,8 +23,10 @@ import os
 import re
 import statistics
 import time
+import json
 from datetime import datetime as dt, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 from worker.core.concurrent_runner import execute_day_queries_concurrently
 from worker.core.comp_utils import build_comp_id
@@ -66,6 +68,13 @@ from worker.scraper.target_extractor import (
 
 logger = logging.getLogger("worker.scraper")
 ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+
+_LOG_CRITERIA_RAW_JSON = str(os.getenv("AIRBNB_LOG_CRITERIA_RAW_JSON", "0")).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 
 def _bounded_workers(env_name: str, default: int = 2) -> int:
@@ -3158,18 +3167,46 @@ def run_criteria_search(
 
     _p1_max_cards = nightly_plan.max_cards if nightly_plan is not None else max_cards
     search_start = time.time()
+    _clean_location = re.sub(r"\*+", "", str(search_location or "")).strip()
+    _clean_location = re.sub(r"\s+", " ", _clean_location)
+    _path_query = re.sub(r"\s*,\s*", ",", _clean_location)
+    _query_location = re.sub(r"\s*,\s*", ", ", _clean_location)
+    _search_path = f"/s/{quote(_path_query).replace('%2C', '--')}/homes"
+    _search_params: Dict[str, Any] = {
+        "date_picker_type": "calendar",
+        "checkin": checkin,
+        "checkout": checkout,
+        "adults": adults,
+        "query": _query_location,
+        "search_type": "AUTOSUGGEST",
+        "items_per_grid": _p1_max_cards,
+    }
+    if target_lat is not None:
+        _search_params["center_lat"] = target_lat
+    if target_lng is not None:
+        _search_params["center_lng"] = target_lng
+    criteria_search_url = f"{base_origin}{_search_path}?{urlencode(_search_params)}"
+    query_criteria["criteriaSearchUrl"] = criteria_search_url
+    logger.info("[criteria] Search URL: %s", criteria_search_url)
+
     _p1_overrides: Dict[str, Any] = {
         "checkin": checkin,
         "checkout": checkout,
         "adults": adults,
-        "query": search_location,
+        "query": _query_location,
         "itemsPerGrid": _p1_max_cards,
+        "searchUrl": criteria_search_url,
     }
     if target_lat is not None:
         _p1_overrides["centerLat"] = target_lat
     if target_lng is not None:
         _p1_overrides["centerLng"] = target_lng
     _, search_data = client.search_listings_with_overrides(_p1_overrides)
+    if _LOG_CRITERIA_RAW_JSON:
+        try:
+            logger.info("[criteria] Raw pass-1 search response: %s", json.dumps(search_data, ensure_ascii=False))
+        except Exception:
+            logger.info("[criteria] Raw pass-1 search response: <unserializable>")
     timings["scroll_ms"] = round((time.time() - search_start) * 1000)
     listing_ids = parse_search_response(search_data)
     listing_context = parse_search_listing_context(search_data)
@@ -3183,32 +3220,56 @@ def run_criteria_search(
     if not listing_ids and client.guest_favorite_only:
         logger.info("[criteria] 0 results with guestFavorite=true; retrying without filter")
         _, search_data = client.search_listings_with_overrides({**_p1_overrides, "guestFavorite": False})
+        if _LOG_CRITERIA_RAW_JSON:
+            try:
+                logger.info("[criteria] Raw retry search response: %s", json.dumps(search_data, ensure_ascii=False))
+            except Exception:
+                logger.info("[criteria] Raw retry search response: <unserializable>")
         listing_ids = parse_search_response(search_data)
         listing_context = parse_search_listing_context(search_data)
         logger.info(
             "[criteria] Retry (no guestFavorite): listing_ids=%d context_entries=%d",
             len(listing_ids), len(listing_context),
         )
-    candidates = [
-        ListingSpec(
-            url=f"{base_origin}/rooms/{lid}",
-            title=str((listing_context.get(str(lid)) or {}).get("title") or ""),
-            location=search_location,
-            nightly_price=(listing_context.get(str(lid)) or {}).get("nightly_price"),
+    candidates: List[ListingSpec] = []
+    for lid in listing_ids:
+        row = listing_context.get(str(lid)) or {}
+        nightly = row.get("nightly_price")
+        if nightly is None:
+            total = row.get("total_price")
+            nights = int(row.get("price_nights") or 1)
+            if isinstance(total, (int, float)) and total > 0 and nights > 0:
+                nightly = round(float(total) / nights, 2)
+        candidates.append(
+            ListingSpec(
+                url=f"{base_origin}/rooms/{lid}",
+                title=str(row.get("title") or ""),
+                location=str(row.get("location") or search_location),
+                nightly_price=nightly,
+                accommodates=row.get("accommodates"),
+                bedrooms=row.get("bedrooms"),
+                beds=row.get("beds"),
+                baths=row.get("baths"),
+                property_type=str(row.get("property_type") or ""),
+                lat=row.get("lat"),
+                lng=row.get("lng"),
+                rating=row.get("rating"),
+                reviews=row.get("reviews"),
+                amenities=list(row.get("amenities") or []),
+            )
         )
-        for lid in listing_ids
-    ]
+    priced_candidates = [c for c in candidates if c.url and isinstance(c.nightly_price, (int, float)) and c.nightly_price > 0]
     logger.info(
         "[criteria] candidates before price filter=%d after=%d",
-        len(candidates), len([c for c in candidates if c.url and c.nightly_price]),
+        len(candidates), len(priced_candidates),
     )
-    candidates = [c for c in candidates if c.url and c.nightly_price]
     if not candidates:
         no_results_hint = (
             f"No listings found for ZIP code '{search_location}'. Try using the city name instead."
             if is_zip
             else f"No listings found in search results for '{search_location}'."
         )
+        no_results_hint = f"{no_results_hint} Search URL: {criteria_search_url}"
         return [], {
             "targetSpec": None,
             "queryCriteria": query_criteria,
@@ -3301,6 +3362,18 @@ def run_criteria_search(
     scrape_transparent["debug"]["anchorCoordMapSize"] = len(coord_map)
     scrape_transparent["debug"]["anchorCoordsAssigned"] = n_coords_assigned
     scrape_transparent["debug"].update(anchor_debug)
+    try:
+        target_spec_payload = scrape_transparent.get("targetSpec") or {}
+        anchor_location = (
+            scrape_transparent["debug"].get("anchorNormalizedLocation")
+            or scrape_transparent["debug"].get("anchorRawLocation")
+            or ""
+        )
+        if isinstance(target_spec_payload, dict) and isinstance(anchor_location, str) and anchor_location.strip():
+            target_spec_payload["location"] = anchor_location.strip()
+            scrape_transparent["targetSpec"] = target_spec_payload
+    except Exception:
+        pass
 
     return daily_results, scrape_transparent
 

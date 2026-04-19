@@ -488,6 +488,89 @@ def _build_scrape_calendar(
     return summary, calendar
 
 
+def _build_target_listing_only_daily_results(
+    *,
+    listing_url: str,
+    start_date: str,
+    end_date: str,
+    minimum_booking_nights: int,
+    report_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Fallback: build day-level rows using only the user's own listing price.
+
+    Used when URL-mode comp scraping returns no usable daily market prices.
+    This keeps the report/calendar renderable so the dashboard heatmap appears.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from worker.scraper.target_extractor import capture_target_live_price
+
+    out: List[Dict[str, Any]] = []
+
+    start = _dt.strptime(start_date, "%Y-%m-%d")
+    end = _dt.strptime(end_date, "%Y-%m-%d")
+    total_days = max(1, (end - start).days)
+    nights = max(1, int(minimum_booking_nights or 1))
+
+    captured = 0
+    for i in range(total_days):
+        checkin_dt = start + _td(days=i)
+        checkin = checkin_dt.strftime("%Y-%m-%d")
+        checkout = (checkin_dt + _td(days=nights)).strftime("%Y-%m-%d")
+
+        try:
+            live = capture_target_live_price(
+                listing_url=listing_url,
+                checkin=checkin,
+                checkout=checkout,
+                cdp_url=CDP_URL,
+                cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{report_id}] Target-only fallback capture failed for {checkin}: {exc}"
+            )
+            live = {"observedListingPrice": None, "livePriceStatus": "scrape_failed"}
+
+        obs = live.get("observedListingPrice")
+        if isinstance(obs, (int, float)) and obs > 0:
+            price = round(float(obs))
+            captured += 1
+            out.append(
+                {
+                    "date": checkin,
+                    "median_price": price,
+                    "is_weekend": checkin_dt.weekday() >= 4,  # Fri/Sat
+                    "flags": ["target_listing_only_fallback"],
+                    "comps_used": 1,
+                    "price_distribution": {
+                        "min": price,
+                        "p25": price,
+                        "median": price,
+                        "p75": price,
+                        "max": price,
+                        "currency": "USD",
+                    },
+                }
+            )
+        else:
+            out.append(
+                {
+                    "date": checkin,
+                    "median_price": None,
+                    "is_weekend": checkin_dt.weekday() >= 4,
+                    "flags": ["target_listing_only_fallback", "missing_data"],
+                    "comps_used": 0,
+                    "price_distribution": {},
+                }
+            )
+
+    logger.info(
+        f"[{report_id}] Target-only fallback daily capture: {captured}/{total_days} days priced"
+    )
+    return out
+
+
 def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
     """
     Dispatcher: resolves execution policy and routes to the correct pipeline.
@@ -1297,18 +1380,83 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                         )
                         core_version = WORKER_VERSION + "+scrape"
                     else:
-                        _fail(
-                            "Service is busy. Could not collect enough pricing data — please try again later.",
-                            "All day-queries returned no valid prices",
+                        logger.warning(
+                            f"[{report_id}] URL scrape calendar build returned no valid prices; "
+                            "trying target-listing-only fallback"
                         )
-                        return
+                        fallback_daily = _build_target_listing_only_daily_results(
+                            listing_url=listing_url,
+                            start_date=start_date,
+                            end_date=end_date,
+                            minimum_booking_nights=minimum_booking_nights,
+                            report_id=report_id,
+                        )
+                        fallback_valid = [r["median_price"] for r in fallback_daily if r.get("median_price")]
+                        if not (fallback_daily and fallback_valid):
+                            _fail(
+                                "Service is busy. Could not collect enough pricing data — please try again later.",
+                                "Both comps scrape and target-listing fallback returned no valid prices",
+                            )
+                            return
+                        if not isinstance(transparent_result, dict):
+                            transparent_result = {}
+                        transparent_result.setdefault("debug", {})
+                        if isinstance(transparent_result.get("debug"), dict):
+                            transparent_result["debug"]["target_only_fallback"] = True
+                        result = _build_scrape_calendar(
+                            fallback_daily, start_date, end_date, discount_policy, transparent_result,
+                        )
+                        if result[0] is None or result[1] is None:
+                            _fail(
+                                "Service is busy. Could not collect enough pricing data — please try again later.",
+                                "Both comps scrape and target-listing fallback returned no valid prices",
+                            )
+                            return
+                        summary, calendar = result
+                        finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                            finalized_input_attributes, transparent_result
+                        )
+                        core_version = WORKER_VERSION + "+self_only"
                 else:
                     scrape_err = ((transparent_result or {}).get("debug") or {}).get("error") or "No results"
-                    _fail(
-                        "Service is busy. Could not reach Airbnb data — please try again later.",
-                        f"Scrape produced no daily results: {scrape_err}",
+                    logger.warning(
+                        f"[{report_id}] URL scrape produced no daily results ({scrape_err}); "
+                        "trying target-listing-only fallback"
                     )
-                    return
+                    fallback_daily = _build_target_listing_only_daily_results(
+                        listing_url=listing_url,
+                        start_date=start_date,
+                        end_date=end_date,
+                        minimum_booking_nights=minimum_booking_nights,
+                        report_id=report_id,
+                    )
+                    fallback_valid = [r["median_price"] for r in fallback_daily if r.get("median_price")]
+                    if not (fallback_daily and fallback_valid):
+                        _fail(
+                            "Service is busy. Could not reach Airbnb data — please try again later.",
+                            f"Scrape and target-listing fallback produced no valid prices: {scrape_err}",
+                        )
+                        return
+                    if not isinstance(transparent_result, dict):
+                        transparent_result = {}
+                    transparent_result.setdefault("debug", {})
+                    if isinstance(transparent_result.get("debug"), dict):
+                        transparent_result["debug"]["target_only_fallback"] = True
+                        transparent_result["debug"]["fallback_reason"] = f"no_comp_results: {scrape_err}"
+                    result = _build_scrape_calendar(
+                        fallback_daily, start_date, end_date, discount_policy, transparent_result,
+                    )
+                    if result[0] is None or result[1] is None:
+                        _fail(
+                            "Service is busy. Could not reach Airbnb data — please try again later.",
+                            f"Scrape and target-listing fallback produced no valid prices: {scrape_err}",
+                        )
+                        return
+                    summary, calendar = result
+                    finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                        finalized_input_attributes, transparent_result
+                    )
+                    core_version = WORKER_VERSION + "+self_only"
 
             except ValueError as exc:
                 logger.exception(f"[{report_id}] ValueError in URL mode")

@@ -313,8 +313,14 @@ export async function POST(req: NextRequest) {
     // Nightly eligibility gate: only listings with a valid Airbnb room URL.
     // Address-only listings fall through to criteria mode in the worker and
     // produce stable errors — exclude them here instead.
-    const listingUrl = (attrs.listingUrl as string | null | undefined) ?? null;
-    const isValidListingUrl = !!(listingUrl && listingUrl.includes("airbnb.com/rooms/"));
+    const listingUrl =
+      (attrs.listingUrl as string | null | undefined) ??
+      (attrs.listing_url as string | null | undefined) ??
+      null;
+    const isValidListingUrl = !!(
+      listingUrl &&
+      /airbnb\.(com|ca)\/rooms\//i.test(listingUrl)
+    );
     if (!isValidListingUrl) {
       results.push({
         listingId: listing.id,

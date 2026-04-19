@@ -5,6 +5,8 @@ import type { CalendarDay } from "@/lib/schemas";
 
 interface Props {
   calendar: CalendarDay[];
+  /** Current live listing nightly price captured by worker (single value for report start). */
+  observedListingPrice?: number | null;
   /**
    * When true, the "Select nights" button appears in the header.
    * Entering that mode lets the user toggle selectedDates via tile clicks.
@@ -27,6 +29,7 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 export function PricingHeatmap({
   calendar,
+  observedListingPrice = null,
   selectable = false,
   onApplyDates,
   onFocusDate,
@@ -208,12 +211,29 @@ export function PricingHeatmap({
           // Only show focus ring in inspect mode — apply mode has its own selection ring.
           const isFocused = !applyMode && !isPast && focusedDate === day.date;
 
-          // Tile style priority: apply-selected (black) > focused (sky) > default
+          // Tile style priority: apply-selected (black) > focused ring > default compare tint
+          const suggested = day.recommendedDailyPrice ?? day.baseDailyPrice ?? day.basePrice;
+          const hasComparablePrices =
+            typeof observedListingPrice === "number" &&
+            observedListingPrice > 0 &&
+            typeof suggested === "number" &&
+            suggested > 0;
+
+          let compareToneCls = "border-gray-200/80 bg-white";
+          if (hasComparablePrices) {
+            const diffPct = ((observedListingPrice / suggested) - 1) * 100;
+            if (diffPct > 3) {
+              compareToneCls = "border-amber-200 bg-amber-50/60";
+            } else if (diffPct < -3) {
+              compareToneCls = "border-emerald-200 bg-emerald-50/60";
+            } else {
+              compareToneCls = "border-gray-200/80 bg-white";
+            }
+          }
+
           const tileCls = applyMode && isSelected && !isPast
             ? "border-gray-900 bg-gray-900"
-            : isFocused
-            ? "border-sky-400/50 bg-sky-50/60 ring-1 ring-sky-300/30"
-            : "border-gray-200/80 bg-white";
+            : `${compareToneCls} ${isFocused ? "ring-1 ring-sky-300/60 border-sky-400/60" : ""}`;
 
           const isApplySelected = applyMode && isSelected && !isPast;
 

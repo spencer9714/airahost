@@ -434,6 +434,10 @@ export default function ListingHistoryPage() {
               latestReadyRow.report.result_calendar.length > 0 && (
                 <PricingHeatmap
                   calendar={latestReadyRow.report.result_calendar}
+                  observedListingPrice={
+                    (latestReadyRow.report.result_summary as { observedListingPrice?: number | null } | null)
+                      ?.observedListingPrice ?? null
+                  }
                 />
               )}
 

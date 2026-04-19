@@ -65,11 +65,13 @@ def _map_search_row_to_spec(
     total = row.get("total_price")
     price_nights = int(row.get("price_nights") or 1)
     price_kind = "unknown"
-    scrape_nights = 1
+    scrape_nights = max(1, int(query_nights or 1))
     query_total_price = None
     if isinstance(nightly, (int, float)) and nightly > 0:
         effective_nightly = float(nightly)
         price_kind = "nightly_from_search"
+        if price_nights > 1:
+            scrape_nights = max(scrape_nights, int(price_nights))
     elif isinstance(total, (int, float)) and total > 0:
         nights = max(1, price_nights)
         # If this card came from a 2-night query but the parser did not

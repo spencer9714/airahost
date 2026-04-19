@@ -799,6 +799,7 @@ export default function DashboardPage() {
                   <PricingHeatmap
                     key={activeReport?.id ?? "none"}
                     calendar={activeCalendar}
+                    observedListingPrice={activeSummary.observedListingPrice ?? null}
                     selectable={activeAutoApplyConfigured && activeAutoApplyCohostStatus !== "not_started"}
                     onApplyDates={(dates) => {
                       setApplyDates(dates);

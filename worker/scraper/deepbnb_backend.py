@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
@@ -74,6 +76,76 @@ class DeepBnbBackend:
         )
 
     @staticmethod
+    def _first_qs_value(values: Dict[str, list[str]], *keys: str) -> Optional[str]:
+        for key in keys:
+            vals = values.get(key)
+            if isinstance(vals, list) and vals:
+                val = str(vals[0] or "").strip()
+                if val:
+                    return val
+        return None
+
+    @classmethod
+    def _overrides_from_search_url(cls, search_url: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if not isinstance(search_url, str) or not search_url.strip():
+            return out
+        try:
+            parsed = urlparse(search_url)
+            qs = parse_qs(parsed.query or "", keep_blank_values=False)
+        except Exception:
+            return out
+
+        # Preferred query text from explicit query param.
+        query = cls._first_qs_value(qs, "query")
+        if not query:
+            # Fallback to /s/<slug>/homes path segment.
+            parts = [p for p in (parsed.path or "").split("/") if p]
+            if len(parts) >= 2 and parts[0] == "s":
+                slug = unquote(parts[1])
+                slug = re.sub(r"\*+", "", slug)
+                slug = slug.replace("--", ",")
+                slug = re.sub(r"\s*,\s*", ", ", slug).strip()
+                query = slug
+        if query:
+            out["query"] = query
+
+        checkin = cls._first_qs_value(qs, "checkin", "check_in")
+        if checkin:
+            out["checkin"] = checkin
+        checkout = cls._first_qs_value(qs, "checkout", "check_out")
+        if checkout:
+            out["checkout"] = checkout
+
+        adults = cls._first_qs_value(qs, "adults")
+        if adults:
+            out["adults"] = adults
+
+        center_lat = cls._first_qs_value(qs, "center_lat", "centerLat", "lat")
+        if center_lat:
+            out["centerLat"] = center_lat
+        center_lng = cls._first_qs_value(qs, "center_lng", "centerLng", "lng")
+        if center_lng:
+            out["centerLng"] = center_lng
+
+        place_id = cls._first_qs_value(qs, "place_id", "placeId")
+        if place_id:
+            out["placeId"] = place_id
+
+        items_per_grid = cls._first_qs_value(qs, "items_per_grid", "itemsPerGrid")
+        if items_per_grid:
+            out["itemsPerGrid"] = items_per_grid
+        items_offset = cls._first_qs_value(qs, "items_offset", "itemsOffset")
+        if items_offset:
+            out["itemsOffset"] = items_offset
+
+        search_type = cls._first_qs_value(qs, "search_type", "searchType")
+        if search_type:
+            out["searchType"] = search_type
+
+        return out
+
+    @staticmethod
     def _looks_blocked(status: int, response_json: Dict[str, Any]) -> bool:
         if status in (401, 403):
             return True
@@ -135,11 +207,36 @@ class DeepBnbBackend:
         return out
 
     def search_listings_with_overrides(self, overrides: Dict[str, Any]) -> Optional[Tuple[int, Dict[str, Any]]]:
-        checkin = str(overrides.get("checkin") or self.config.get("CHECKIN", "") or "")
-        checkout = str(overrides.get("checkout") or self.config.get("CHECKOUT", "") or "")
-        query = str(overrides.get("query") or self.config.get("QUERY", "") or "").strip()
-        adults = int(overrides.get("adults") or self.config.get("ADULTS", 2) or 2)
-        raw_params = self._raw_params_from_overrides(overrides)
+        search_url = str(overrides.get("searchUrl") or "").strip()
+        url_overrides = self._overrides_from_search_url(search_url) if search_url else {}
+        merged_overrides = dict(url_overrides)
+        merged_overrides.update(overrides)
+        if search_url:
+            logger.info("deepbnb url-search input searchUrl=%s", search_url)
+            logger.info(
+                "deepbnb url-search parsed query=%s checkin=%s checkout=%s adults=%s centerLat=%s centerLng=%s",
+                url_overrides.get("query"),
+                url_overrides.get("checkin"),
+                url_overrides.get("checkout"),
+                url_overrides.get("adults"),
+                url_overrides.get("centerLat"),
+                url_overrides.get("centerLng"),
+            )
+
+        checkin = str(merged_overrides.get("checkin") or self.config.get("CHECKIN", "") or "")
+        checkout = str(merged_overrides.get("checkout") or self.config.get("CHECKOUT", "") or "")
+        query = str(merged_overrides.get("query") or self.config.get("QUERY", "") or "").strip()
+        adults = int(merged_overrides.get("adults") or self.config.get("ADULTS", 2) or 2)
+        if search_url:
+            logger.info(
+                "deepbnb url-search effective query=%s checkin=%s checkout=%s adults=%s searchType=%s",
+                query,
+                checkin,
+                checkout,
+                adults,
+                str(merged_overrides.get("searchType") or "user_map_move"),
+            )
+        raw_params = self._raw_params_from_overrides(merged_overrides)
         # Ensure required baseline params always exist.
         baseline = [
             {"filterName": "adults", "filterValues": [str(adults)]},
@@ -149,7 +246,7 @@ class DeepBnbBackend:
             {"filterName": "screenSize", "filterValues": ["large"]},
             {"filterName": "tabId", "filterValues": ["home_tab"]},
             {"filterName": "version", "filterValues": ["1.8.8"]},
-            {"filterName": "searchMode", "filterValues": [str(overrides.get("searchMode") or "regular_search")]},
+            {"filterName": "searchMode", "filterValues": [str(merged_overrides.get("searchMode") or "regular_search")]},
         ]
         seen = {p["filterName"] for p in raw_params}
         for p in baseline:
@@ -162,13 +259,13 @@ class DeepBnbBackend:
                 "staysSearchRequest": {
                     "metadataOnly": False,
                     "requestedPageType": "STAYS_SEARCH",
-                    "searchType": str(overrides.get("searchType") or "user_map_move"),
+                    "searchType": str(merged_overrides.get("searchType") or "user_map_move"),
                     "rawParams": raw_params,
                 },
                 "staysMapSearchRequestV2": {
                     "metadataOnly": False,
                     "requestedPageType": "STAYS_SEARCH",
-                    "searchType": str(overrides.get("searchType") or "user_map_move"),
+                    "searchType": str(merged_overrides.get("searchType") or "user_map_move"),
                     "rawParams": raw_params,
                 },
                 "isLeanTreatment": False,
