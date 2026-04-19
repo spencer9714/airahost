@@ -1285,7 +1285,6 @@ def run_scrape(
                 if target_lat is not None and target_lng is not None:
                     target.lat = target_lat
                     target.lng = target_lng
-                    logger.debug("[run_scrape] Using geocoded target coords (page gave none)")
             else:
                 logger.info(
                     f"[run_scrape] Using page-extracted target coords "
@@ -2428,14 +2427,11 @@ def _geocode_postal_to_canonical(
         query = f"{hint_city} {postal_code}{country_suffix}"
     else:
         query = f"{postal_code}{country_suffix}"
-
-    logger.debug(f"[criteria] Geocode query={query!r} countrycodes={countrycodes!r}")
     result = geocode_address_details(query, timeout=timeout, countrycodes=countrycodes)
 
     # If the city-hinted query fails, retry with just the ZIP (+ country context)
     if not result and hint_city:
         retry_query = f"{postal_code}{country_suffix}"
-        logger.debug(f"[criteria] Geocode retry query={retry_query!r}")
         result = geocode_address_details(retry_query, timeout=timeout, countrycodes=countrycodes)
 
     return result
@@ -2779,13 +2775,6 @@ def _select_anchor_candidate(
                 f"nearby={location_bucket_counts['nearby_market']} "
                 f"pool={len(pool)}"
             )
-
-    else:
-        logger.debug(
-            "[criteria/anchor] No target city/state — skipping bucket "
-            "classification and expansion"
-        )
-
     # ── Phase 4: Structural similarity ranking ────────────────────────────────
     filtered, _filter_debug = filter_similar_candidates(user_spec, pool)
     if not filtered:
@@ -3337,3 +3326,5 @@ def _empty_transparent(source: str, error: str) -> Dict[str, Any]:
             "timingsMs": {},
         },
     }
+
+

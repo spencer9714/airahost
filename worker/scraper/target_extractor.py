@@ -246,7 +246,6 @@ def normalize_airbnb_url(url: str) -> str:
     try:
         p = urlparse(url)
         if p.netloc and _AIRBNB_HOST_RE.match(p.netloc) and p.netloc != _CANONICAL_AIRBNB_HOST:
-            logger.debug("Normalizing Airbnb URL host %s → %s", p.netloc, _CANONICAL_AIRBNB_HOST)
             p = p._replace(netloc=_CANONICAL_AIRBNB_HOST)
             return urlunparse(p)
     except Exception:
