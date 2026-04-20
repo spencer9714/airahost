@@ -4,10 +4,7 @@ import json
 import logging
 import urllib.request
 import urllib.error
-import os
-from datetime import timedelta
-
-import requests
+from playwright.sync_api import sync_playwright
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,119 +25,32 @@ def load_cookies_from_file(filepath: str) -> dict:
         logger.error(f"Failed to load cookies from {filepath}: {e}")
     return {}
 
-def _parse_cookie_header(cookie_header: str | None) -> dict:
-    if not isinstance(cookie_header, str) or not cookie_header.strip():
-        return {}
-    out: dict = {}
-    for part in cookie_header.split(";"):
-        piece = part.strip()
-        if not piece or "=" not in piece:
-            continue
-        k, v = piece.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-        if k:
-            out[k] = v
-    return out
+def load_cookies_from_cdp(cdp_url: str, domain: str | None = None) -> dict:
+    """Grabs Airbnb cookies from a running Playwright CDP browser session."""
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.connect_over_cdp(cdp_url)
+            contexts = browser.contexts if browser.contexts else [browser.new_context()]
 
+            cookies = []
+            for context in contexts:
+                cookies.extend(context.cookies())
 
-def load_cookies_from_cdp(cdp_url: str, domain: str = ".airbnb.ca") -> dict:
-    """
-    Legacy entrypoint retained for compatibility.
-    CDP/browser scraping is intentionally disabled; use Deepbnb-style HTTP bootstrap.
-    """
-    _ = cdp_url
-    base_url = "https://www.airbnb.ca"
-    locale = "en-CA"
-    currency = "CAD"
-    api_key = "d306zoyjsyarp7ifhu67rjxn52tv0t20"
-    stays_search_hash = (
-        os.getenv("AIRBNB_STAYSSEARCH_HASH")
-        or "753d97c7b19a1a402d2fa63882ff4d6802004d11f2499647deef923a19a1641a"
-    )
+            result = {}
+            domain_checks = []
+            if domain:
+                domain_checks.append(domain)
+            domain_checks.extend(["airbnb.ca", "airbnb.com"])
 
-    # Optional direct cookie injection from env for authenticated mutations.
-    env_cookie_header = os.getenv("AIRBNB_COOKIE_HEADER")
-    env_cookies = _parse_cookie_header(env_cookie_header)
-    if env_cookies:
-        logger.info("Loaded Airbnb cookies from AIRBNB_COOKIE_HEADER.")
-        return env_cookies
+            for cookie in cookies:
+                cookie_domain = cookie.get("domain", "")
+                if any(check in cookie_domain for check in domain_checks):
+                    result[cookie["name"]] = cookie["value"]
 
-    session = requests.Session()
-    headers = {
-        "accept": "*/*",
-        "accept-language": "en-US,en;q=0.9",
-        "content-type": "application/json",
-        "x-airbnb-api-key": api_key,
-        "x-airbnb-graphql-platform": "web",
-        "x-airbnb-graphql-platform-client": "minimalist-niobe",
-        "x-csrf-without-token": "1",
-        "user-agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-        ),
-    }
-
-    try:
-        # Warm-up requests to collect baseline anti-bot/session cookies without browser.
-        session.get(base_url, headers=headers, timeout=15)
-        today = datetime.date.today()
-        checkin = (today + timedelta(days=7)).strftime("%Y-%m-%d")
-        checkout = (today + timedelta(days=14)).strftime("%Y-%m-%d")
-        payload = {
-            "operationName": "StaysSearch",
-            "variables": {
-                "staysSearchRequest": {
-                    "metadataOnly": False,
-                    "requestedPageType": "STAYS_SEARCH",
-                    "searchType": "user_map_move",
-                    "rawParams": [
-                        {"filterName": "adults", "filterValues": ["2"]},
-                        {"filterName": "query", "filterValues": ["Toronto, Ontario"]},
-                        {"filterName": "checkin", "filterValues": [checkin]},
-                        {"filterName": "checkout", "filterValues": [checkout]},
-                        {"filterName": "screenSize", "filterValues": ["large"]},
-                        {"filterName": "tabId", "filterValues": ["home_tab"]},
-                        {"filterName": "version", "filterValues": ["1.8.8"]},
-                        {"filterName": "searchMode", "filterValues": ["regular_search"]},
-                    ],
-                },
-                "staysMapSearchRequestV2": {
-                    "metadataOnly": False,
-                    "requestedPageType": "STAYS_SEARCH",
-                    "searchType": "user_map_move",
-                    "rawParams": [
-                        {"filterName": "adults", "filterValues": ["2"]},
-                        {"filterName": "query", "filterValues": ["Toronto, Ontario"]},
-                        {"filterName": "checkin", "filterValues": [checkin]},
-                        {"filterName": "checkout", "filterValues": [checkout]},
-                        {"filterName": "screenSize", "filterValues": ["large"]},
-                        {"filterName": "tabId", "filterValues": ["home_tab"]},
-                        {"filterName": "version", "filterValues": ["1.8.8"]},
-                        {"filterName": "searchMode", "filterValues": ["regular_search"]},
-                    ],
-                },
-                "isLeanTreatment": False,
-                "aiSearchEnabled": False,
-            },
-            "extensions": {"persistedQuery": {"version": 1, "sha256Hash": stays_search_hash}},
-        }
-        search_url = (
-            f"{base_url}/api/v3/StaysSearch/{stays_search_hash}"
-            f"?operationName=StaysSearch&locale={locale}&currency={currency}"
-        )
-        session.post(search_url, json=payload, headers=headers, timeout=20)
-    except Exception as e:
-        logger.warning(f"HTTP cookie bootstrap failed: {e}")
-
-    result = {}
-    for c in session.cookies:
-        domain_ok = isinstance(c.domain, str) and (domain in c.domain or "airbnb" in c.domain)
-        if domain_ok:
-            result[c.name] = c.value
-    if result:
-        logger.info("Bootstrapped Airbnb cookies via HTTP session (no browser).")
-    return result
+            return result
+        except Exception as e:
+            logger.error(f"Failed to load cookies from CDP {cdp_url}: {e}")
+            return {}
 
 def assign_price_request(listing_id: str, date: str, price: int, *, locale="en-CA", currency="CAD", cookies: dict | None = None) -> dict:
     """
@@ -203,10 +113,19 @@ def assign_price_request(listing_id: str, date: str, price: int, *, locale="en-C
 
     try:
         with urllib.request.urlopen(req) as response:
+            raw_body = response.read().decode('utf-8', errors='replace')
+            logger.info(
+                "[price_assign_raw_response] listing=%s date=%s price=%s status=%s body=%s",
+                listing_id,
+                date,
+                price,
+                response.status,
+                raw_body,
+            )
             if response.status != 200:
                 return {"ok": False, "error": f"HTTP {response.status}: {response.reason}"}
-            
-            resp_data = json.loads(response.read().decode('utf-8'))
+
+            resp_data = json.loads(raw_body) if raw_body else {}
             
             if "errors" in resp_data:
                 return {"ok": False, "error": resp_data["errors"]}
@@ -214,13 +133,22 @@ def assign_price_request(listing_id: str, date: str, price: int, *, locale="en-C
             return {"ok": True}
             
     except urllib.error.HTTPError as e:
+        raw_err = e.read().decode('utf-8', errors='replace')
+        logger.warning(
+            "[price_assign_raw_response] listing=%s date=%s price=%s status=%s body=%s",
+            listing_id,
+            date,
+            price,
+            getattr(e, "code", "HTTPError"),
+            raw_err,
+        )
         try:
-            error_resp = json.loads(e.read().decode('utf-8'))
+            error_resp = json.loads(raw_err) if raw_err else {}
             if "errors" in error_resp:
                 return {"ok": False, "error": error_resp["errors"]}
             return {"ok": False, "error": f"HTTPError {e.code}: {error_resp}"}
         except json.JSONDecodeError:
-            return {"ok": False, "error": f"HTTPError {e.code}: {e.reason}"}
+            return {"ok": False, "error": f"HTTPError {e.code}: {raw_err or e.reason}"}
     except Exception as e:
         return {"ok": False, "error": f"Request failed: {str(e)}"}
 
@@ -266,11 +194,13 @@ def assign_price(listing_id: str, date: str, price: int, *, cdp_url: str, cookie
     if price < 1:
         return {"ok": False, "error": "Price must be a positive number."}
 
-    if cookies is None:
-        logger.info("Bootstrapping cookies via HTTP session (Deepbnb-style, no browser).")
-        cookies = load_cookies_from_cdp(cdp_url)
-        if not cookies:
-            return {"ok": False, "error": "Could not bootstrap cookies via HTTP session."}
+    # Always recapture fresh cookies for each assignment call.
+    if cookies is not None:
+        logger.info("Caller-provided cookies ignored; recapturing fresh cookies.")
+    logger.info("Recapturing fresh cookies via CDP browser context.")
+    cookies = load_cookies_from_cdp(cdp_url)
+    if not cookies:
+        return {"ok": False, "error": "Could not recapture cookies from CDP session."}
 
     return assign_price_request(listing_id=listing_id, date=date, price=price, cookies=cookies)
 
@@ -278,10 +208,12 @@ def assign_prices_calendar(listing_id: str, calendar: dict[str, int], *, cdp_url
     """
     Batch assigns prices for a given listing and a dictionary of dates.
     """
-    if cookies is None:
-        logger.info("Bootstrapping cookies via HTTP session (Deepbnb-style, no browser).")
-        cookies = load_cookies_from_cdp(cdp_url)
-        if not cookies:
-            return {"ok": False, "error": "Could not bootstrap cookies via HTTP session."}
+    # Always recapture fresh cookies for each batch assignment call.
+    if cookies is not None:
+        logger.info("Caller-provided cookies ignored; recapturing fresh cookies.")
+    logger.info("Recapturing fresh cookies via CDP browser context.")
+    cookies = load_cookies_from_cdp(cdp_url)
+    if not cookies:
+        return {"ok": False, "error": "Could not recapture cookies from CDP session."}
 
     return assign_prices_calendar_request(listing_id=listing_id, calendar_dict=calendar, cookies=cookies)
