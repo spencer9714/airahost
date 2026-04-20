@@ -202,6 +202,12 @@ export interface CalendarDay {
    */
   baseDailyPrice?: number | null;
 
+  /**
+   * User listing nightly price for this exact stay date when available.
+   * Null/undefined means no reliable day-level user listing price was captured.
+   */
+  userListingPrice?: number | null;
+
   /** Day-of-date flags. e.g. "peak", "low_demand", "missing_data", "interpolated" */
   flags?: string[];
 

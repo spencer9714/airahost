@@ -350,6 +350,13 @@ def _build_scrape_calendar(
         _demand_adj = (dynamic.get("dynamicAdjustment") or {}).get("demandAdjustment", 1.0)
         _rec_base = base_daily_price if base_daily_price is not None else overall_median
         _recommended_daily = round(_rec_base * _demand_adj)
+        _flags_lc = {str(f).strip().lower() for f in flags}
+        _is_target_only_fallback = "target_listing_only_fallback" in _flags_lc
+        _user_listing_price = (
+            round(base_daily_price)
+            if (_is_target_only_fallback and isinstance(base_daily_price, (int, float)) and base_daily_price > 0)
+            else None
+        )
 
         entry: Dict[str, Any] = {
             "date": ds,
@@ -366,6 +373,10 @@ def _build_scrape_calendar(
             # Raw per-day market median.  Use for market-line in charts and
             # transparency displays.  NOT the canonical recommendation.
             "baseDailyPrice": base_daily_price,
+            # User listing nightly price for this exact day when available.
+            # Populated in target-only fallback mode here; live day-0 capture is
+            # attached later via _attach_user_listing_prices_and_log().
+            "userListingPrice": _user_listing_price,
 
             # ── INTERNAL ADJUSTMENT PIPELINE ──────────────────────────────
             # These fields are internal pipeline stages and transparency data.
@@ -569,6 +580,66 @@ def _build_target_listing_only_daily_results(
         f"[{report_id}] Target-only fallback daily capture: {captured}/{total_days} days priced"
     )
     return out
+
+
+def _attach_user_listing_prices_and_log(
+    report_id: str,
+    calendar: List[Dict[str, Any]],
+    summary: Dict[str, Any],
+) -> None:
+    """
+    Ensure each calendar day has a day-level userListingPrice field and emit
+    one diagnostic log line per day explaining price presence/absence.
+    """
+    if not isinstance(calendar, list):
+        return
+
+    observed_date = summary.get("observedListingPriceDate")
+    observed_price = summary.get("observedListingPrice")
+    has_observed = isinstance(observed_price, (int, float)) and observed_price > 0
+
+    for day in calendar:
+        if not isinstance(day, dict):
+            continue
+        day_date = str(day.get("date") or "")
+        flags = [str(f).strip().lower() for f in (day.get("flags") or [])]
+        is_target_only = "target_listing_only_fallback" in flags
+        has_missing_flag = "missing_data" in flags
+
+        user_price = day.get("userListingPrice")
+        if not (isinstance(user_price, (int, float)) and user_price > 0):
+            if has_observed and isinstance(observed_date, str) and day_date == observed_date:
+                user_price = round(float(observed_price))
+                day["userListingPrice"] = user_price
+            else:
+                day["userListingPrice"] = None
+                user_price = None
+
+        if isinstance(user_price, (int, float)) and user_price > 0:
+            source = (
+                "target_only_fallback"
+                if is_target_only
+                else ("live_capture_day_match" if has_observed and day_date == observed_date else "other")
+            )
+            logger.info(
+                f"[{report_id}] [user_day_price] date={day_date} price={round(float(user_price))} source={source}"
+            )
+        else:
+            if has_missing_flag:
+                reason = "missing_data_flag"
+            elif is_target_only:
+                reason = "target_only_no_price"
+            elif has_observed and isinstance(observed_date, str):
+                reason = (
+                    "live_price_captured_for_different_day"
+                    if day_date != observed_date
+                    else "live_price_missing_on_observed_day"
+                )
+            else:
+                reason = "no_user_listing_price_signal"
+            logger.info(
+                f"[{report_id}] [user_day_price] date={day_date} price=None reason={reason}"
+            )
 
 
 def process_job(job: Dict[str, Any], worker_token: uuid.UUID) -> None:
@@ -1011,6 +1082,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
             else:
                 summary["livePriceStatus"] = "no_listing_url"
                 summary["livePriceStatusReason"] = "No Airbnb listing URL configured for this property"
+            _attach_user_listing_prices_and_log(report_id, calendar, summary)
             db_helpers.complete_job(
                 client, report_id, worker_token,
                 summary=summary,
@@ -1689,6 +1761,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
             summary["livePriceStatus"] = "no_listing_url"
             summary["livePriceStatusReason"] = "No Airbnb listing URL configured for this property"
 
+        _attach_user_listing_prices_and_log(report_id, calendar, summary)
         _progress(90, "saving_results", "Saving results...")
 
         # Write results

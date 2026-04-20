@@ -7,6 +7,8 @@ interface Props {
   calendar: CalendarDay[];
   /** Current live listing nightly price captured by worker (single value for report start). */
   observedListingPrice?: number | null;
+  /** Date (YYYY-MM-DD) that observedListingPrice applies to. */
+  observedListingPriceDate?: string | null;
   /**
    * When true, the "Select nights" button appears in the header.
    * Entering that mode lets the user toggle selectedDates via tile clicks.
@@ -30,6 +32,7 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export function PricingHeatmap({
   calendar,
   observedListingPrice = null,
+  observedListingPriceDate = null,
   selectable = false,
   onApplyDates,
   onFocusDate,
@@ -60,11 +63,6 @@ export function PricingHeatmap({
   if (days.length === 0) return null;
 
   const displayPrices = days.map((d) => d.recommendedDailyPrice ?? d.basePrice);
-  const marketSeries = days
-    .map((d) => d.baseDailyPrice ?? d.basePrice)
-    .filter((p): p is number => typeof p === "number" && p > 0);
-  const marketMin = marketSeries.length > 0 ? Math.min(...marketSeries) : 0;
-  const marketMax = marketSeries.length > 0 ? Math.max(...marketSeries) : 0;
   const visibleDays = view === "7" ? days.slice(0, 7) : days;
   const selectedCount = selectedDates.size;
   const totalCount = days.length;
@@ -218,43 +216,49 @@ export function PricingHeatmap({
 
           // Tile style priority: apply-selected (black) > focused ring > default compare tint
           const suggested = day.recommendedDailyPrice ?? day.baseDailyPrice ?? day.basePrice;
-          // Primary compare source: worker-captured current listing price (single value).
-          // Fallback compare source: day-level market/base price when live price is unavailable.
           const hasLivePrice =
             typeof observedListingPrice === "number" && observedListingPrice > 0;
-          const compareSourcePrice =
-            hasLivePrice
-              ? observedListingPrice
-              : (typeof day.baseDailyPrice === "number" && day.baseDailyPrice > 0
+          const dayFlags = Array.isArray(day.flags)
+            ? day.flags.map((f) => String(f).trim().toLowerCase())
+            : [];
+          const isTargetOnlyFallbackDay = dayFlags.includes("target_listing_only_fallback");
+          const dayUserPrice =
+            typeof day.userListingPrice === "number" && day.userListingPrice > 0
+              ? day.userListingPrice
+              : null;
+          // User listing price for THIS day only.
+          // Normal mode: only the captured live day is available.
+          // Target-only fallback mode: baseDailyPrice is the user's day-level price.
+          const originalUserPrice =
+            dayUserPrice != null
+              ? dayUserPrice
+              : (isTargetOnlyFallbackDay &&
+                  typeof day.baseDailyPrice === "number" &&
+                  day.baseDailyPrice > 0
                   ? day.baseDailyPrice
-                  : null);
+              : (
+                  hasLivePrice && observedListingPriceDate === day.date
+                    ? observedListingPrice
+                    : null
+                ));
           const hasComparablePrices =
-            typeof compareSourcePrice === "number" &&
-            compareSourcePrice > 0 &&
+            typeof originalUserPrice === "number" &&
+            originalUserPrice > 0 &&
             typeof suggested === "number" &&
             suggested > 0;
-          const dayFlags = Array.isArray(day.flags) ? day.flags : [];
           // If this day is marked missing_data, we should not color it.
           // This covers both target-only fallback days and regular scrape days
           // where a reliable day-level price signal was not available.
-          const isMissingPriceDay = dayFlags.includes("missing_data");
+          const isMissingPriceDay =
+            dayFlags.includes("missing_data") ||
+            !(typeof originalUserPrice === "number" && originalUserPrice > 0);
 
           let compareToneCls = "border-gray-200/80 bg-white";
           if (!isMissingPriceDay && hasComparablePrices) {
-            if (hasLivePrice) {
-              // Live mode: compare current listing price vs suggested for this day.
-              const diffPct = ((compareSourcePrice / suggested) - 1) * 100;
-              if (diffPct > 8) compareToneCls = "border-rose-200 bg-rose-50/60";
-              else if (diffPct > 3) compareToneCls = "border-amber-200 bg-amber-50/60";
-              else if (diffPct < -3) compareToneCls = "border-emerald-200 bg-emerald-50/60";
-            } else {
-              // Fallback mode (historical behavior): tri-band by market price range.
-              const denom = marketMax - marketMin;
-              const ratio = denom <= 0 ? 0.5 : ((compareSourcePrice - marketMin) / denom);
-              if (ratio < 0.33) compareToneCls = "border-emerald-200 bg-emerald-50/60";
-              else if (ratio < 0.66) compareToneCls = "border-amber-200 bg-amber-50/60";
-              else compareToneCls = "border-rose-200 bg-rose-50/60";
-            }
+            const diffPct = ((originalUserPrice / suggested) - 1) * 100;
+            if (diffPct > 8) compareToneCls = "border-rose-200 bg-rose-50/60";
+            else if (diffPct > 3) compareToneCls = "border-amber-200 bg-amber-50/60";
+            else if (diffPct < -3) compareToneCls = "border-emerald-200 bg-emerald-50/60";
           }
 
           const tileCls = applyMode && isSelected && !isPast
@@ -274,9 +278,14 @@ export function PricingHeatmap({
           );
 
           const priceEl = !isPast ? (
-            <p className={`mt-1 text-[11px] font-medium sm:mt-3 sm:text-sm ${isApplySelected ? "text-white/80" : "text-foreground/70"}`}>
-              ${price}
-            </p>
+            <div className={`${isApplySelected ? "text-white/80" : "text-foreground/70"}`}>
+              <p className="mt-1 text-[11px] font-medium sm:mt-3 sm:text-sm">
+                ${price}
+              </p>
+              <p className={`text-[10px] sm:text-[11px] ${isApplySelected ? "text-white/70" : "text-foreground/50"}`}>
+                Your {typeof originalUserPrice === "number" && originalUserPrice > 0 ? `$${originalUserPrice}` : "—"}
+              </p>
+            </div>
           ) : null;
 
           // Which action does a click perform?

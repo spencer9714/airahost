@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime as dt
@@ -1409,7 +1410,7 @@ def capture_target_live_price(
       livePriceStatus                — "captured" | "scrape_failed" | "no_price_found"
       livePriceStatusReason          — str
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
 
     captured_at = datetime.now(timezone.utc).isoformat()
 
@@ -1424,24 +1425,169 @@ def capture_target_live_price(
     try:
         if client is None:
             from worker.scraper.airbnb_client import AirbnbClient
-            client = AirbnbClient({"CHECKIN": checkin, "CHECKOUT": checkout, "ADULTS": 1})
+            use_deepbnb_live = str(
+                os.getenv("AIRBNB_USE_DEEPBNB_FOR_LIVE_PRICE", "1")
+            ).strip().lower() in ("1", "true", "yes", "on")
+            client = AirbnbClient(
+                {
+                    "CHECKIN": checkin,
+                    "CHECKOUT": checkout,
+                    "ADULTS": 1,
+                    # Keep current behavior by default (Deepbnb enabled). This env switch
+                    # allows explicit Playwright-only live-capture debugging when needed.
+                    "USE_DEEPBNB_BACKEND": use_deepbnb_live,
+                }
+            )
 
         listing_id = extract_listing_id_from_url(listing_url)
         if not listing_id:
             raise ValueError(f"Unable to parse listing_id from URL: {listing_url}")
+        playwright_client: Optional[Any] = None
 
-        pdp_data = client.get_listing_details(
-            str(listing_id),
-            checkin=checkin,
-            checkout=checkout,
-            adults=1,
-        )
-        parsed = parse_pdp_response(pdp_data, str(listing_id), safe_domain_base(listing_url))
-        price = parsed.get("nightly_price")
-        if price is None and isinstance(parsed.get("total_price"), (int, float)):
-            nights = max(1, (dt.strptime(checkout, "%Y-%m-%d") - dt.strptime(checkin, "%Y-%m-%d")).days)
-            price = round(float(parsed["total_price"]) / nights, 2)
-        confidence = "high" if price is not None else "failed"
+        def _is_deepbnb_client(_client_obj: Any) -> bool:
+            return bool(
+                getattr(_client_obj, "use_deepbnb_backend", False)
+                and getattr(_client_obj, "deepbnb_scraper", None) is not None
+            )
+
+        def _extract_price_for_window(
+            _checkin: str,
+            _checkout: str,
+            _adults: int,
+        ) -> tuple[Optional[float], str, Dict[str, Any]]:
+            nonlocal playwright_client
+            _meta: Dict[str, Any] = {
+                "checkin": _checkin,
+                "checkout": _checkout,
+                "adults": _adults,
+                "nightly": None,
+                "total": None,
+                "has_errors": False,
+                "section_ids": [],
+                "backend": "deepbnb" if _is_deepbnb_client(client) else "playwright",
+            }
+
+            def _extract_with_client(_client_obj: Any, _backend_label: str) -> tuple[Optional[float], Optional[float], List[str], bool]:
+                _pdp_data = _client_obj.get_listing_details(
+                    str(listing_id),
+                    checkin=_checkin,
+                    checkout=_checkout,
+                    adults=_adults,
+                )
+                try:
+                    logger.info(
+                        f"[target_live_price_raw][listing={listing_id}][checkin={_checkin}][checkout={_checkout}][adults={_adults}][backend={_backend_label}] "
+                        + json.dumps(_pdp_data, ensure_ascii=False, default=str)
+                    )
+                except Exception:
+                    logger.info(
+                        f"[target_live_price_raw][listing={listing_id}][checkin={_checkin}][checkout={_checkout}][adults={_adults}][backend={_backend_label}] "
+                        "<unserializable_payload>"
+                    )
+                _has_errors = bool((_pdp_data or {}).get("errors"))
+                _sections = (
+                    (((_pdp_data or {}).get("data") or {}).get("presentation") or {})
+                    .get("stayProductDetailPage", {})
+                    .get("sections", {})
+                    .get("sections", [])
+                )
+                _section_ids: List[str] = []
+                if isinstance(_sections, list):
+                    _section_ids = [
+                        str(s.get("sectionId"))
+                        for s in _sections
+                        if isinstance(s, dict) and s.get("sectionId") is not None
+                    ][:8]
+                _parsed = parse_pdp_response(_pdp_data, str(listing_id), safe_domain_base(listing_url))
+                return _parsed.get("nightly_price"), _parsed.get("total_price"), _section_ids, _has_errors
+
+            _nightly, _total, _section_ids, _has_errors = _extract_with_client(
+                client,
+                _meta["backend"],
+            )
+            _meta["has_errors"] = _has_errors
+            _meta["section_ids"] = _section_ids
+            _meta["nightly"] = _nightly
+            _meta["total"] = _total
+
+            # Deepbnb can return metadata-only PDP payloads without price fields.
+            # Retry this same window with Playwright PDP before giving up.
+            if (
+                (_nightly is None and _total is None)
+                and _is_deepbnb_client(client)
+            ):
+                try:
+                    if playwright_client is None:
+                        from worker.scraper.airbnb_client import AirbnbClient
+                        playwright_client = AirbnbClient(
+                            {
+                                "CHECKIN": _checkin,
+                                "CHECKOUT": _checkout,
+                                "ADULTS": _adults,
+                                "USE_DEEPBNB_BACKEND": False,
+                            }
+                        )
+                    _fb_nightly, _fb_total, _fb_section_ids, _fb_has_errors = _extract_with_client(
+                        playwright_client,
+                        "playwright_fallback",
+                    )
+                    _meta["fallback_backend"] = "playwright"
+                    _meta["fallback_section_ids"] = _fb_section_ids
+                    _meta["fallback_has_errors"] = _fb_has_errors
+                    _meta["fallback_nightly"] = _fb_nightly
+                    _meta["fallback_total"] = _fb_total
+                    if _fb_nightly is not None or _fb_total is not None:
+                        _meta["backend"] = "playwright_fallback"
+                        _nightly = _fb_nightly
+                        _total = _fb_total
+                        _meta["nightly"] = _nightly
+                        _meta["total"] = _total
+                        _meta["section_ids"] = _fb_section_ids
+                        _meta["has_errors"] = _fb_has_errors
+                except Exception as _fb_exc:
+                    _meta["fallback_backend"] = "playwright"
+                    _meta["fallback_error"] = str(_fb_exc)[:300]
+
+            _price = _nightly
+            if _price is None and isinstance(_total, (int, float)):
+                _nights = max(1, (dt.strptime(_checkout, "%Y-%m-%d") - dt.strptime(_checkin, "%Y-%m-%d")).days)
+                _price = round(float(_total) / _nights, 2)
+            return (_price if isinstance(_price, (int, float)) and _price > 0 else None), ("high" if _price else "failed"), _meta
+
+        # Retry matrix: same window adults=1, then adults=2, then next-day window.
+        attempts: List[tuple[str, str, int]] = [(checkin, checkout, 1), (checkin, checkout, 2)]
+        try:
+            _d0 = dt.strptime(checkin, "%Y-%m-%d").date()
+            _d1 = dt.strptime(checkout, "%Y-%m-%d").date()
+            if _d0 <= datetime.now(timezone.utc).date():
+                _span = max(1, (_d1 - _d0).days)
+                _next_checkin = (_d0 + timedelta(days=1)).strftime("%Y-%m-%d")
+                _next_checkout = (_d0 + timedelta(days=1 + _span)).strftime("%Y-%m-%d")
+                attempts.append((_next_checkin, _next_checkout, 2))
+        except Exception:
+            pass
+
+        price: Optional[float] = None
+        confidence = "failed"
+        used_checkin = checkin
+        used_checkout = checkout
+        debug_attempts: List[Dict[str, Any]] = []
+
+        for a_checkin, a_checkout, a_adults in attempts:
+            a_price, a_conf, a_meta = _extract_price_for_window(a_checkin, a_checkout, a_adults)
+            debug_attempts.append(a_meta)
+            if isinstance(a_price, (int, float)) and a_price > 0:
+                price = a_price
+                confidence = a_conf
+                used_checkin = a_checkin
+                used_checkout = a_checkout
+                break
+
+        if price is None:
+            logger.warning(
+                f"[target_live_price] No price extracted for listing_id={listing_id}. "
+                f"attempts={debug_attempts}"
+            )
     except Exception as exc:
         logger.warning(f"[target_live_price] HTTP extraction failed: {exc}")
         return {
@@ -1467,10 +1613,10 @@ def capture_target_live_price(
 
     return {
         "observedListingPrice": round(price),
-        "observedListingPriceDate": checkin,
+        "observedListingPriceDate": used_checkin,
         "observedListingPriceCapturedAt": captured_at,
         "observedListingPriceSource": _CONFIDENCE_TO_SOURCE.get(confidence, "unknown"),
         "observedListingPriceConfidence": confidence,
         "livePriceStatus": "captured",
-        "livePriceStatusReason": f"Nightly price captured for {checkin} (confidence={confidence})",
+        "livePriceStatusReason": f"Nightly price captured for {used_checkin}/{used_checkout} (confidence={confidence})",
     }

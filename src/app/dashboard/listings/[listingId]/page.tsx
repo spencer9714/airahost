@@ -438,6 +438,10 @@ export default function ListingHistoryPage() {
                     (latestReadyRow.report.result_summary as { observedListingPrice?: number | null } | null)
                       ?.observedListingPrice ?? null
                   }
+                  observedListingPriceDate={
+                    (latestReadyRow.report.result_summary as { observedListingPriceDate?: string | null } | null)
+                      ?.observedListingPriceDate ?? null
+                  }
                 />
               )}
 

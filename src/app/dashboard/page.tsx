@@ -800,6 +800,7 @@ export default function DashboardPage() {
                     key={activeReport?.id ?? "none"}
                     calendar={activeCalendar}
                     observedListingPrice={activeSummary.observedListingPrice ?? null}
+                    observedListingPriceDate={activeSummary.observedListingPriceDate ?? null}
                     selectable={activeAutoApplyConfigured && activeAutoApplyCohostStatus !== "not_started"}
                     onApplyDates={(dates) => {
                       setApplyDates(dates);

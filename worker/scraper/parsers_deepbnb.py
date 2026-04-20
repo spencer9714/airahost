@@ -247,6 +247,27 @@ def parse_deepbnb_pdp_to_stayspdp_payload(
                 primary_price_text = f"${float(amount):.2f} {ccy}"
                 break
 
+    if not primary_price_text:
+        # Fallback for payloads that expose numeric price amounts without formatted strings.
+        numeric_candidates: List[float] = []
+
+        def _walk_numeric(o: Any):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    lk = str(k or "").lower()
+                    if isinstance(v, (int, float)):
+                        if ("price" in lk or "amount" in lk or "rate" in lk) and 10 <= float(v) <= 200000:
+                            numeric_candidates.append(float(v))
+                    else:
+                        _walk_numeric(v)
+            elif isinstance(o, list):
+                for v in o:
+                    _walk_numeric(v)
+
+        _walk_numeric(data)
+        if numeric_candidates:
+            primary_price_text = f"${numeric_candidates[0]:.2f} {str(currency or 'USD').upper()}"
+
     if not overview_items:
         # Populate basic overview fallback from metadata.
         pc = sharing.get("personCapacity")
@@ -299,4 +320,3 @@ def parse_deepbnb_pdp_to_stayspdp_payload(
             }
         }
     }
-
