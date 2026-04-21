@@ -46,3 +46,6 @@ __pycache__/
 next-env.d.ts
 
 .airbnb_session_cache.json
+
+# sidecar ML artifacts
+ml_sidecar/reports/

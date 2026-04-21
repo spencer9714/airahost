@@ -1,12 +1,14 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Card } from "@/components/Card";
 import { Button } from "@/components/Button";
+import { MlForecastCard } from "@/components/dashboard/MlForecastCard";
 import { PricingHeatmap } from "@/components/dashboard/PricingHeatmap";
 import { PriceLineChart } from "@/components/dashboard/PriceLineChart";
+import type { MlForecastRun } from "@/lib/mlSidecar";
 import { getSupabaseBrowser } from "@/lib/supabase";
 import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
 
@@ -75,8 +77,12 @@ export default function ListingHistoryPage() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [mlRun, setMlRun] = useState<MlForecastRun | null>(null);
+  const [mlError, setMlError] = useState<string | null>(null);
+  const [mlLoading, setMlLoading] = useState(false);
+  const [isRunningMl, setIsRunningMl] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  // Today's date — used as the minimum selectable date for custom analysis (today-or-future rule).
+  // Today's date â€” used as the minimum selectable date for custom analysis (today-or-future rule).
   const todayStr = new Date().toISOString().split("T")[0];
   const [customStart, setCustomStart] = useState(() => new Date().toISOString().split("T")[0]);
   const [customEnd, setCustomEnd] = useState(() => {
@@ -124,13 +130,14 @@ export default function ListingHistoryPage() {
         return;
       }
 
-      // Fetch listing details + reports in parallel
-      const [listingRes, reportsRes] = await Promise.all([
+      // Fetch listing details, reports, and latest ML run in parallel.
+      const [listingRes, reportsRes, mlRes] = await Promise.all([
         fetch(`/api/listings/${listingId}`),
         fetch(`/api/listings/${listingId}/reports`),
+        fetch(`/api/listings/${listingId}/ml`),
       ]);
 
-      if (listingRes.status === 401 || reportsRes.status === 401) {
+      if (listingRes.status === 401 || reportsRes.status === 401 || mlRes.status === 401) {
         router.push("/login");
         return;
       }
@@ -142,10 +149,19 @@ export default function ListingHistoryPage() {
 
       const listingData = await listingRes.json();
       const reportsData = await reportsRes.json();
+      const mlData = await mlRes.json().catch(() => ({}));
 
       const loadedListing: ListingDetail | null = listingData.listing ?? null;
       setListing(loadedListing);
       setRows(reportsData.reports ?? []);
+      setMlRun((mlData as { run?: MlForecastRun | null }).run ?? null);
+      setMlError(
+        !mlRes.ok
+          ? ((mlData as { details?: string; error?: string }).details ??
+              (mlData as { error?: string }).error ??
+              "ML forecast is unavailable.")
+          : null
+      );
       // Pre-fill preferred comps from saved listing
       const savedComps = loadedListing?.input_attributes?.preferredComps;
       if (savedComps?.length) {
@@ -178,6 +194,39 @@ export default function ListingHistoryPage() {
       return report?.status === statusFilter;
     });
   }, [rows, statusFilter]);
+
+  async function handleRunMlForecast() {
+    setIsRunningMl(true);
+    setMlLoading(true);
+    setMlError(null);
+
+    try {
+      const res = await fetch(`/api/listings/${listingId}/ml`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trainingScope: "global" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          (data as { details?: string; error?: string }).details ??
+            (data as { error?: string }).error ??
+            "Failed to run ML forecast."
+        );
+      }
+
+      setMlRun((data as { run?: MlForecastRun | null }).run ?? null);
+    } catch (runError) {
+      setMlError(
+        runError instanceof Error
+          ? runError.message
+          : "Failed to run ML forecast."
+      );
+    } finally {
+      setIsRunningMl(false);
+      setMlLoading(false);
+    }
+  }
 
   async function handleRunCustomAnalysis() {
     // Today-or-future guard: reject past start dates.
@@ -214,7 +263,7 @@ export default function ListingHistoryPage() {
   }
 
   // Board source-of-truth: latest scheduled nightly ready report ONLY.
-  // manual / rerun / custom reports are history only — never shown on the board.
+  // manual / rerun / custom reports are history only â€” never shown on the board.
   const latestReadyRow = useMemo(() => {
     for (const row of rows) {
       const report = getReport(row);
@@ -284,10 +333,10 @@ export default function ListingHistoryPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-6 px-6 py-10">
 
-      {/* ── Header ── */}
+      {/* â”€â”€ Header â”€â”€ */}
       <div>
         <Link href="/dashboard" className="text-sm text-muted hover:text-foreground">
-          ← Dashboard
+          Back to Dashboard
         </Link>
         <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-2xl font-bold tracking-tight">
@@ -304,7 +353,7 @@ export default function ListingHistoryPage() {
                   rel="noopener noreferrer"
                   className="text-sm font-medium text-foreground/35 hover:text-foreground/65 transition-colors"
                 >
-                  ↗ View on Airbnb
+                  Open on Airbnb
                 </a>
               );
             }
@@ -326,9 +375,9 @@ export default function ListingHistoryPage() {
         </Card>
       )}
 
-      {/* ════════════════════════════════════════
+      {/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
           Section 1: Current Market Board
-      ════════════════════════════════════════ */}
+      â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */}
       <div className="space-y-4">
         <div className="flex items-center gap-2.5">
           <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
@@ -371,7 +420,7 @@ export default function ListingHistoryPage() {
                     ) : (
                       <div>
                         <p className="text-[10px] font-semibold uppercase tracking-widest text-foreground/30">Suggested nightly</p>
-                        <p className="mt-0.5 text-3xl font-bold tracking-tight text-foreground">{suggested != null ? `$${suggested}` : "—"}</p>
+                        <p className="mt-0.5 text-3xl font-bold tracking-tight text-foreground">{suggested != null ? `$${suggested}` : "-"}</p>
                       </div>
                     )}
                     {median != null && (
@@ -391,7 +440,7 @@ export default function ListingHistoryPage() {
                   {/* Pricing action */}
                   {pricingAction && pricingAction !== "keep" && pricingActionTarget && (
                     <div className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${pricingAction === "raise" ? "border-blue-200 bg-blue-50 text-blue-700" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
-                      {pricingAction === "raise" ? `↑ Raise to $${pricingActionTarget}` : `↓ Lower to $${pricingActionTarget}`}
+                      {pricingAction === "raise" ? `Raise to $${pricingActionTarget}` : `Lower to $${pricingActionTarget}`}
                     </div>
                   )}
 
@@ -411,7 +460,7 @@ export default function ListingHistoryPage() {
                     href={`/r/${latestReadyRow.report.share_id}`}
                     className="inline-block text-xs font-semibold text-accent hover:underline"
                   >
-                    View full report →
+                    View full report
                   </Link>
                 </div>
               );
@@ -470,9 +519,9 @@ export default function ListingHistoryPage() {
         })()}
       </div>
 
-      {/* ════════════════════════════════════════
+      {/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
           Section 2: Run Custom Analysis
-      ════════════════════════════════════════ */}
+      â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */}
       <div className="space-y-3">
         <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
           Run Custom Analysis
@@ -512,7 +561,7 @@ export default function ListingHistoryPage() {
               onClick={handleRunCustomAnalysis}
               className="shrink-0 rounded-xl bg-gray-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-gray-800 disabled:opacity-40"
             >
-              {isRunningCustom ? "Starting…" : "Run analysis"}
+              {isRunningCustom ? "Starting..." : "Run analysis"}
             </button>
           </div>
           {customRangeInvalid && (
@@ -523,9 +572,20 @@ export default function ListingHistoryPage() {
         </div>
       </div>
 
-      {/* ════════════════════════════════════════
-          Section 3: Benchmark / Pinned comps
-      ════════════════════════════════════════ */}
+      <div className="space-y-3">
+        <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
+          Experimental ML Forecast
+        </p>
+        <MlForecastCard
+          run={mlRun}
+          loading={mlLoading}
+          running={isRunningMl}
+          error={mlError}
+          onRun={handleRunMlForecast}
+        />
+      </div>
+
+      {/* Section 3: Benchmark / Pinned comps */}
       <div className="space-y-3">
         <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
           Benchmark Settings
@@ -568,7 +628,7 @@ export default function ListingHistoryPage() {
                         {idx === 0 && (
                           <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold text-amber-800">primary</span>
                         )}
-                        {comp.note && <span className="ml-1 italic text-muted">— {comp.note}</span>}
+                        {comp.note && <span className="ml-1 italic text-muted"> - {comp.note}</span>}
                       </p>
                     ))}
                   </div>
@@ -593,7 +653,7 @@ export default function ListingHistoryPage() {
               <div className={hasBenchmark ? "mt-4 space-y-3 border-t border-border pt-4" : "mt-3 space-y-3"}>
                 {!hasBenchmark && (
                   <p className="text-xs text-muted">
-                    The single best way to improve accuracy. Paste the Airbnb listing you compete with most — we&apos;ll anchor your estimate to its real nightly rate.
+                    The single best way to improve accuracy. Paste the Airbnb listing you compete with most - we&apos;ll anchor your estimate to its real nightly rate.
                   </p>
                 )}
                 {pinnedCompsList.map((comp, idx) => (
@@ -602,7 +662,7 @@ export default function ListingHistoryPage() {
                       <div className="mb-2 flex items-center justify-between">
                         {idx === 0 ? (
                           <span className="rounded-full bg-amber-200 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
-                            ★ Primary benchmark
+                            Primary benchmark
                           </span>
                         ) : (
                           <button
@@ -623,7 +683,7 @@ export default function ListingHistoryPage() {
                           onClick={() => setPinnedCompsList(pinnedCompsList.filter((_, i) => i !== idx))}
                           className="text-xs text-muted hover:text-warning"
                         >
-                          ✕
+                          Remove
                         </button>
                       </div>
                     )}
@@ -690,9 +750,9 @@ export default function ListingHistoryPage() {
       })()}
       </div>{/* end Section 3 */}
 
-      {/* ════════════════════════════════════════
+      {/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
           Section 4: Report History
-      ════════════════════════════════════════ */}
+      â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <p className="text-[11px] font-semibold uppercase tracking-widest text-foreground/35">
@@ -836,7 +896,7 @@ export default function ListingHistoryPage() {
                             <>
                               {" "}high-confidence days
                               {lowConfidenceRate != null && lowConfidenceRate > 0 && (
-                                <span className="text-muted"> · {lowConfidenceRate}% low-confidence direct-page days</span>
+                                <span className="text-muted"> | {lowConfidenceRate}% low-confidence direct-page days</span>
                               )}
                             </>
                           )}

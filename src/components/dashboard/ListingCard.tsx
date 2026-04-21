@@ -133,7 +133,7 @@ export function ListingCard({
   isActive,
   onSelect,
   onDelete,
-
+  onViewHistory,
   onRename,
   onSavePreferredComps,
   onSaveAlertSettings,
@@ -481,7 +481,17 @@ export function ListingCard({
             )}
 
             {/* ── Footer: Edit/Close ── */}
-            <div className="flex items-center justify-end border-t border-gray-100/80 px-4 py-2">
+            <div className="flex items-center justify-between border-t border-gray-100/80 px-4 py-2">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onViewHistory();
+                }}
+                className="text-xs font-medium text-foreground/40 transition-colors hover:text-foreground/70"
+              >
+                Details
+              </button>
               <button
                 type="button"
                 onClick={() => {

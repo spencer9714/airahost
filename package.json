@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "ml:sidecar": "python -m ml_sidecar.batch_pipeline",
     "ml:batch": "run_ml_batch.cmd",
     "ml:backtest": "run_ml_backtest.cmd",
     "ml:backtest:time": "run_ml_backtest_time.cmd",
