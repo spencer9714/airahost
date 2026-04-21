@@ -1,2 +1,0 @@
-split_mode,evaluation_label,n_rows,actual_mean,predicted_mean,mean_signed_pct_error_pct,median_signed_pct_error_pct,mape_pct,median_abs_pct_error_pct,p90_abs_pct_error_pct,within_5_pct_ratio,within_10_pct_ratio,within_20_pct_ratio,mae,mape,r2,median_abs_error,max_abs_error,observed_at_min,observed_at_max,price_date_min,price_date_max
-holdout_comp,1005860849161564008,254,460.8031,389.8124,-14.9731,-15.4287,15.2799,15.4287,30.4518,0.1575,0.2795,0.815,72.2359,0.152799,-2.248504,71.2829,199.1254,2026-03-26,2026-04-01,2026-03-26,2026-04-30
