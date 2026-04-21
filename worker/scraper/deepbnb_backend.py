@@ -1,3 +1,5 @@
+import base64
+import copy
 import json
 import logging
 import os
@@ -12,13 +14,14 @@ from worker.scraper.parsers_deepbnb import (
     parse_deepbnb_search_to_stayssearch_payload,
 )
 from worker.scraper.scraper_errors import ScraperForbiddenError
+from worker.scraper.stayspdp_template import HARDCODED_STAYS_PDP_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
 
 class DeepBnbBackend:
     """
-    Standalone backend adapter inspired by airbnb-scraper/deepbnb.
+    Standalone backend adapter for direct Airbnb API fetches.
 
     This adapter is intentionally separated from AirbnbClient replay logic.
     It builds GraphQL requests directly and then converts responses into the
@@ -47,6 +50,11 @@ class DeepBnbBackend:
             or os.getenv("AIRBNB_PDPLATFORM_HASH")
             or "625a4ba56ba72f8e8585d60078eb95ea0030428cac8772fde09de073da1bcdd0"
         )
+        self.stays_pdp_sections_hash = str(
+            config.get("AIRBNB_STAYSPDPSECTIONS_HASH")
+            or os.getenv("AIRBNB_STAYSPDPSECTIONS_HASH")
+            or "f81911bce044e58b7c2ed3f44b3ca576af3c08988ce2c0b3ee0d6d444cfd25a1"
+        )
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -73,6 +81,12 @@ class DeepBnbBackend:
         return (
             f"{self.base_url}/api/v3/PdpPlatformSections/{self.pdp_platform_hash}"
             f"?operationName=PdpPlatformSections&locale={self.locale}&currency={self.currency}"
+        )
+
+    def _stays_pdp_sections_url(self) -> str:
+        return (
+            f"{self.base_url}/api/v3/StaysPdpSections/{self.stays_pdp_sections_hash}"
+            f"?operationName=StaysPdpSections&locale={self.locale}&currency={self.currency}"
         )
 
     @staticmethod
@@ -206,15 +220,78 @@ class DeepBnbBackend:
             out.append({"filterName": raw_name, "filterValues": [str(val)]})
         return out
 
+    @staticmethod
+    def _to_global_id(prefix: str, listing_id: str) -> str:
+        return base64.b64encode(f"{prefix}:{listing_id}".encode("utf-8")).decode("utf-8")
+
+    def _build_stays_pdp_payload(self, listing_id: str, *, checkin: str, checkout: str, adults: int) -> Dict[str, Any]:
+        template_post_data = (
+            (HARDCODED_STAYS_PDP_TEMPLATE or {}).get("post_data")
+            if isinstance(HARDCODED_STAYS_PDP_TEMPLATE, dict)
+            else None
+        )
+        if isinstance(template_post_data, dict):
+            payload: Dict[str, Any] = copy.deepcopy(template_post_data)
+        else:
+            payload = {
+                "operationName": "StaysPdpSections",
+                "variables": {
+                    "id": "",
+                    "demandStayListingId": "",
+                    "pdpSectionsRequest": {
+                        "adults": "1",
+                        "layouts": ["SIDEBAR", "SINGLE_COLUMN"],
+                        "sectionIds": [
+                            "BOOK_IT_FLOATING_FOOTER",
+                            "BOOK_IT_SIDEBAR",
+                            "BOOK_IT_NAV",
+                        ],
+                        "checkIn": "",
+                        "checkOut": "",
+                    },
+                    "dateRange": {"startDate": "", "endDate": ""},
+                },
+                "extensions": {
+                    "persistedQuery": {
+                        "version": 1,
+                        "sha256Hash": self.stays_pdp_sections_hash,
+                    }
+                },
+            }
+
+        vars_obj = payload.setdefault("variables", {})
+        stay_gid = self._to_global_id("StayListing", str(listing_id))
+        demand_gid = self._to_global_id("DemandStayListing", str(listing_id))
+        vars_obj["id"] = stay_gid
+        vars_obj["demandStayListingId"] = demand_gid
+
+        pdp_req = vars_obj.setdefault("pdpSectionsRequest", {})
+        if isinstance(pdp_req, dict):
+            pdp_req["adults"] = str(adults)
+            pdp_req["checkIn"] = checkin
+            pdp_req["checkOut"] = checkout
+
+        date_range = vars_obj.setdefault("dateRange", {})
+        if isinstance(date_range, dict):
+            date_range["startDate"] = checkin
+            date_range["endDate"] = checkout
+
+        payload["operationName"] = "StaysPdpSections"
+        ext = payload.setdefault("extensions", {})
+        pquery = ext.setdefault("persistedQuery", {})
+        pquery["version"] = 1
+        pquery["sha256Hash"] = self.stays_pdp_sections_hash
+        return payload
+
     def search_listings_with_overrides(self, overrides: Dict[str, Any]) -> Optional[Tuple[int, Dict[str, Any]]]:
         search_url = str(overrides.get("searchUrl") or "").strip()
         url_overrides = self._overrides_from_search_url(search_url) if search_url else {}
         merged_overrides = dict(url_overrides)
         merged_overrides.update(overrides)
         if search_url:
-            logger.info("deepbnb url-search input searchUrl=%s", search_url)
+            logger.info("fetch url-search input searchUrl=%s", search_url)
             logger.info(
-                "deepbnb url-search parsed query=%s checkin=%s checkout=%s adults=%s centerLat=%s centerLng=%s",
+                "fetch url-search parsed query=%s checkin=%s checkout=%s adults=%s centerLat=%s centerLng=%s",
                 url_overrides.get("query"),
                 url_overrides.get("checkin"),
                 url_overrides.get("checkout"),
@@ -229,7 +306,7 @@ class DeepBnbBackend:
         adults = int(merged_overrides.get("adults") or self.config.get("ADULTS", 2) or 2)
         if search_url:
             logger.info(
-                "deepbnb url-search effective query=%s checkin=%s checkout=%s adults=%s searchType=%s",
+                "fetch url-search effective query=%s checkin=%s checkout=%s adults=%s searchType=%s",
                 query,
                 checkin,
                 checkout,
@@ -274,7 +351,7 @@ class DeepBnbBackend:
             "extensions": {"persistedQuery": {"version": 1, "sha256Hash": self.stays_search_hash}},
         }
         url = self._stays_search_url()
-        logger.info("deepbnb search url=%s", url)
+        logger.info("fetch search url=%s", url)
         try:
             resp = self.session.post(url, json=payload, headers=self._headers(), timeout=25)
             status = int(resp.status_code)
@@ -286,7 +363,7 @@ class DeepBnbBackend:
         except Exception as exc:
             if isinstance(exc, ScraperForbiddenError):
                 raise
-            logger.warning("deepbnb StaysSearch failed: %s", exc)
+            logger.warning("fetch StaysSearch failed: %s", exc)
             return None
 
         converted = parse_deepbnb_search_to_stayssearch_payload(
@@ -297,6 +374,45 @@ class DeepBnbBackend:
         )
         return status, converted
 
+    def get_listing_details_via_stays_pdp_sections(
+        self,
+        listing_id: str,
+        *,
+        checkin: str,
+        checkout: str,
+        adults: int,
+    ) -> Optional[Dict[str, Any]]:
+        payload = self._build_stays_pdp_payload(
+            str(listing_id),
+            checkin=checkin,
+            checkout=checkout,
+            adults=adults,
+        )
+        url = self._stays_pdp_sections_url()
+        logger.info("fetch pdp url=%s", url)
+        try:
+            resp = self.session.post(url, json=payload, headers=self._headers(), timeout=25)
+            status = int(resp.status_code)
+            if status in (401, 403):
+                raise ScraperForbiddenError(f"Fetch StaysPdpSections blocked with status={status}")
+            raw_json = resp.json() if resp.content else {}
+            if self._looks_blocked(status, raw_json if isinstance(raw_json, dict) else {}):
+                raise ScraperForbiddenError(f"Fetch StaysPdpSections blocked with status={status}")
+        except Exception as exc:
+            if isinstance(exc, ScraperForbiddenError):
+                raise
+            logger.warning("fetch StaysPdpSections failed: %s", exc)
+            return None
+
+        converted = parse_deepbnb_pdp_to_stayspdp_payload(
+            raw_json if isinstance(raw_json, dict) else {},
+            listing_id=str(listing_id),
+            checkin=checkin,
+            checkout=checkout,
+            currency=self.currency,
+        )
+        return converted
+
     def get_listing_details(
         self,
         listing_id: str,
@@ -305,6 +421,15 @@ class DeepBnbBackend:
         checkout: str,
         adults: int,
     ) -> Optional[Dict[str, Any]]:
+        stays_pdp_result = self.get_listing_details_via_stays_pdp_sections(
+            listing_id=listing_id,
+            checkin=checkin,
+            checkout=checkout,
+            adults=adults,
+        )
+        if stays_pdp_result is not None:
+            return stays_pdp_result
+
         payload = {
             "operationName": "PdpPlatformSections",
             "variables": {
@@ -320,7 +445,7 @@ class DeepBnbBackend:
             "extensions": {"persistedQuery": {"version": 1, "sha256Hash": self.pdp_platform_hash}},
         }
         url = self._pdp_platform_url()
-        logger.info("deepbnb pdp url=%s", url)
+        logger.info("fetch fallback pdp url=%s", url)
         try:
             resp = self.session.post(url, json=payload, headers=self._headers(), timeout=25)
             status = int(resp.status_code)
@@ -332,7 +457,7 @@ class DeepBnbBackend:
         except Exception as exc:
             if isinstance(exc, ScraperForbiddenError):
                 raise
-            logger.warning("deepbnb PdpPlatformSections failed: %s", exc)
+            logger.warning("fetch PdpPlatformSections failed: %s", exc)
             return None
 
         converted = parse_deepbnb_pdp_to_stayspdp_payload(

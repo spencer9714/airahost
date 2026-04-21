@@ -52,6 +52,20 @@ class AirbnbClient:
             self._playwright_scraper = PlaywrightScraper(self.config)
         return self._playwright_scraper
 
+    def sync_fetch_session_cookies_from_playwright(self) -> None:
+        """Copy current Playwright session cookies into the fetch backend session."""
+        scraper = self._get_playwright_scraper()
+        self._deepbnb_session.cookies.clear()
+        for cookie in scraper.session.cookies:
+            self._deepbnb_session.cookies.set(
+                cookie.name,
+                cookie.value,
+                domain=cookie.domain,
+                path=cookie.path,
+                secure=cookie.secure,
+                expires=cookie.expires,
+            )
+
     def refresh_session(self, force_capture: bool = False, bypass_cooldown: bool = False):
         return self._get_playwright_scraper().refresh_session(force_capture=force_capture, bypass_cooldown=bypass_cooldown)
 
@@ -89,6 +103,7 @@ class AirbnbClient:
     def search_listings(self) -> Tuple[int, Dict[str, Any]]:
         if self.deepbnb_scraper is not None:
             try:
+                self.sync_fetch_session_cookies_from_playwright()
                 return self.deepbnb_scraper.search_listings()
             except ScraperForbiddenError as exc:
                 logger.error(
@@ -106,6 +121,7 @@ class AirbnbClient:
     ) -> Tuple[int, Dict[str, Any]]:
         if self.deepbnb_scraper is not None:
             try:
+                self.sync_fetch_session_cookies_from_playwright()
                 return self.deepbnb_scraper.search_listings_with_overrides(overrides)
             except ScraperForbiddenError as exc:
                 logger.error(
@@ -134,6 +150,7 @@ class AirbnbClient:
 
         if self.deepbnb_scraper is not None:
             try:
+                self.sync_fetch_session_cookies_from_playwright()
                 return self.deepbnb_scraper.get_listing_details(
                     str(listing_id),
                     checkin=effective_checkin,
