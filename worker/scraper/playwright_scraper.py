@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 class PlaywrightScraper:
     """Legacy Playwright capture/replay strategy restored from pre-deepbnb history."""
     _refresh_lock = threading.Lock()
+    _tab_gate_lock = threading.Lock()
+    _tab_gate = None
+    _tab_limit = 5
+    _open_tab_count = 0
 
     def __init__(self, config: dict):
         self.config = config
@@ -74,8 +78,61 @@ class PlaywrightScraper:
         self._uses_external_browser = True
         self._pw = None
         self._browser = None
+        self._ensure_tab_gate()
         if self.use_hardcoded_stayspdp_template:
             self._load_hardcoded_stayspdp_template()
+
+    @classmethod
+    def _ensure_tab_gate(cls) -> None:
+        with cls._tab_gate_lock:
+            if cls._tab_gate is not None:
+                return
+            raw_limit = os.getenv("AIRBNB_PLAYWRIGHT_MAX_TABS", "5")
+            try:
+                parsed_limit = int(str(raw_limit).strip())
+            except Exception:
+                parsed_limit = 5
+            # Hard safety ceiling: never allow more than 5 concurrent tabs.
+            cls._tab_limit = max(1, min(parsed_limit, 5))
+            cls._tab_gate = threading.BoundedSemaphore(cls._tab_limit)
+
+    @classmethod
+    def _acquire_tab_slot(cls, timeout_seconds: float = 120.0) -> None:
+        cls._ensure_tab_gate()
+        assert cls._tab_gate is not None
+        acquired = cls._tab_gate.acquire(timeout=timeout_seconds)
+        if not acquired:
+            raise RuntimeError(
+                f"Timed out waiting for Playwright tab slot (limit={cls._tab_limit})"
+            )
+        with cls._tab_gate_lock:
+            cls._open_tab_count += 1
+
+    @classmethod
+    def _release_tab_slot(cls) -> None:
+        with cls._tab_gate_lock:
+            cls._open_tab_count = max(0, cls._open_tab_count - 1)
+        if cls._tab_gate is not None:
+            try:
+                cls._tab_gate.release()
+            except Exception:
+                pass
+
+    def _open_capped_page(self, context):
+        self._acquire_tab_slot()
+        try:
+            return context.new_page()
+        except Exception:
+            self._release_tab_slot()
+            raise
+
+    def _close_capped_page(self, page) -> None:
+        try:
+            page.close()
+        except Exception:
+            pass
+        finally:
+            self._release_tab_slot()
 
     def _load_hardcoded_stayspdp_template(self) -> bool:
         if not isinstance(HARDCODED_STAYS_PDP_TEMPLATE, dict):
@@ -531,7 +588,7 @@ class PlaywrightScraper:
         """Run a real browser search and capture the live StaysSearch JSON response."""
         context = self._get_thread_context()
         self._sync_session_cookies_into_context(context)
-        page = context.new_page()
+        page = self._open_capped_page(context)
         try:
             captured_status: int = 0
             captured_data: Optional[Dict[str, Any]] = None
@@ -581,10 +638,7 @@ class PlaywrightScraper:
                 raise RuntimeError("Playwright browser search did not capture StaysSearch response")
             return (captured_status or 200), captured_data
         finally:
-            try:
-                page.close()
-            except Exception:
-                pass
+            self._close_capped_page(page)
 
     def _get_listing_details_via_browser(
         self,
@@ -596,7 +650,7 @@ class PlaywrightScraper:
         """Run a real browser PDP visit and capture live StaysPdpSections JSON response."""
         context = self._get_thread_context()
         self._sync_session_cookies_into_context(context)
-        page = context.new_page()
+        page = self._open_capped_page(context)
         try:
             captured_status: int = 0
             captured_data: Optional[Dict[str, Any]] = None
@@ -645,10 +699,7 @@ class PlaywrightScraper:
                 raise RuntimeError("Playwright browser PDP returned auth/challenge-like GraphQL error")
             return (captured_status or 200), captured_data
         finally:
-            try:
-                page.close()
-            except Exception:
-                pass
+            self._close_capped_page(page)
 
     def search_listings_with_overrides(
         self,

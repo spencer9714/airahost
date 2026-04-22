@@ -514,39 +514,27 @@ def _build_target_listing_only_daily_results(
     This keeps the report/calendar renderable so the dashboard heatmap appears.
     """
     from datetime import datetime as _dt, timedelta as _td
-    from worker.scraper.target_extractor import capture_target_live_price
 
     out: List[Dict[str, Any]] = []
+    prices_payload = _capture_user_listing_prices_for_range(
+        report_id=report_id,
+        listing_url=listing_url,
+        start_date=start_date,
+        end_date=end_date,
+        minimum_booking_nights=minimum_booking_nights,
+    )
+    by_date: Dict[str, int] = prices_payload.get("priceByDate") or {}
 
     start = _dt.strptime(start_date, "%Y-%m-%d")
     end = _dt.strptime(end_date, "%Y-%m-%d")
     total_days = max(1, (end - start).days)
-    nights = max(1, int(minimum_booking_nights or 1))
 
-    captured = 0
     for i in range(total_days):
         checkin_dt = start + _td(days=i)
         checkin = checkin_dt.strftime("%Y-%m-%d")
-        checkout = (checkin_dt + _td(days=nights)).strftime("%Y-%m-%d")
-
-        try:
-            live = capture_target_live_price(
-                listing_url=listing_url,
-                checkin=checkin,
-                checkout=checkout,
-                cdp_url=CDP_URL,
-                cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
-            )
-        except Exception as exc:
-            logger.warning(
-                f"[{report_id}] Target-only fallback capture failed for {checkin}: {exc}"
-            )
-            live = {"observedListingPrice": None, "livePriceStatus": "scrape_failed"}
-
-        obs = live.get("observedListingPrice")
-        if isinstance(obs, (int, float)) and obs > 0:
-            price = round(float(obs))
-            captured += 1
+        _price = by_date.get(checkin)
+        if isinstance(_price, (int, float)) and _price > 0:
+            price = round(float(_price))
             out.append(
                 {
                     "date": checkin,
@@ -577,9 +565,131 @@ def _build_target_listing_only_daily_results(
             )
 
     logger.info(
-        f"[{report_id}] Target-only fallback daily capture: {captured}/{total_days} days priced"
+        f"[{report_id}] Target-only fallback daily capture: "
+        f"{prices_payload.get('capturedDays', 0)}/{total_days} days priced"
     )
     return out
+
+
+def _capture_user_listing_prices_for_range(
+    *,
+    report_id: str,
+    listing_url: str,
+    start_date: str,
+    end_date: str,
+    minimum_booking_nights: int,
+) -> Dict[str, Any]:
+    """
+    Capture user-listing nightly prices for each report day using the same
+    day-query threading settings as compset scraping.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from worker.core.concurrent_runner import execute_day_queries_concurrently
+    from worker.scraper.airbnb_client import AirbnbClient
+    from worker.scraper.target_extractor import capture_target_live_price
+
+    start = _dt.strptime(start_date, "%Y-%m-%d")
+    end = _dt.strptime(end_date, "%Y-%m-%d")
+    total_days = max(1, (end - start).days)
+    nights = max(1, int(minimum_booking_nights or 1))
+    playwright_live_client = AirbnbClient(
+        {
+            "CHECKIN": start_date,
+            "CHECKOUT": end_date,
+            "ADULTS": 1,
+            # User-listing day-level capture should use browser scraping path.
+            "USE_DEEPBNB_BACKEND": False,
+        }
+    )
+
+    def _capture_for_index(i: int) -> Dict[str, Any]:
+        checkin_dt = start + _td(days=i)
+        checkin = checkin_dt.strftime("%Y-%m-%d")
+        checkout = (checkin_dt + _td(days=nights)).strftime("%Y-%m-%d")
+        time.sleep(RATE_LIMIT_SECONDS)
+        try:
+            live = capture_target_live_price(
+                listing_url=listing_url,
+                checkin=checkin,
+                checkout=checkout,
+                cdp_url=CDP_URL,
+                cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                client=playwright_live_client,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{report_id}] User-listing daily capture failed for {checkin}: {exc}"
+            )
+            live = {
+                "observedListingPrice": None,
+                "livePriceStatus": "scrape_failed",
+                "livePriceStatusReason": str(exc)[:300],
+            }
+
+        obs = live.get("observedListingPrice")
+        price = round(float(obs)) if isinstance(obs, (int, float)) and obs > 0 else None
+        return {
+            "date": checkin,
+            "price": price,
+            "status": str(live.get("livePriceStatus") or ""),
+            "reason": str(live.get("livePriceStatusReason") or ""),
+            "source": live.get("observedListingPriceSource"),
+            "confidence": live.get("observedListingPriceConfidence"),
+            "captured_at": live.get("observedListingPriceCapturedAt"),
+        }
+
+    worker_count = DAY_QUERY_MAX_WORKERS
+    logger.info(
+        f"[{report_id}] user-listing daily capture: workers={worker_count}, dates={total_days}"
+    )
+    rows, _state = execute_day_queries_concurrently(
+        query_func=_capture_for_index,
+        args_list=list(range(total_days)),
+        max_workers=worker_count,
+        early_stop_threshold=None,
+        progress_callback=None,
+    )
+
+    price_by_date: Dict[str, int] = {}
+    first_day_row: Optional[Dict[str, Any]] = None
+    first_captured_row: Optional[Dict[str, Any]] = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        day_date = str(row.get("date") or "")
+        if day_date == start_date and first_day_row is None:
+            first_day_row = row
+        day_price = row.get("price")
+        if isinstance(day_price, (int, float)) and day_price > 0:
+            price_by_date[day_date] = round(float(day_price))
+            if first_captured_row is None:
+                first_captured_row = row
+
+    _first_day_price = (first_day_row or {}).get("price")
+    if isinstance(_first_day_price, (int, float)) and _first_day_price > 0:
+        picked = first_day_row or {}
+    else:
+        picked = first_captured_row or first_day_row or {}
+    captured_days = len(price_by_date)
+    live_status = "captured" if captured_days > 0 else "no_price_found"
+    live_reason = (
+        f"Captured {captured_days}/{total_days} day-level user listing prices"
+        if captured_days > 0
+        else "No nightly price found across the selected report range"
+    )
+
+    return {
+        "priceByDate": price_by_date,
+        "capturedDays": captured_days,
+        "totalDays": total_days,
+        "observedListingPrice": picked.get("price"),
+        "observedListingPriceDate": picked.get("date") or start_date,
+        "observedListingPriceCapturedAt": picked.get("captured_at"),
+        "observedListingPriceSource": picked.get("source"),
+        "observedListingPriceConfidence": picked.get("confidence"),
+        "livePriceStatus": live_status,
+        "livePriceStatusReason": live_reason,
+    }
 
 
 def _attach_user_listing_prices_and_log(
@@ -1021,34 +1131,29 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
             # Shallow-copy summary so we don't mutate the cached object.
             summary = dict(summary)
             if listing_url:
-                from datetime import datetime as _dt, timedelta as _td
-                _live_checkin = start_date
-                try:
-                    _live_checkout = (
-                        _dt.strptime(start_date, "%Y-%m-%d") + _td(days=minimum_booking_nights)
-                    ).strftime("%Y-%m-%d")
-                except Exception:
-                    _live_checkout = end_date
-                try:
-                    from worker.scraper.target_extractor import capture_target_live_price
-                    _cache_live_info = capture_target_live_price(
-                        listing_url=listing_url,
-                        checkin=_live_checkin,
-                        checkout=_live_checkout,
-                        cdp_url=CDP_URL,
-                        cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                _cache_live_info = _capture_user_listing_prices_for_range(
+                    report_id=report_id,
+                    listing_url=listing_url,
+                    start_date=start_date,
+                    end_date=end_date,
+                    minimum_booking_nights=minimum_booking_nights,
+                )
+                _cache_price_by_date = _cache_live_info.get("priceByDate") or {}
+                for day in calendar:
+                    if not isinstance(day, dict):
+                        continue
+                    _date = str(day.get("date") or "")
+                    _p = _cache_price_by_date.get(_date)
+                    day["userListingPrice"] = (
+                        round(float(_p))
+                        if isinstance(_p, (int, float)) and _p > 0
+                        else None
                     )
-                    logger.info(
-                        f"[{report_id}] Cache-hit live price: "
-                        f"status={_cache_live_info.get('livePriceStatus')} "
-                        f"price={_cache_live_info.get('observedListingPrice')}"
-                    )
-                except Exception as _lpe:
-                    logger.warning(f"[{report_id}] Cache-hit live price error (non-fatal): {_lpe}")
-                    _cache_live_info = {
-                        "livePriceStatus": "scrape_failed",
-                        "livePriceStatusReason": str(_lpe)[:300],
-                    }
+                logger.info(
+                    f"[{report_id}] Cache-hit user-listing daily capture: "
+                    f"status={_cache_live_info.get('livePriceStatus')} "
+                    f"captured_days={_cache_live_info.get('capturedDays')}/{_cache_live_info.get('totalDays')}"
+                )
                 summary.update(_cache_live_info)
                 _observed = _cache_live_info.get("observedListingPrice")
                 if isinstance(_observed, (int, float)) and _observed > 0:
@@ -1687,37 +1792,30 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
         # Non-fatal: failure is logged and recorded in summary but does not
         # block the job from completing.
         if listing_url:
-            from datetime import datetime as _dt, timedelta as _td
-            _live_checkin = start_date
-            try:
-                _live_checkout = (
-                    _dt.strptime(start_date, "%Y-%m-%d") + _td(days=minimum_booking_nights)
-                ).strftime("%Y-%m-%d")
-            except Exception:
-                _live_checkout = end_date
-
-            _progress(85, "capturing_live_price", "Capturing your current listing price from Airbnb...")
-            try:
-                from worker.scraper.target_extractor import capture_target_live_price
-                live_price_info = capture_target_live_price(
-                    listing_url=listing_url,
-                    checkin=_live_checkin,
-                    checkout=_live_checkout,
-                    cdp_url=CDP_URL,
-                    cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+            _progress(85, "capturing_live_price", "Capturing your current listing prices from Airbnb...")
+            live_price_info = _capture_user_listing_prices_for_range(
+                report_id=report_id,
+                listing_url=listing_url,
+                start_date=start_date,
+                end_date=end_date,
+                minimum_booking_nights=minimum_booking_nights,
+            )
+            _live_price_by_date = live_price_info.get("priceByDate") or {}
+            for day in calendar:
+                if not isinstance(day, dict):
+                    continue
+                _date = str(day.get("date") or "")
+                _p = _live_price_by_date.get(_date)
+                day["userListingPrice"] = (
+                    round(float(_p))
+                    if isinstance(_p, (int, float)) and _p > 0
+                    else None
                 )
-                logger.info(
-                    f"[{report_id}] Live price capture: "
-                    f"status={live_price_info.get('livePriceStatus')} "
-                    f"price={live_price_info.get('observedListingPrice')} "
-                    f"confidence={live_price_info.get('observedListingPriceConfidence')}"
-                )
-            except Exception as _lpe:
-                logger.warning(f"[{report_id}] Live price capture error (non-fatal): {_lpe}")
-                live_price_info = {
-                    "livePriceStatus": "scrape_failed",
-                    "livePriceStatusReason": str(_lpe)[:300],
-                }
+            logger.info(
+                f"[{report_id}] User-listing daily capture: "
+                f"status={live_price_info.get('livePriceStatus')} "
+                f"captured_days={live_price_info.get('capturedDays')}/{live_price_info.get('totalDays')}"
+            )
 
             # Merge live price fields into summary
             summary.update(live_price_info)
@@ -1948,6 +2046,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                 "observedVsRecommendedDiffPct", "pricingPosition",
                 "pricingAction", "pricingActionTarget",
                 "livePriceStatus", "livePriceStatusReason",
+                "priceByDate", "capturedDays", "totalDays",
             }
             _cache_safe_summary = {k: v for k, v in summary.items() if k not in _LIVE_PRICE_KEYS}
             set_cached(client, cache_key, _cache_safe_summary, calendar, meta=meta)

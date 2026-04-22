@@ -326,7 +326,7 @@ def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str
                 scraper = client._get_playwright_scraper()
                 context = scraper._get_thread_context()
                 scraper._sync_session_cookies_into_context(context)
-                page = context.new_page()
+                page = scraper._open_capped_page(context)
                 try:
                     return extract_target_spec(page, listing_url)
                 finally:
@@ -334,10 +334,7 @@ def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str
                         scraper._sync_context_cookies_into_session(context)
                     except Exception:
                         pass
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
+                    scraper._close_capped_page(page)
             return (
                 ListingSpec(url=normalize_airbnb_url(listing_url)),
                 ["Browser HTML extraction failed: missing Playwright scraper bridge on client"],
@@ -1104,7 +1101,7 @@ def extract_nightly_price_from_listing_page(
                 scraper = page._get_playwright_scraper()
                 context = scraper._get_thread_context()
                 scraper._sync_session_cookies_into_context(context)
-                real_page = context.new_page()
+                real_page = scraper._open_capped_page(context)
                 try:
                     return extract_nightly_price_from_listing_page(
                         real_page,
@@ -1117,10 +1114,7 @@ def extract_nightly_price_from_listing_page(
                         scraper._sync_context_cookies_into_session(context)
                     except Exception:
                         pass
-                    try:
-                        real_page.close()
-                    except Exception:
-                        pass
+                    scraper._close_capped_page(real_page)
             return None, "failed"
         except Exception:
             return None, "failed"

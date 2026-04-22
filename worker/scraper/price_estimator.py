@@ -1149,54 +1149,7 @@ def run_scrape(
                 "stillPartial": _spec_still_partial,
             }
 
-            # Step 1b: Capture date-aware target price using a SHORT window (non-fatal).
-            # Root cause of prior failures: the full 30-day checkout was passed here,
-            # causing Airbnb to render a long-stay/monthly widget that never shows
-            # a standard "/night" label — all three extraction layers returned None.
-            # Fix: always use a 1-night window (checkin → checkin+1) which gives the
-            # standard per-night booking widget.  Fall back to 2-night if 1-night fails
-            # (handles listings with a 2-night minimum stay).
             _target_price_confidence: Optional[str] = None
-            try:
-                _checkin_dt = dt.strptime(checkin, "%Y-%m-%d")
-                _checkout_1n = (_checkin_dt + timedelta(days=1)).strftime("%Y-%m-%d")
-                _checkout_2n = (_checkin_dt + timedelta(days=2)).strftime("%Y-%m-%d")
-
-                logger.info(
-                    f"[run_scrape] Capturing target price: 1-night window "
-                    f"{checkin} → {_checkout_1n}"
-                )
-                _tp, _tp_conf = extract_nightly_price_from_listing_page(
-                    page, listing_url, checkin, _checkout_1n
-                )
-
-                # If 1-night returns nothing, try 2-night (min-stay=2 listings hide
-                # the booking widget for 1-night requests).
-                if _tp is None and _tp_conf != "scrape_failed":
-                    logger.info(
-                        f"[run_scrape] 1-night target price None "
-                        f"(confidence={_tp_conf}), retrying with 2-night window"
-                    )
-                    _tp, _tp_conf = extract_nightly_price_from_listing_page(
-                        page, listing_url, checkin, _checkout_2n
-                    )
-
-                if _tp is not None:
-                    target.nightly_price = _tp
-                    _target_price_confidence = _tp_conf
-                    logger.info(
-                        f"[run_scrape] Target price captured: ${_tp} "
-                        f"(confidence={_tp_conf})"
-                    )
-                else:
-                    logger.warning(
-                        f"[run_scrape] Target price capture returned None after 1+2 night "
-                        f"attempts (final confidence={_tp_conf})"
-                    )
-                    _target_price_confidence = _tp_conf
-            except Exception as _tp_exc:
-                logger.warning(f"[run_scrape] Target price capture failed (non-fatal): {_tp_exc}")
-
             # Phase 3B: coordinate priority — page-extracted > geocoded > none.
             # extract_target_spec() may populate target.lat/lng from JSON-LD geo.
             # Only fall back to geocoded coords when the page gave us nothing.
@@ -1497,6 +1450,45 @@ def run_scrape(
                     "selection_mode": dr.selection_mode,
                     "pricing_confidence": dr.pricing_confidence,
                 })
+
+            # Capture target listing nightly price after day queries complete.
+            # This keeps daily compset querying as the first network-heavy phase.
+            try:
+                _checkin_dt = dt.strptime(checkin, "%Y-%m-%d")
+                _checkout_1n = (_checkin_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+                _checkout_2n = (_checkin_dt + timedelta(days=2)).strftime("%Y-%m-%d")
+
+                logger.info(
+                    f"[run_scrape] Capturing target price: 1-night window "
+                    f"{checkin} -> {_checkout_1n}"
+                )
+                _tp, _tp_conf = extract_nightly_price_from_listing_page(
+                    page, listing_url, checkin, _checkout_1n
+                )
+                if _tp is None and _tp_conf != "scrape_failed":
+                    logger.info(
+                        f"[run_scrape] 1-night target price None "
+                        f"(confidence={_tp_conf}), retrying with 2-night window"
+                    )
+                    _tp, _tp_conf = extract_nightly_price_from_listing_page(
+                        page, listing_url, checkin, _checkout_2n
+                    )
+
+                if _tp is not None:
+                    target.nightly_price = _tp
+                    _target_price_confidence = _tp_conf
+                    logger.info(
+                        f"[run_scrape] Target price captured: ${_tp} "
+                        f"(confidence={_tp_conf})"
+                    )
+                else:
+                    logger.warning(
+                        f"[run_scrape] Target price capture returned None after 1+2 night "
+                        f"attempts (final confidence={_tp_conf})"
+                    )
+                    _target_price_confidence = _tp_conf
+            except Exception as _tp_exc:
+                logger.warning(f"[run_scrape] Target price capture failed (non-fatal): {_tp_exc}")
 
             # Step 4: Discount evidence (debug only, if time permits)
             discount_evidence = None
