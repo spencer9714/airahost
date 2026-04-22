@@ -63,10 +63,12 @@ class PlaywrightScraper:
         # Cache unresolved PDP booking windows to avoid repeated expensive
         # template recaptures when Airbnb consistently returns NOT_COMPLETE.
         self._pdp_unresolved_windows: Dict[str, float] = {}
-        self._browser_lock = threading.Lock()
+        self._browser_init_lock = threading.Lock()
+        self._session_cookie_lock = threading.Lock()
+        self._thread_local = threading.local()
+        self._thread_contexts: Dict[int, Any] = {}
         self._pw = None
         self._browser = None
-        self._context = None
         if self.use_hardcoded_stayspdp_template:
             self._load_hardcoded_stayspdp_template()
 
@@ -164,10 +166,12 @@ class PlaywrightScraper:
         clone._last_refresh_started_at = self._last_refresh_started_at
         clone.refresh_before_each_search = self.refresh_before_each_search
         clone._pdp_unresolved_windows = copy.deepcopy(self._pdp_unresolved_windows)
-        clone._browser_lock = threading.Lock()
+        clone._browser_init_lock = threading.Lock()
+        clone._session_cookie_lock = threading.Lock()
+        clone._thread_local = threading.local()
+        clone._thread_contexts = {}
         clone._pw = None
         clone._browser = None
-        clone._context = None
         for c in self.session.cookies:
             clone.session.cookies.set(
                 c.name,
@@ -422,58 +426,82 @@ class PlaywrightScraper:
             params["items_offset"] = ov.get("itemsOffset")
         return f"{self.base_url}{search_path}?{urlencode(params)}"
 
-    def _ensure_browser_context(self):
-        if self._context is not None:
-            return self._context
+    def _ensure_browser(self):
+        if self._browser is not None and self._pw is not None:
+            return self._browser
 
-        self._pw = sync_playwright().start()
+        with self._browser_init_lock:
+            if self._browser is not None and self._pw is not None:
+                return self._browser
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch(headless=False)
+            return self._browser
+
+    def _get_thread_context(self):
+        ctx = getattr(self._thread_local, "context", None)
+        if ctx is not None:
+            return ctx
+        browser = self._ensure_browser()
         user_agent = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/121.0.0.0 Safari/537.36"
         )
         viewport = {"width": 1280, "height": 800}
+        ctx = browser.new_context(user_agent=user_agent, viewport=viewport)
+        self._thread_local.context = ctx
+        self._thread_contexts[threading.get_ident()] = ctx
+        return ctx
 
-        self._browser = self._pw.chromium.launch(headless=True)
-        self._context = self._browser.new_context(user_agent=user_agent, viewport=viewport)
+    def _snapshot_session_cookies(self) -> list[dict]:
+        out: list[dict] = []
+        with self._session_cookie_lock:
+            for c in self.session.cookies:
+                try:
+                    out.append(
+                        {
+                            "name": c.name,
+                            "value": c.value,
+                            "domain": c.domain,
+                            "path": c.path or "/",
+                            "secure": bool(c.secure),
+                        }
+                    )
+                except Exception:
+                    continue
+        return out
 
-        return self._context
-
-    def _sync_session_cookies_into_context(self) -> None:
-        context = self._ensure_browser_context()
-        existing_cookies = []
-        for c in self.session.cookies:
-            try:
-                existing_cookies.append(
-                    {
-                        "name": c.name,
-                        "value": c.value,
-                        "domain": c.domain,
-                        "path": c.path or "/",
-                        "secure": bool(c.secure),
-                    }
-                )
-            except Exception:
-                continue
+    def _sync_session_cookies_into_context(self, context) -> None:
+        existing_cookies = self._snapshot_session_cookies()
         if existing_cookies:
             try:
                 context.add_cookies(existing_cookies)
             except Exception:
                 pass
 
-    def _sync_context_cookies_into_session(self) -> None:
-        context = self._ensure_browser_context()
-        self.session.cookies.clear()
-        for cookie in context.cookies():
-            self.session.cookies.set(
-                cookie["name"],
-                cookie["value"],
-                domain=cookie["domain"],
-                path=cookie["path"],
-            )
+    def _sync_context_cookies_into_session(self, context) -> None:
+        try:
+            context_cookies = context.cookies()
+        except Exception:
+            return
+        with self._session_cookie_lock:
+            self.session.cookies.clear()
+            for cookie in context_cookies:
+                self.session.cookies.set(
+                    cookie["name"],
+                    cookie["value"],
+                    domain=cookie["domain"],
+                    path=cookie["path"],
+                )
 
     def close_browser(self) -> None:
-        with self._browser_lock:
+        with self._browser_init_lock:
+            for ctx in list(self._thread_contexts.values()):
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+            self._thread_contexts = {}
             try:
                 if self._browser is not None:
                     self._browser.close()
@@ -484,7 +512,6 @@ class PlaywrightScraper:
                     self._pw.stop()
             except Exception:
                 pass
-            self._context = None
             self._browser = None
             self._pw = None
 
@@ -496,64 +523,62 @@ class PlaywrightScraper:
 
     def _search_via_browser(self, overrides: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
         """Run a real browser search and capture the live StaysSearch JSON response."""
-        with self._browser_lock:
-            context = self._ensure_browser_context()
-            self._sync_session_cookies_into_context()
-            page = context.new_page()
-            try:
+        context = self._get_thread_context()
+        self._sync_session_cookies_into_context(context)
+        page = context.new_page()
+        try:
+            captured_status: int = 0
+            captured_data: Optional[Dict[str, Any]] = None
 
-                captured_status: int = 0
-                captured_data: Optional[Dict[str, Any]] = None
-
-                def _on_response(resp):
-                    nonlocal captured_status, captured_data
-                    try:
-                        if resp.request.method != "POST":
-                            return
-                        if "/api/v3/StaysSearch/" not in resp.url:
-                            return
-                        captured_status = int(resp.status)
-                        payload = resp.json()
-                        if isinstance(payload, dict):
-                            captured_data = payload
-                    except Exception:
+            def _on_response(resp):
+                nonlocal captured_status, captured_data
+                try:
+                    if resp.request.method != "POST":
                         return
+                    if "/api/v3/StaysSearch/" not in resp.url:
+                        return
+                    captured_status = int(resp.status)
+                    payload = resp.json()
+                    if isinstance(payload, dict):
+                        captured_data = payload
+                except Exception:
+                    return
 
-                page.on("response", _on_response)
+            page.on("response", _on_response)
 
-                search_url = self._build_search_navigation_url(overrides)
-                logger.info("Playwright browser search navigate: %s", search_url)
-                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+            search_url = self._build_search_navigation_url(overrides)
+            logger.info("Playwright browser search navigate: %s", search_url)
+            page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(int(random.uniform(900, 1600)))
+            page.mouse.wheel(0, 600)
+
+            for _ in range(24):
+                if captured_data is not None:
+                    break
+                page.wait_for_timeout(int(random.uniform(250, 550)))
+
+            if captured_data is None:
+                # One fallback nudge to trigger XHR search.
+                fallback_url = search_url + ("&search_type=filter_change" if "search_type=" in search_url else "")
+                page.goto(fallback_url, wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(int(random.uniform(900, 1600)))
-                page.mouse.wheel(0, 600)
-
+                page.mouse.wheel(0, 700)
                 for _ in range(24):
                     if captured_data is not None:
                         break
                     page.wait_for_timeout(int(random.uniform(250, 550)))
 
-                if captured_data is None:
-                    # One fallback nudge to trigger XHR search.
-                    fallback_url = search_url + ("&search_type=filter_change" if "search_type=" in search_url else "")
-                    page.goto(fallback_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(int(random.uniform(900, 1600)))
-                    page.mouse.wheel(0, 700)
-                    for _ in range(24):
-                        if captured_data is not None:
-                            break
-                        page.wait_for_timeout(int(random.uniform(250, 550)))
+            self._sync_context_cookies_into_session(context)
+            self._save_cached_state()
 
-                self._sync_context_cookies_into_session()
-                self._save_cached_state()
-
-                if captured_data is None:
-                    raise RuntimeError("Playwright browser search did not capture StaysSearch response")
-                return (captured_status or 200), captured_data
-            finally:
-                try:
-                    page.close()
-                except Exception:
-                    pass
+            if captured_data is None:
+                raise RuntimeError("Playwright browser search did not capture StaysSearch response")
+            return (captured_status or 200), captured_data
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
 
     def _get_listing_details_via_browser(
         self,
@@ -563,63 +588,61 @@ class PlaywrightScraper:
         adults: int,
     ) -> Tuple[int, Dict[str, Any]]:
         """Run a real browser PDP visit and capture live StaysPdpSections JSON response."""
-        with self._browser_lock:
-            context = self._ensure_browser_context()
-            self._sync_session_cookies_into_context()
-            page = context.new_page()
-            try:
+        context = self._get_thread_context()
+        self._sync_session_cookies_into_context(context)
+        page = context.new_page()
+        try:
+            captured_status: int = 0
+            captured_data: Optional[Dict[str, Any]] = None
 
-                captured_status: int = 0
-                captured_data: Optional[Dict[str, Any]] = None
-
-                def _on_response(resp):
-                    nonlocal captured_status, captured_data
-                    try:
-                        if resp.request.method != "POST":
-                            return
-                        if "/api/v3/StaysPdpSections/" not in resp.url:
-                            return
-                        captured_status = int(resp.status)
-                        payload = resp.json()
-                        if isinstance(payload, dict):
-                            captured_data = payload
-                    except Exception:
-                        return
-
-                page.on("response", _on_response)
-
-                listing_url = (
-                    f"{self.base_url}/rooms/{listing_id}"
-                    f"?check_in={checkin}&check_out={checkout}&guests={adults}&adults={adults}"
-                )
-                logger.info("Playwright browser PDP navigate: %s", listing_url)
-                page.goto(listing_url, wait_until="domcontentloaded", timeout=35000)
-                page.wait_for_timeout(int(random.uniform(900, 1600)))
-                if self._page_looks_challenged(page.content(), str(page.url or "")):
-                    raise RuntimeError("Airbnb challenge/login page detected during browser PDP fetch")
-                page.mouse.wheel(0, 1200)
-
-                for _ in range(28):
-                    if captured_data is not None:
-                        break
-                    page.wait_for_timeout(int(random.uniform(250, 550)))
-
-                self._sync_context_cookies_into_session()
-                self._save_cached_state()
-
-                if captured_data is None:
-                    raise RuntimeError("Playwright browser PDP fetch did not capture StaysPdpSections response")
-                if captured_data.get("errors") and self._response_looks_auth_or_challenge_error(
-                    captured_status,
-                    captured_data,
-                ):
-                    raise RuntimeError("Playwright browser PDP returned auth/challenge-like GraphQL error")
-                return (captured_status or 200), captured_data
-            finally:
+            def _on_response(resp):
+                nonlocal captured_status, captured_data
                 try:
-                    page.close()
+                    if resp.request.method != "POST":
+                        return
+                    if "/api/v3/StaysPdpSections/" not in resp.url:
+                        return
+                    captured_status = int(resp.status)
+                    payload = resp.json()
+                    if isinstance(payload, dict):
+                        captured_data = payload
                 except Exception:
-                    pass
+                    return
+
+            page.on("response", _on_response)
+
+            listing_url = (
+                f"{self.base_url}/rooms/{listing_id}"
+                f"?check_in={checkin}&check_out={checkout}&guests={adults}&adults={adults}"
+            )
+            logger.info("Playwright browser PDP navigate: %s", listing_url)
+            page.goto(listing_url, wait_until="domcontentloaded", timeout=35000)
+            page.wait_for_timeout(int(random.uniform(900, 1600)))
+            if self._page_looks_challenged(page.content(), str(page.url or "")):
+                raise RuntimeError("Airbnb challenge/login page detected during browser PDP fetch")
+            page.mouse.wheel(0, 1200)
+
+            for _ in range(28):
+                if captured_data is not None:
+                    break
+                page.wait_for_timeout(int(random.uniform(250, 550)))
+
+            self._sync_context_cookies_into_session(context)
+            self._save_cached_state()
+
+            if captured_data is None:
+                raise RuntimeError("Playwright browser PDP fetch did not capture StaysPdpSections response")
+            if captured_data.get("errors") and self._response_looks_auth_or_challenge_error(
+                captured_status,
+                captured_data,
+            ):
+                raise RuntimeError("Playwright browser PDP returned auth/challenge-like GraphQL error")
+            return (captured_status or 200), captured_data
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
 
     def search_listings_with_overrides(
         self,

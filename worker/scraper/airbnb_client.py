@@ -190,18 +190,11 @@ class AirbnbClient:
         effective_checkout = checkout or self.config.get("CHECKOUT", "")
         effective_adults = int(adults if adults is not None else self.config.get("ADULTS", 1))
 
-        return self._run_deepbnb_with_fallback(
-            op_name="get_listing_details",
-            deepbnb_call=lambda: self.deepbnb_scraper.get_listing_details(  # type: ignore[union-attr]
-                str(listing_id),
-                checkin=effective_checkin,
-                checkout=effective_checkout,
-                adults=effective_adults,
-            ),
-            fallback_call=lambda: self._get_playwright_scraper().get_listing_details(
-                listing_id=str(listing_id),
-                checkin=effective_checkin,
-                checkout=effective_checkout,
-                adults=effective_adults,
-            ),
+        # Self-listing / PDP details should always use browser-based Playwright.
+        # Deepbnb is restricted to daily search endpoints only.
+        return self._get_playwright_scraper().get_listing_details(
+            listing_id=str(listing_id),
+            checkin=effective_checkin,
+            checkout=effective_checkout,
+            adults=effective_adults,
         )

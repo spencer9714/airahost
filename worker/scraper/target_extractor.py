@@ -1518,12 +1518,6 @@ def capture_target_live_price(
 
         playwright_client: Optional[Any] = None
 
-        def _is_fetch_client(_client_obj: Any) -> bool:
-            return bool(
-                getattr(_client_obj, "use_deepbnb_backend", False)
-                and getattr(_client_obj, "deepbnb_scraper", None) is not None
-            )
-
         def _extract_price_for_window(
             _checkin: str,
             _checkout: str,
@@ -1538,29 +1532,16 @@ def capture_target_live_price(
                 "total": None,
                 "has_errors": False,
                 "section_ids": [],
-                "backend": "fetch" if _is_fetch_client(client) else "playwright",
+                "backend": "playwright",
             }
 
             def _extract_with_client(_client_obj: Any, _backend_label: str) -> tuple[Optional[float], Optional[float], List[str], bool]:
-                _backend = getattr(getattr(_client_obj, "deepbnb_scraper", None), "backend", None)
-                if (
-                    _backend_label == "fetch"
-                    and _backend is not None
-                    and hasattr(_backend, "get_listing_details_via_stays_pdp_sections")
-                ):
-                    _pdp_data = _backend.get_listing_details_via_stays_pdp_sections(
-                        str(listing_id),
-                        checkin=_checkin,
-                        checkout=_checkout,
-                        adults=_adults,
-                    )
-                else:
-                    _pdp_data = _client_obj.get_listing_details(
-                        str(listing_id),
-                        checkin=_checkin,
-                        checkout=_checkout,
-                        adults=_adults,
-                    )
+                _pdp_data = _client_obj.get_listing_details(
+                    str(listing_id),
+                    checkin=_checkin,
+                    checkout=_checkout,
+                    adults=_adults,
+                )
                 try:
                     logger.info(
                         f"[target_live_price_raw][listing={listing_id}][checkin={_checkin}][checkout={_checkout}][adults={_adults}][backend={_backend_label}] "
@@ -1597,12 +1578,8 @@ def capture_target_live_price(
             _meta["nightly"] = _nightly
             _meta["total"] = _total
 
-            # Deepbnb can return metadata-only PDP payloads without price fields.
-            # Retry this same window with Playwright PDP before giving up.
-            if (
-                (_nightly is None and _total is None)
-                and _is_fetch_client(client)
-            ):
+            # Retry this same window with a dedicated Playwright-only client before giving up.
+            if (_nightly is None and _total is None):
                 try:
                     if playwright_client is None:
                         from worker.scraper.airbnb_client import AirbnbClient
