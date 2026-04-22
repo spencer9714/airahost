@@ -67,10 +67,6 @@ class PlaywrightScraper:
         self._pw = None
         self._browser = None
         self._context = None
-        self._cdp_url = str(
-            self.config.get("CDP_URL")
-            or os.getenv("CDP_URL", "")
-        ).strip()
         if self.use_hardcoded_stayspdp_template:
             self._load_hardcoded_stayspdp_template()
 
@@ -172,7 +168,6 @@ class PlaywrightScraper:
         clone._pw = None
         clone._browser = None
         clone._context = None
-        clone._cdp_url = self._cdp_url
         for c in self.session.cookies:
             clone.session.cookies.set(
                 c.name,
@@ -439,17 +434,8 @@ class PlaywrightScraper:
         )
         viewport = {"width": 1280, "height": 800}
 
-        if self._cdp_url:
-            logger.info("Connecting Playwright to existing browser via CDP: %s", self._cdp_url)
-            self._browser = self._pw.chromium.connect_over_cdp(self._cdp_url, timeout=15000)
-            if self._browser.contexts:
-                self._context = self._browser.contexts[0]
-            else:
-                self._context = self._browser.new_context(user_agent=user_agent, viewport=viewport)
-        else:
-            logger.info("Launching dedicated Playwright browser (no CDP URL configured)")
-            self._browser = self._pw.chromium.launch(headless=False)
-            self._context = self._browser.new_context(user_agent=user_agent, viewport=viewport)
+        self._browser = self._pw.chromium.launch(headless=True)
+        self._context = self._browser.new_context(user_agent=user_agent, viewport=viewport)
 
         return self._context
 
