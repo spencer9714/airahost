@@ -12,15 +12,9 @@ from urllib.parse import quote, urlencode
 
 import requests
 from playwright.sync_api import sync_playwright
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-
 from worker.scraper.stayspdp_template import HARDCODED_STAYS_PDP_TEMPLATE
 
 logger = logging.getLogger(__name__)
-
-
-class AuthError(Exception):
-    """Raised when Airbnb returns 401/403 requiring fresh cookies."""
 
 
 class PlaywrightScraper:
@@ -61,7 +55,7 @@ class PlaywrightScraper:
         hardcoded_pdp_cfg = self.config.get("USE_HARDCODED_STAYSPDP_TEMPLATE", None)
         if hardcoded_pdp_cfg is None:
             self.use_hardcoded_stayspdp_template = bool(
-                str(os.getenv("AIRBNB_USE_HARDCODED_STAYSPDP_TEMPLATE", "1")).strip().lower()
+                str(os.getenv("AIRBNB_USE_HARDCODED_STAYSPDP_TEMPLATE", "0")).strip().lower()
                 in ("1", "true", "yes", "on")
             )
         else:
@@ -69,13 +63,16 @@ class PlaywrightScraper:
         # Cache unresolved PDP booking windows to avoid repeated expensive
         # template recaptures when Airbnb consistently returns NOT_COMPLETE.
         self._pdp_unresolved_windows: Dict[str, float] = {}
+        self._browser_lock = threading.Lock()
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._cdp_url = str(
+            self.config.get("CDP_URL")
+            or os.getenv("CDP_URL", "")
+        ).strip()
         if self.use_hardcoded_stayspdp_template:
             self._load_hardcoded_stayspdp_template()
-
-        if self._load_cached_state():
-            logger.info("Loaded cached authentication/template state.")
-        else:
-            self.refresh_session(force_capture=True)
 
     def _load_hardcoded_stayspdp_template(self) -> bool:
         if not isinstance(HARDCODED_STAYS_PDP_TEMPLATE, dict):
@@ -171,6 +168,11 @@ class PlaywrightScraper:
         clone._last_refresh_started_at = self._last_refresh_started_at
         clone.refresh_before_each_search = self.refresh_before_each_search
         clone._pdp_unresolved_windows = copy.deepcopy(self._pdp_unresolved_windows)
+        clone._browser_lock = threading.Lock()
+        clone._pw = None
+        clone._browser = None
+        clone._context = None
+        clone._cdp_url = self._cdp_url
         for c in self.session.cookies:
             clone.session.cookies.set(
                 c.name,
@@ -254,190 +256,13 @@ class PlaywrightScraper:
 
     def refresh_session(self, force_capture: bool = False, bypass_cooldown: bool = False):
         """
-        Uses Playwright to capture fresh StaysSearch and StaysPdpSections request templates,
-        along with valid session cookies.
+        Browser-only mode: do not capture/replay API templates or headless cookies.
         """
         with self._refresh_lock:
-            now = time.time()
-            if not force_capture and self._load_cached_state():
-                logger.info("Using cached authentication/template state.")
-                return
-            if (
-                force_capture
-                and not bypass_cooldown
-                and self.captured_search_req is not None
-                and (now - self._last_refresh_started_at) < self.refresh_cooldown_seconds
-            ):
-                logger.warning(
-                    "Skipping forced refresh (cooldown %ss active). Reusing current search template.",
-                    self.refresh_cooldown_seconds,
-                )
-                return
-
-            self._last_refresh_started_at = now
-            logger.info("Refreshing authentication and capturing API request templates via Playwright...")
+            self._last_refresh_started_at = time.time()
             self.captured_search_req = None
             self.captured_pdp_req = None
-
-            capture_pdp_on_start = bool(self.config.get("CAPTURE_PDP_ON_START", False))
-
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                context = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/121.0.0.0 Safari/537.36"
-                    ),
-                    viewport={"width": 1280, "height": 800},
-                )
-                page = context.new_page()
-
-                def on_request(request):
-                    if request.method != "POST":
-                        return
-                    if "/api/v3/StaysSearch/" in request.url and not self.captured_search_req:
-                        try:
-                            self.captured_search_req = {
-                                "url": request.url,
-                                "headers": request.headers,
-                                "post_data": request.post_data_json,
-                            }
-                            logger.info("Captured live StaysSearch template.")
-                        except Exception:
-                            pass
-                    if "/api/v3/StaysPdpSections/" in request.url and not self.captured_pdp_req:
-                        try:
-                            self.captured_pdp_req = {
-                                "url": request.url,
-                                "headers": request.headers,
-                                "post_data": request.post_data_json,
-                            }
-                            logger.info("Captured live StaysPdpSections template.")
-                        except Exception:
-                            pass
-
-                page.on("request", on_request)
-
-                def _raise_if_challenged(context_msg: str) -> None:
-                    try:
-                        html = page.content()
-                        current_url = page.url
-                    except Exception:
-                        return
-                    if self._page_looks_challenged(html, current_url):
-                        raise RuntimeError(f"Airbnb challenge/login page detected during {context_msg}")
-
-                try:
-                    # Seed existing requests-session cookies into browser context.
-                    existing_cookies = []
-                    for c in self.session.cookies:
-                        try:
-                            existing_cookies.append(
-                                {
-                                    "name": c.name,
-                                    "value": c.value,
-                                    "domain": c.domain,
-                                    "path": c.path or "/",
-                                    "secure": bool(c.secure),
-                                }
-                            )
-                        except Exception:
-                            continue
-                    if existing_cookies:
-                        try:
-                            context.add_cookies(existing_cookies)
-                        except Exception:
-                            pass
-
-                    query = self.config.get("QUERY", "Mississauga, Ontario")
-                    normalized_display_query = self._normalize_query_text(query)
-                    path_query = normalized_display_query.replace(", ", ",")
-                    search_path = f"/s/{quote(path_query).replace('%2C', '--')}/homes"
-                    params = {
-                        "date_picker_type": self.config.get("DATE_PICKER_TYPE", "calendar"),
-                        "center_lat": self.config.get("CENTER_LAT", ""),
-                        "center_lng": self.config.get("CENTER_LNG", ""),
-                        "refinement_paths[]": "/homes",
-                        "place_id": self.config.get("PLACE_ID", ""),
-                        "checkin": self.config.get("CHECKIN", ""),
-                        "checkout": self.config.get("CHECKOUT", ""),
-                        "adults": self.config.get("ADULTS", 1),
-                        "query": normalized_display_query,
-                        "search_type": "AUTOSUGGEST",
-                    }
-                    search_url = f"{self.base_url}{search_path}?{urlencode(params)}"
-
-                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(int(random.uniform(900, 1600)))
-                    _raise_if_challenged("initial StaysSearch capture")
-
-                    # Small UI interaction to force an XHR search if SSR populated first load.
-                    page.mouse.wheel(0, 500)
-                    try:
-                        page.locator('button:has-text("Filters")').first.click(timeout=3000)
-                        page.wait_for_timeout(int(random.uniform(500, 1100)))
-                        page.keyboard.press("Escape")
-                    except Exception:
-                        pass
-
-                    for _ in range(20):
-                        if self.captured_search_req:
-                            break
-                        page.wait_for_timeout(int(random.uniform(350, 700)))
-                        _raise_if_challenged("waiting for StaysSearch")
-
-                    # Fallback navigation: nudge a filter-change search to trigger XHR.
-                    if not self.captured_search_req:
-                        fallback_params = dict(params)
-                        fallback_params["search_type"] = "filter_change"
-                        fallback_url = f"{self.base_url}{search_path}?{urlencode(fallback_params)}"
-                        page.goto(fallback_url, wait_until="domcontentloaded", timeout=30000)
-                        page.wait_for_timeout(int(random.uniform(900, 1600)))
-                        page.mouse.wheel(0, 700)
-                        _raise_if_challenged("fallback StaysSearch capture")
-                        for _ in range(20):
-                            if self.captured_search_req:
-                                break
-                            page.wait_for_timeout(int(random.uniform(350, 700)))
-                            _raise_if_challenged("fallback wait for StaysSearch")
-
-                    # Optionally capture PDP template at startup; default is off for speed.
-                    if capture_pdp_on_start and not self.captured_pdp_req:
-                        try:
-                            with page.expect_popup(timeout=12000) as popup_info:
-                                page.locator('a[href*="/rooms/"]').first.click()
-                            popup = popup_info.value
-                            popup.wait_for_load_state("domcontentloaded")
-                            popup.mouse.wheel(0, 1600)
-                            for _ in range(24):
-                                if self.captured_pdp_req:
-                                    break
-                                popup.wait_for_timeout(500)
-                            popup.close()
-                        except Exception:
-                            pass
-
-                    self.session.cookies.clear()
-                    for cookie in context.cookies():
-                        self.session.cookies.set(
-                            cookie["name"],
-                            cookie["value"],
-                            domain=cookie["domain"],
-                            path=cookie["path"],
-                        )
-
-                    logger.info("Successfully acquired fresh session cookies.")
-                    if not self.captured_search_req:
-                        raise RuntimeError("Timed out waiting for required API request: StaysSearch")
-                    if self.captured_pdp_req:
-                        logger.info("Successfully captured request templates.")
-                    else:
-                        logger.info("StaysPdpSections template not captured yet; will capture on first detail request.")
-
-                    self._save_cached_state()
-                finally:
-                    browser.close()
+            logger.info("Playwright refresh_session is a no-op in browser-only mode.")
 
     def _capture_pdp_template_for_listing(
         self,
@@ -447,66 +272,12 @@ class PlaywrightScraper:
         adults: Optional[int] = None,
         force_refresh: bool = True,
     ):
-        """Capture a live StaysPdpSections template by opening a specific listing page."""
-        if self.use_hardcoded_stayspdp_template and not force_refresh and self.captured_pdp_req is not None:
-            return
-        if self.captured_pdp_req is not None and not force_refresh:
-            return
-        logger.info("Capturing StaysPdpSections template on-demand...")
-        # Refresh on demand when explicitly requested.
-        if force_refresh:
-            self.captured_pdp_req = None
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/121.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-            )
-            page = context.new_page()
-
-            def on_request(request):
-                if request.method == "POST" and "/api/v3/StaysPdpSections/" in request.url and not self.captured_pdp_req:
-                    try:
-                        self.captured_pdp_req = {
-                            "url": request.url,
-                            "headers": request.headers,
-                            "post_data": request.post_data_json,
-                        }
-                        logger.info("Captured live StaysPdpSections template.")
-                    except Exception:
-                        pass
-
-            page.on("request", on_request)
-            try:
-                checkin = checkin or self.config.get("CHECKIN", "")
-                checkout = checkout or self.config.get("CHECKOUT", "")
-                listing_url = (
-                    f"{self.base_url}/rooms/{listing_id}"
-                    f"?check_in={checkin}&check_out={checkout}"
-                )
-                page.goto(listing_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(1200)
-                page.mouse.wheel(0, 1800)
-                for _ in range(24):
-                    if self.captured_pdp_req:
-                        break
-                    page.wait_for_timeout(500)
-
-                # refresh cookies to keep session in sync
-                self.session.cookies.clear()
-                for cookie in context.cookies():
-                    self.session.cookies.set(
-                        cookie["name"],
-                        cookie["value"],
-                        domain=cookie["domain"],
-                        path=cookie["path"],
-                    )
-            finally:
-                browser.close()
+        """Deprecated in browser-only mode (no API template capture/replay)."""
+        logger.info(
+            "Skipping _capture_pdp_template_for_listing in browser-only mode for listing_id=%s",
+            listing_id,
+        )
+        self.captured_pdp_req = None
 
     def _refresh_before_search_if_enabled(self) -> None:
         if not self.refresh_before_each_search:
@@ -514,45 +285,6 @@ class PlaywrightScraper:
         logger.info("REFRESH_SESSION_BEFORE_EACH_SEARCH enabled; refreshing session/templates before StaysSearch replay.")
         # Force a fresh capture so request tokens/cookies are rotated each search call.
         self.refresh_session(force_capture=True, bypass_cooldown=True)
-
-        if not self.captured_pdp_req:
-            raise RuntimeError("Timed out waiting for required API request: StaysPdpSections")
-
-        self._save_cached_state()
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((requests.RequestException, AuthError)),
-    )
-    def _replay_request(self, captured_template: dict, payload_override: dict) -> Tuple[int, Dict[str, Any]]:
-        """Send a POST request mirroring captured browser request shape."""
-        url = captured_template["url"]
-
-        url_hash = url.split("?")[0].split("/")[-1]
-        body_hash = payload_override.get("extensions", {}).get("persistedQuery", {}).get("sha256Hash")
-        if body_hash and url_hash != body_hash:
-            url = url.replace(url_hash, body_hash)
-
-        required_keys = {
-            "content-type",
-            "x-airbnb-api-key",
-            "x-airbnb-graphql-platform",
-            "x-airbnb-graphql-platform-client",
-            "x-client-version",
-            "accept",
-            "accept-language",
-        }
-        headers = {k: v for k, v in captured_template["headers"].items() if k.lower() in required_keys}
-
-        response = self.session.post(url, json=payload_override, headers=headers, timeout=20)
-        if response.status_code in (401, 403):
-            logger.warning("Auth error (%s). Refreshing session...", response.status_code)
-            self.refresh_session(force_capture=True)
-            raise AuthError(f"Authentication failed with status {response.status_code}")
-
-        response.raise_for_status()
-        return response.status_code, response.json()
 
     @staticmethod
     def _extract_pdp_sections(response_data: Dict[str, Any]) -> list[dict]:
@@ -608,40 +340,20 @@ class PlaywrightScraper:
         return saw_booking and saw_not_complete and not cls._pdp_booking_has_price(response_data)
 
     def search_listings(self) -> Tuple[int, Dict[str, Any]]:
-        """Replay captured StaysSearch request and return response JSON."""
-        self._refresh_before_search_if_enabled()
-        logger.info("Replaying captured StaysSearch request...")
-        payload = copy.deepcopy(self.captured_search_req["post_data"])
-        self._apply_disable_map_search(payload)
-        for req_key in ("staysSearchRequest", "staysMapSearchRequestV2"):
-            req = payload.get("variables", {}).get(req_key, {})
-            raw_params = req.get("rawParams")
-            if raw_params:
-                # Keep guest-favorite filter OFF unless explicitly requested via overrides path.
-                if self._raw_param_exists(raw_params, "guestFavorite"):
-                    self._set_raw_param(raw_params, "guestFavorite", ["false"])
-
-        status_code, response_data = self._replay_request(self.captured_search_req, payload)
-        if response_data.get("errors"):
-            if self._response_looks_auth_or_challenge_error(status_code, response_data):
-                logger.warning("Auth/challenge-like error in StaysSearch. Refreshing templates/session and retrying once...")
-                self.refresh_session(force_capture=True)
-                payload = copy.deepcopy(self.captured_search_req["post_data"])
-                self._apply_disable_map_search(payload)
-                status_code, response_data = self._replay_request(self.captured_search_req, payload)
-            else:
-                logger.warning("Non-auth GraphQL errors in StaysSearch; returning without forced auth refresh.")
-        else:
+        """Browser-only StaysSearch (no API replay)."""
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 3):
             try:
-                from worker.scraper.parsers import parse_search_total_listings
-
-                total_listings = parse_search_total_listings(response_data)
-                if isinstance(total_listings, int):
-                    logger.info("StaysSearch total listings reported by Airbnb: %s", total_listings)
-            except Exception:
-                pass
-
-        return status_code, response_data
+                status_code, response_data = self._search_via_browser()
+                if response_data.get("errors") and self._response_looks_auth_or_challenge_error(status_code, response_data):
+                    raise RuntimeError("Browser StaysSearch returned auth/challenge-like GraphQL error")
+                return status_code, response_data
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Browser StaysSearch attempt %s/2 failed: %s", attempt, exc)
+                if attempt < 2:
+                    time.sleep(1.0)
+        raise RuntimeError(f"Playwright browser search failed after 2 attempts: {last_exc}")
 
     @staticmethod
     def _raw_param_exists(raw_params: Any, filter_name: str) -> bool:
@@ -685,108 +397,263 @@ class PlaywrightScraper:
             map_req["metadataOnly"] = True
             map_req["rawParams"] = []
 
+    def _build_search_navigation_url(self, overrides: Optional[Dict[str, Any]] = None) -> str:
+        ov = overrides or {}
+        query_raw = (
+            ov.get("query")
+            or ov.get("locationSearch")
+            or ov.get("location")
+            or self.config.get("QUERY", "Mississauga, Ontario")
+        )
+        normalized_display_query = self._normalize_query_text(query_raw)
+        path_query = normalized_display_query.replace(", ", ",")
+        search_path = f"/s/{quote(path_query).replace('%2C', '--')}/homes"
+
+        params: Dict[str, Any] = {
+            "date_picker_type": self.config.get("DATE_PICKER_TYPE", "calendar"),
+            "center_lat": ov.get("centerLat", self.config.get("CENTER_LAT", "")),
+            "center_lng": ov.get("centerLng", self.config.get("CENTER_LNG", "")),
+            "refinement_paths[]": "/homes",
+            "place_id": ov.get("placeId", self.config.get("PLACE_ID", "")),
+            "checkin": ov.get("checkin", self.config.get("CHECKIN", "")),
+            "checkout": ov.get("checkout", self.config.get("CHECKOUT", "")),
+            "adults": ov.get("adults", ov.get("guests", self.config.get("ADULTS", 1))),
+            "query": normalized_display_query,
+            "search_type": "AUTOSUGGEST",
+        }
+        if "itemsPerGrid" in ov and ov.get("itemsPerGrid") is not None:
+            params["items_per_grid"] = ov.get("itemsPerGrid")
+        if "itemsOffset" in ov and ov.get("itemsOffset") is not None:
+            params["items_offset"] = ov.get("itemsOffset")
+        return f"{self.base_url}{search_path}?{urlencode(params)}"
+
+    def _ensure_browser_context(self):
+        if self._context is not None:
+            return self._context
+
+        self._pw = sync_playwright().start()
+        user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/121.0.0.0 Safari/537.36"
+        )
+        viewport = {"width": 1280, "height": 800}
+
+        if self._cdp_url:
+            logger.info("Connecting Playwright to existing browser via CDP: %s", self._cdp_url)
+            self._browser = self._pw.chromium.connect_over_cdp(self._cdp_url, timeout=15000)
+            if self._browser.contexts:
+                self._context = self._browser.contexts[0]
+            else:
+                self._context = self._browser.new_context(user_agent=user_agent, viewport=viewport)
+        else:
+            logger.info("Launching dedicated Playwright browser (no CDP URL configured)")
+            self._browser = self._pw.chromium.launch(headless=False)
+            self._context = self._browser.new_context(user_agent=user_agent, viewport=viewport)
+
+        return self._context
+
+    def _sync_session_cookies_into_context(self) -> None:
+        context = self._ensure_browser_context()
+        existing_cookies = []
+        for c in self.session.cookies:
+            try:
+                existing_cookies.append(
+                    {
+                        "name": c.name,
+                        "value": c.value,
+                        "domain": c.domain,
+                        "path": c.path or "/",
+                        "secure": bool(c.secure),
+                    }
+                )
+            except Exception:
+                continue
+        if existing_cookies:
+            try:
+                context.add_cookies(existing_cookies)
+            except Exception:
+                pass
+
+    def _sync_context_cookies_into_session(self) -> None:
+        context = self._ensure_browser_context()
+        self.session.cookies.clear()
+        for cookie in context.cookies():
+            self.session.cookies.set(
+                cookie["name"],
+                cookie["value"],
+                domain=cookie["domain"],
+                path=cookie["path"],
+            )
+
+    def close_browser(self) -> None:
+        with self._browser_lock:
+            try:
+                if self._browser is not None:
+                    self._browser.close()
+            except Exception:
+                pass
+            try:
+                if self._pw is not None:
+                    self._pw.stop()
+            except Exception:
+                pass
+            self._context = None
+            self._browser = None
+            self._pw = None
+
+    def __del__(self):
+        try:
+            self.close_browser()
+        except Exception:
+            pass
+
+    def _search_via_browser(self, overrides: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
+        """Run a real browser search and capture the live StaysSearch JSON response."""
+        with self._browser_lock:
+            context = self._ensure_browser_context()
+            self._sync_session_cookies_into_context()
+            page = context.new_page()
+            try:
+
+                captured_status: int = 0
+                captured_data: Optional[Dict[str, Any]] = None
+
+                def _on_response(resp):
+                    nonlocal captured_status, captured_data
+                    try:
+                        if resp.request.method != "POST":
+                            return
+                        if "/api/v3/StaysSearch/" not in resp.url:
+                            return
+                        captured_status = int(resp.status)
+                        payload = resp.json()
+                        if isinstance(payload, dict):
+                            captured_data = payload
+                    except Exception:
+                        return
+
+                page.on("response", _on_response)
+
+                search_url = self._build_search_navigation_url(overrides)
+                logger.info("Playwright browser search navigate: %s", search_url)
+                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(int(random.uniform(900, 1600)))
+                page.mouse.wheel(0, 600)
+
+                for _ in range(24):
+                    if captured_data is not None:
+                        break
+                    page.wait_for_timeout(int(random.uniform(250, 550)))
+
+                if captured_data is None:
+                    # One fallback nudge to trigger XHR search.
+                    fallback_url = search_url + ("&search_type=filter_change" if "search_type=" in search_url else "")
+                    page.goto(fallback_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(int(random.uniform(900, 1600)))
+                    page.mouse.wheel(0, 700)
+                    for _ in range(24):
+                        if captured_data is not None:
+                            break
+                        page.wait_for_timeout(int(random.uniform(250, 550)))
+
+                self._sync_context_cookies_into_session()
+                self._save_cached_state()
+
+                if captured_data is None:
+                    raise RuntimeError("Playwright browser search did not capture StaysSearch response")
+                return (captured_status or 200), captured_data
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+    def _get_listing_details_via_browser(
+        self,
+        listing_id: str,
+        checkin: str,
+        checkout: str,
+        adults: int,
+    ) -> Tuple[int, Dict[str, Any]]:
+        """Run a real browser PDP visit and capture live StaysPdpSections JSON response."""
+        with self._browser_lock:
+            context = self._ensure_browser_context()
+            self._sync_session_cookies_into_context()
+            page = context.new_page()
+            try:
+
+                captured_status: int = 0
+                captured_data: Optional[Dict[str, Any]] = None
+
+                def _on_response(resp):
+                    nonlocal captured_status, captured_data
+                    try:
+                        if resp.request.method != "POST":
+                            return
+                        if "/api/v3/StaysPdpSections/" not in resp.url:
+                            return
+                        captured_status = int(resp.status)
+                        payload = resp.json()
+                        if isinstance(payload, dict):
+                            captured_data = payload
+                    except Exception:
+                        return
+
+                page.on("response", _on_response)
+
+                listing_url = (
+                    f"{self.base_url}/rooms/{listing_id}"
+                    f"?check_in={checkin}&check_out={checkout}&guests={adults}&adults={adults}"
+                )
+                logger.info("Playwright browser PDP navigate: %s", listing_url)
+                page.goto(listing_url, wait_until="domcontentloaded", timeout=35000)
+                page.wait_for_timeout(int(random.uniform(900, 1600)))
+                if self._page_looks_challenged(page.content(), str(page.url or "")):
+                    raise RuntimeError("Airbnb challenge/login page detected during browser PDP fetch")
+                page.mouse.wheel(0, 1200)
+
+                for _ in range(28):
+                    if captured_data is not None:
+                        break
+                    page.wait_for_timeout(int(random.uniform(250, 550)))
+
+                self._sync_context_cookies_into_session()
+                self._save_cached_state()
+
+                if captured_data is None:
+                    raise RuntimeError("Playwright browser PDP fetch did not capture StaysPdpSections response")
+                if captured_data.get("errors") and self._response_looks_auth_or_challenge_error(
+                    captured_status,
+                    captured_data,
+                ):
+                    raise RuntimeError("Playwright browser PDP returned auth/challenge-like GraphQL error")
+                return (captured_status or 200), captured_data
+            finally:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
     def search_listings_with_overrides(
         self,
         overrides: Dict[str, Any],
         _already_retried: bool = False,
     ) -> Tuple[int, Dict[str, Any]]:
-        """
-        Replay captured StaysSearch with selected rawParams overridden.
-        Supported keys: checkin, checkout, adults, centerLat, centerLng, placeId,
-        query, locationSearch, location, itemsPerGrid, itemsOffset, guestFavorite, guests, minBedrooms,
-        minBeds, minBathrooms, searchByMap, neLat, neLng, swLat, swLng.
-        """
-        self._refresh_before_search_if_enabled()
-        logger.info("Replaying captured StaysSearch with overrides...")
-        payload = copy.deepcopy(self.captured_search_req["post_data"])
-        self._apply_disable_map_search(payload)
-
-        for req_key in ("staysSearchRequest", "staysMapSearchRequestV2"):
-            req = payload.get("variables", {}).get(req_key, {})
-            raw_params = req.get("rawParams")
-            if not raw_params:
-                continue
-
-            # The captured template's placeId is tied to the city where the browser
-            # session was originally recorded.  Reusing it for a different city causes
-            # Airbnb to ignore the query/centerLat/centerLng overrides and return
-            # results for the wrong city (or nothing at all).  Strip it out whenever
-            # the caller has not supplied an explicit replacement placeId.
-            if "placeId" not in overrides:
-                self._remove_raw_param(raw_params, "placeId")
-
-            mapping = {
-                "checkin": "checkin",
-                "checkout": "checkout",
-                "adults": "adults",
-                "guests": "guests",
-                "centerLat": "centerLat",
-                "centerLng": "centerLng",
-                "placeId": "placeId",
-                "query": "query",
-                # Some captured templates use location_search/location keys instead of query.
-                "locationSearch": "location_search",
-                "location": "location",
-                "guestFavorite": "guestFavorite",
-                "minBedrooms": "minBedrooms",
-                "minBeds": "minBeds",
-                "minBathrooms": "minBathrooms",
-                "searchByMap": "searchByMap",
-                "neLat": "neLat",
-                "neLng": "neLng",
-                "swLat": "swLat",
-                "swLng": "swLng",
-            }
-            for key, raw_name in mapping.items():
-                if key in overrides and overrides[key] is not None:
-                    val = overrides[key]
-                    if key in ("query", "locationSearch", "location"):
-                        val = self._normalize_query_text(val)
-                    if isinstance(val, bool):
-                        val = "true" if val else "false"
-                    if self._raw_param_exists(raw_params, raw_name):
-                        self._set_raw_param(raw_params, raw_name, [str(val)])
-            if "guestFavorite" not in overrides:
-                if self._raw_param_exists(raw_params, "guestFavorite"):
-                    self._set_raw_param(raw_params, "guestFavorite", ["false"])
-
-            # Default to classic search behavior unless explicitly enabled.
-            if self._raw_param_exists(raw_params, "aiSearchEnabled"):
-                self._set_raw_param(
-                    raw_params,
-                    "aiSearchEnabled",
-                    ["true" if self.enable_ai_search else "false"],
-                )
-
-            if "itemsPerGrid" in overrides and req_key == "staysSearchRequest":
-                if self._raw_param_exists(raw_params, "itemsPerGrid"):
-                    self._set_raw_param(raw_params, "itemsPerGrid", [str(overrides["itemsPerGrid"])])
-            if "itemsOffset" in overrides and req_key == "staysSearchRequest":
-                self._set_raw_param(raw_params, "itemsOffset", [str(overrides["itemsOffset"])])
-
-        status_code, response_data = self._replay_request(self.captured_search_req, payload)
-        if response_data.get("errors"):
-            if _already_retried:
-                return status_code, response_data
-            if self._response_looks_auth_or_challenge_error(status_code, response_data):
-                logger.warning("Auth/challenge-like error in StaysSearch with overrides. Refreshing and retrying once...")
-                self.refresh_session(force_capture=True)
-                payload = copy.deepcopy(self.captured_search_req["post_data"])
-                self._apply_disable_map_search(payload)
-                return self.search_listings_with_overrides(overrides, _already_retried=True)
-            logger.warning("Non-auth GraphQL errors in StaysSearch with overrides; returning without forced auth refresh.")
-            return status_code, response_data
-        else:
+        """Browser-only StaysSearch with overrides (no API replay)."""
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 3):
             try:
-                from worker.scraper.parsers import parse_search_total_listings
-
-                total_listings = parse_search_total_listings(response_data)
-                if isinstance(total_listings, int):
-                    logger.info("StaysSearch(with overrides) total listings reported by Airbnb: %s", total_listings)
-            except Exception:
-                pass
-
-        return status_code, response_data
+                status_code, response_data = self._search_via_browser(overrides)
+                if response_data.get("errors") and self._response_looks_auth_or_challenge_error(status_code, response_data):
+                    raise RuntimeError("Browser StaysSearch(with overrides) returned auth/challenge-like GraphQL error")
+                return status_code, response_data
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Browser StaysSearch(with overrides) attempt %s/2 failed: %s", attempt, exc)
+                if attempt < 2:
+                    time.sleep(1.0)
+        raise RuntimeError(f"Playwright browser search(with overrides) failed after 2 attempts: {last_exc}")
 
     @staticmethod
     def _to_global_id(prefix: str, listing_id: str) -> str:
@@ -812,100 +679,24 @@ class PlaywrightScraper:
         checkout: Optional[str] = None,
         adults: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Execute StaysPdpSections query for listing pricing/amenities."""
+        """Browser-only PDP capture (no request replay/session.post)."""
         effective_checkin = checkin or self.config.get("CHECKIN", "")
         effective_checkout = checkout or self.config.get("CHECKOUT", "")
         effective_adults = int(adults if adults is not None else self.config.get("ADULTS", 1))
-        pdp_fetch_url = (
-            f"{self.base_url}/rooms/{listing_id}"
-            f"?check_in={effective_checkin}&check_out={effective_checkout}"
-        )
-        logger.info("StaysPdpSections fetch url=%s", pdp_fetch_url)
-
-        # Reuse the in-memory PDP template within a run; capture only when missing.
-        # If replay returns GraphQL errors, recapture once and retry.
-        if self.captured_pdp_req is None:
-            if not (self.use_hardcoded_stayspdp_template and self._load_hardcoded_stayspdp_template()):
-                self._capture_pdp_template_for_listing(
-                    str(listing_id),
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 3):
+            try:
+                _, response_data = self._get_listing_details_via_browser(
+                    listing_id=str(listing_id),
                     checkin=effective_checkin,
                     checkout=effective_checkout,
                     adults=effective_adults,
-                    force_refresh=False,
                 )
+                return response_data
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("Browser PDP attempt %s/2 failed for listing=%s: %s", attempt, listing_id, exc)
+                if attempt < 2:
+                    time.sleep(1.0)
+        raise RuntimeError(f"Playwright browser PDP failed after 2 attempts for listing={listing_id}: {last_exc}")
 
-        payload = copy.deepcopy(self.captured_pdp_req["post_data"])
-        stay_gid = self._to_global_id("StayListing", str(listing_id))
-        demand_gid = self._to_global_id("DemandStayListing", str(listing_id))
-        self._replace_listing_ids(payload, str(listing_id), stay_gid, demand_gid)
-
-        try:
-            request_vars = payload["variables"].get("pdpSectionsRequest", {})
-            if request_vars:
-                request_vars["adults"] = str(effective_adults)
-                request_vars["checkIn"] = effective_checkin
-                request_vars["checkOut"] = effective_checkout
-                # Captured templates often pin only booking-related sections.
-                # Dropping sectionIds asks backend for default/full section composition.
-                # request_vars.pop("sectionIds", None)
-        except (KeyError, TypeError):
-            pass
-
-        _, response_data = self._replay_request(self.captured_pdp_req, payload)
-        if response_data.get("errors") and not self.use_hardcoded_stayspdp_template:
-            logger.warning("GraphQL errors in StaysPdpSections. Refreshing PDP template and retrying once...")
-            self._capture_pdp_template_for_listing(
-                str(listing_id),
-                checkin=effective_checkin,
-                checkout=effective_checkout,
-                adults=effective_adults,
-                force_refresh=True,
-            )
-            payload = copy.deepcopy(self.captured_pdp_req["post_data"])
-            self._replace_listing_ids(payload, str(listing_id), stay_gid, demand_gid)
-            try:
-                request_vars = payload["variables"].get("pdpSectionsRequest", {})
-                if request_vars:
-                    request_vars["adults"] = str(effective_adults)
-                    request_vars["checkIn"] = effective_checkin
-                    request_vars["checkOut"] = effective_checkout
-                    request_vars.pop("sectionIds", None)
-            except (KeyError, TypeError):
-                pass
-            _, response_data = self._replay_request(self.captured_pdp_req, payload)
-
-        unresolved_key = f"{listing_id}|{effective_checkin}|{effective_checkout}|{effective_adults}"
-        unresolved_until = float(self._pdp_unresolved_windows.get(unresolved_key, 0.0))
-        should_retry_unresolved = time.time() >= unresolved_until
-        if (
-            self._pdp_booking_unresolved(response_data)
-            and should_retry_unresolved
-            and not self.use_hardcoded_stayspdp_template
-        ):
-            logger.warning(
-                "StaysPdpSections booking payload unresolved (NOT_COMPLETE with no booking price). "
-                "Recapturing PDP template and retrying once..."
-            )
-            self._capture_pdp_template_for_listing(
-                str(listing_id),
-                checkin=effective_checkin,
-                checkout=effective_checkout,
-                adults=effective_adults,
-                force_refresh=True,
-            )
-            payload = copy.deepcopy(self.captured_pdp_req["post_data"])
-            self._replace_listing_ids(payload, str(listing_id), stay_gid, demand_gid)
-            try:
-                request_vars = payload["variables"].get("pdpSectionsRequest", {})
-                if request_vars:
-                    request_vars["adults"] = str(effective_adults)
-                    request_vars["checkIn"] = effective_checkin
-                    request_vars["checkOut"] = effective_checkout
-                    request_vars.pop("sectionIds", None)
-            except (KeyError, TypeError):
-                pass
-            _, response_data = self._replay_request(self.captured_pdp_req, payload)
-            if self._pdp_booking_unresolved(response_data):
-                # Back off repeated recapture attempts for this exact window.
-                self._pdp_unresolved_windows[unresolved_key] = time.time() + 20 * 60
-        return response_data

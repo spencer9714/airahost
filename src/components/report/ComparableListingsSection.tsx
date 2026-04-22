@@ -54,29 +54,6 @@ function listingUrlForDate(url: string, date: string): string {
   }
 }
 
-function nearestSampledPriceForDate(
-  priceByDate: Record<string, number> | undefined,
-  targetDate: string
-): { date: string; price: number } | null {
-  if (!priceByDate) return null;
-  const entries = Object.entries(priceByDate).filter(
-    ([d, p]) => !!d && typeof p === "number"
-  );
-  if (entries.length === 0) return null;
-  const targetTs = new Date(targetDate + "T00:00:00Z").getTime();
-  let best: { date: string; price: number } | null = null;
-  let bestDiff = Number.POSITIVE_INFINITY;
-  for (const [d, p] of entries) {
-    const ts = new Date(d + "T00:00:00Z").getTime();
-    const diff = Math.abs(ts - targetTs);
-    if (diff < bestDiff) {
-      bestDiff = diff;
-      best = { date: d, price: p };
-    }
-  }
-  return best;
-}
-
 // ── Helpers ─────────────────────────────────────────────────────
 
 function similarityBadgeClasses(similarity: number): string {
@@ -163,13 +140,10 @@ function ComparableCard({
   listing,
   isPinned = false,
   selectedDate,
-  isSnappedDate = false,
 }: {
   listing: ComparableListing;
   isPinned?: boolean;
   selectedDate?: string | null;
-  /** True when selectedDate is a snapped-to-nearest date, not the exactly clicked date. */
-  isSnappedDate?: boolean;
 }) {
   const matchPct = Math.round(listing.similarity * 100);
   const badgeClasses = similarityBadgeClasses(listing.similarity);
@@ -179,10 +153,6 @@ function ComparableCard({
   const datePrice: number | undefined = selectedDate
     ? listing.priceByDate?.[selectedDate]
     : undefined;
-  const nearestSampled = selectedDate
-    ? nearestSampledPriceForDate(listing.priceByDate, selectedDate)
-    : null;
-
   // No date selected → show the general comparable price.
   // Date selected + price found → show sampled date price.
   // Date selected + no price → show unavailable (not a fallback average).
@@ -241,11 +211,6 @@ function ComparableCard({
               <p className="text-sm font-medium text-gray-400">
                 No scraped data for this date
               </p>
-              {nearestSampled && (
-                <p className="mt-0.5 text-[10px] text-amber-700">
-                  Closest sampled: {nearestSampled.date} (${nearestSampled.price}/night)
-                </p>
-              )}
             </div>
           ) : hasDisplayPrice ? (
             <p className="text-2xl font-semibold text-gray-900">
@@ -255,7 +220,7 @@ function ComparableCard({
           ) : null}
           {hasSampledDatePrice && (
             <p className="text-[10px] text-emerald-600 font-medium">
-              {isSnappedDate ? "nearest sampled date" : "exact date price"}
+              exact date price
             </p>
           )}
           <p className={`text-[10px] font-medium ${queryNights > 1 ? "text-amber-600" : "text-gray-400"}`}>
@@ -312,10 +277,9 @@ interface ComparableListingsSectionProps {
   loading?: boolean;
   embedded?: boolean;
   pinnedUrls?: string[];
-  /** Effective price date — nearest sampled date with real comp data. */
+  /** Effective price date for exact day-level comp filtering. */
   selectedDate?: string | null;
-  /** The date the user actually clicked. When this differs from selectedDate,
-   *  a disclosure banner is shown explaining the price date substitution. */
+  /** The date the user clicked. */
   clickedDate?: string | null;
 }
 
@@ -326,9 +290,7 @@ export function ComparableListingsSection({
   embedded = false,
   pinnedUrls = [],
   selectedDate = null,
-  clickedDate = null,
 }: ComparableListingsSectionProps) {
-  const isSnappedDate = !!(selectedDate && clickedDate && selectedDate !== clickedDate);
   const [sortBy, setSortBy] = useState<SortMode>("similarity");
   const [expanded, setExpanded] = useState(false);
 
@@ -338,7 +300,10 @@ export function ComparableListingsSection({
 
   const sorted = useMemo(() => {
     if (!listings || listings.length === 0) return [];
-    const copy = [...listings];
+    const filtered = selectedDate
+      ? listings.filter((listing) => listing.priceByDate?.[selectedDate] != null)
+      : listings;
+    const copy = [...filtered];
     // When a date is selected, use only the exact date price (may be undefined).
     // When no date is selected, fall back to the general nightlyPrice.
     const getPrice = (listing: ComparableListing): number | undefined =>
@@ -367,9 +332,9 @@ export function ComparableListingsSection({
     return copy;
   }, [listings, sortBy, pinnedUrls, selectedDate]);
 
-  const visible = expanded ? sorted : sorted.slice(0, 10);
-  const hasMore = sorted.length > 10 && !expanded;
-  const canCollapse = expanded && sorted.length > 10;
+  const visible = expanded ? sorted : sorted.slice(0, 20);
+  const hasMore = sorted.length > 20 && !expanded;
+  const canCollapse = expanded && sorted.length > 20;
 
   // Subtext
   const used = comps?.usedForPricing ?? sorted.length;
@@ -475,18 +440,8 @@ export function ComparableListingsSection({
         </button>
       </div>
 
-      {/* Date context / snap disclosure */}
-      {isSnappedDate ? (
-        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-          <p className="text-xs font-medium text-amber-800">
-            <span className="font-semibold">{clickedDate}</span> was not directly sampled — no comp prices were scraped on that day.
-          </p>
-          <p className="mt-0.5 text-xs text-amber-700">
-            Showing prices from <span className="font-semibold">{selectedDate}</span>, the nearest day that was actually queried.
-            These are real scraped prices, but for a different day than you clicked.
-          </p>
-        </div>
-      ) : selectedDate ? (
+      {/* Date context */}
+      {selectedDate ? (
         !hasAnyComparableDataForSelectedDate ? (
           <p className="mb-2 text-xs font-medium text-amber-700">
             No comparable listing prices were queried exactly on {selectedDate}.
@@ -508,7 +463,6 @@ export function ComparableListingsSection({
             listing={listing}
             isPinned={isPinnedListing(listing, pinnedUrls)}
             selectedDate={selectedDate}
-            isSnappedDate={isSnappedDate}
           />
         ))}
       </div>
@@ -519,7 +473,7 @@ export function ComparableListingsSection({
           onClick={() => setExpanded(true)}
           className="mt-4 w-full rounded-xl border border-gray-200 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-gray-50"
         >
-          Show {sorted.length - 10} more listings
+          Show {sorted.length - 20} more listings
         </button>
       )}
       {canCollapse && (

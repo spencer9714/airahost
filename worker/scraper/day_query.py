@@ -2,8 +2,8 @@
 Day-by-day query engine.
 
 Daily sampling strategy:
-  1. Query one-night inventory (checkin=day_i, checkout=day_i+1), target 10 comps.
-  2. Query two-night inventory (checkin=day_i, checkout=day_i+2), target 10 comps.
+  1. Query one-night inventory (checkin=day_i, checkout=day_i+1), target 25 comps.
+  2. Query two-night inventory (checkin=day_i, checkout=day_i+2), target 25 comps.
   3. Merge pools for pricing and ranking (dedup by listing id).
 
 Per-night normalization is handled in `comp_collection._map_search_row_to_spec`.
@@ -58,8 +58,9 @@ FIXED_COMP_DEEP_PAGES = int(os.getenv("FIXED_COMP_DEEP_PAGES", "3"))
 FIXED_COMP_DEEP_MIN_HITS = int(os.getenv("FIXED_COMP_DEEP_MIN_HITS", "4"))
 FIXED_COMP_MIN_PRICED = int(os.getenv("FIXED_COMP_MIN_PRICED", "4"))
 MAP_RADIUS_CAP_KM = 8.0  # ~5 miles
-DAY_ONE_NIGHT_COMP_TARGET = 10
-DAY_TWO_NIGHT_COMP_TARGET = 10
+DAY_MIN_SCAN_TOTAL = int(os.getenv("DAY_QUERY_MIN_SCAN_TOTAL", "50"))
+DAY_ONE_NIGHT_COMP_TARGET = int(os.getenv("DAY_ONE_NIGHT_COMP_TARGET", "25"))
+DAY_TWO_NIGHT_COMP_TARGET = int(os.getenv("DAY_TWO_NIGHT_COMP_TARGET", "25"))
 
 # Relaxed similarity floor — used when the strict floor yields zero comps for a day.
 # Comps in range [SIMILARITY_FLOOR_FALLBACK, SIMILARITY_FLOOR) are accepted only when
@@ -163,15 +164,18 @@ def estimate_base_price_for_date(
     max_scroll_rounds: int = DAY_SCROLL_ROUNDS,
     max_cards: int = DAY_MAX_CARDS,
     rate_limit_seconds: float = 1.0,
-    top_k: int = 10,
+    top_k: int = 20,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
     max_radius_km: Optional[float] = None,
-    fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> DayResult:
     """
     Execute a 1-night Airbnb search for date_i -> date_i+1.
     Collect cards, filter by similarity to target, compute price distribution.
     """
+    top_k = max(20, int(top_k))
+    min_scan_per_mode = max(1, math.ceil(max(1, DAY_MIN_SCAN_TOTAL) / 2))
+    one_night_scan_target = max(DAY_ONE_NIGHT_COMP_TARGET, min_scan_per_mode)
+    two_night_scan_target = max(DAY_TWO_NIGHT_COMP_TARGET, min_scan_per_mode)
     checkin_str = date_i.isoformat()
     is_weekend = date_i.weekday() >= 4  # Fri=4, Sat=5
 
@@ -182,7 +186,11 @@ def estimate_base_price_for_date(
         map_radius_limit_km = MAP_RADIUS_CAP_KM
         if isinstance(max_radius_km, (int, float)) and float(max_radius_km) > 0:
             map_radius_limit_km = min(float(max_radius_km), MAP_RADIUS_CAP_KM)
-        # Daily compset: collect both 1-night and 2-night pools (10 each), then merge.
+        # Daily compset: collect both 1-night and 2-night pools (>=50 total scan target), then merge.
+        logger.info(
+            f"[day_query] {checkin_str}: scan targets one_night={one_night_scan_target} "
+            f"two_night={two_night_scan_target} total_target={one_night_scan_target + two_night_scan_target}"
+        )
         one_night_comps, _one_qn = collect_search_comps(
             client,
             search_location,
@@ -190,7 +198,7 @@ def estimate_base_price_for_date(
             date_i,
             adults,
             max_scroll_rounds=max_scroll_rounds,
-            max_cards=min(int(max_cards), DAY_ONE_NIGHT_COMP_TARGET),
+            max_cards=one_night_scan_target,
             rate_limit_seconds=rate_limit_seconds,
             timeout_ms=PER_DAY_TIMEOUT_S * 1000,
             exclude_url=target.url,
@@ -208,7 +216,7 @@ def estimate_base_price_for_date(
             date_i,
             adults,
             max_scroll_rounds=max_scroll_rounds,
-            max_cards=min(int(max_cards), DAY_TWO_NIGHT_COMP_TARGET),
+            max_cards=two_night_scan_target,
             rate_limit_seconds=rate_limit_seconds,
             timeout_ms=PER_DAY_TIMEOUT_S * 1000,
             exclude_url=target.url,
@@ -231,7 +239,6 @@ def estimate_base_price_for_date(
                 comps_by_id[cid] = c
         comps = list(comps_by_id.values())
         query_nights_used = 1 if one_night_comps else (2 if two_night_comps else 1)
-        mixed_two_night_already_attempted = True
         logger.info(
             f"[day_query] {checkin_str}: daily pools one_night={len(one_night_comps)} "
             f"two_night={len(two_night_comps)} merged={len(comps)}"
@@ -241,113 +248,6 @@ def estimate_base_price_for_date(
         # and at least some comps to have coordinates; otherwise skipped.
         # Comps without coords always pass through — see geo_filter.py.
         geo_excluded_count = 0
-
-        # Optional fixed-comp mode: only keep comps selected in the initial
-        # similarity pass. This enforces one stable comparable set across dates.
-        if fixed_comp_pool:
-            comps = [
-                c for c in comps
-                if build_comp_id(c.url or "") in fixed_comp_pool
-            ]
-            if len(comps) == 0 and query_nights_used == 1 and not mixed_two_night_already_attempted:
-                logger.info(
-                    f"[day_query] {checkin_str}: fixed-pool hits=0 after 1-night search; "
-                    "forcing 2-night search retry"
-                )
-                two_night_comps, two_night_used = collect_search_comps(
-                    client,
-                    search_location,
-                    base_origin,
-                    date_i,
-                    adults,
-                    max_scroll_rounds=max_scroll_rounds,
-                    max_cards=max_cards,
-                    rate_limit_seconds=rate_limit_seconds,
-                    timeout_ms=PER_DAY_TIMEOUT_S * 1000,
-                    exclude_url=target.url,
-                    log_prefix="everyday_scrape_two_night_retry",
-                    center_lat=query_center_lat,
-                    center_lng=query_center_lng,
-                    map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
-                    target_accommodates=target.accommodates,
-                    prefer_two_night=True,
-                )
-                two_night_comps = [
-                    c for c in two_night_comps
-                    if build_comp_id(c.url or "") in fixed_comp_pool
-                ]
-                if two_night_comps:
-                    comps = two_night_comps
-                    query_nights_used = two_night_used
-            min_hits = max(1, FIXED_COMP_DEEP_MIN_HITS)
-            # Keep normal search path and cap deep paging to max 3 pages.
-            deep_pages = min(3, max(1, FIXED_COMP_DEEP_PAGES))
-            if len(comps) < min_hits and deep_pages > 1:
-                offsets = [i * max(1, int(max_cards)) for i in range(deep_pages)]
-                logger.info(
-                    f"[day_query] {checkin_str}: fixed-pool hits={len(comps)} < {min_hits}; "
-                    f"retrying deep search with offsets={offsets}"
-                )
-                deep_comps, deep_query_nights = collect_search_comps(
-                    client,
-                    search_location,
-                    base_origin,
-                    date_i,
-                    adults,
-                    max_scroll_rounds=max_scroll_rounds,
-                    max_cards=max_cards,
-                    rate_limit_seconds=rate_limit_seconds,
-                    timeout_ms=PER_DAY_TIMEOUT_S * 1000,
-                    exclude_url=target.url,
-                    log_prefix="everyday_scrape_deep",
-                    page_offsets=offsets,
-                    center_lat=query_center_lat,
-                    center_lng=query_center_lng,
-                    map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
-                    target_accommodates=target.accommodates,
-                )
-                deep_comps = [
-                    c for c in deep_comps
-                    if build_comp_id(c.url or "") in fixed_comp_pool
-                ]
-                if len(deep_comps) == 0 and deep_query_nights == 1 and not mixed_two_night_already_attempted:
-                    logger.info(
-                        f"[day_query] {checkin_str}: deep fixed-pool hits=0 after 1-night; "
-                        "forcing 2-night deep retry"
-                    )
-                    deep_two_night_comps, deep_two_night_used = collect_search_comps(
-                        client,
-                        search_location,
-                        base_origin,
-                        date_i,
-                        adults,
-                        max_scroll_rounds=max_scroll_rounds,
-                        max_cards=max_cards,
-                        rate_limit_seconds=rate_limit_seconds,
-                        timeout_ms=PER_DAY_TIMEOUT_S * 1000,
-                        exclude_url=target.url,
-                        log_prefix="everyday_scrape_deep_two_night_retry",
-                        page_offsets=offsets,
-                        center_lat=query_center_lat,
-                        center_lng=query_center_lng,
-                        map_radius_km=map_radius_limit_km if query_center_lat is not None and query_center_lng is not None else None,
-                        target_accommodates=target.accommodates,
-                        prefer_two_night=True,
-                    )
-                    deep_two_night_comps = [
-                        c for c in deep_two_night_comps
-                        if build_comp_id(c.url or "") in fixed_comp_pool
-                    ]
-                    if deep_two_night_comps:
-                        deep_comps = deep_two_night_comps
-                        deep_query_nights = deep_two_night_used
-                if len(deep_comps) > len(comps):
-                    comps = deep_comps
-                    query_nights_used = deep_query_nights
-                    logger.info(
-                        f"[day_query] {checkin_str}: deep search improved fixed-pool hits "
-                        f"to {len(comps)}"
-                    )
 
         comps_collected = len(comps)
 
@@ -369,20 +269,7 @@ def estimate_base_price_for_date(
         filtered_comps, filter_debug = filter_similar_candidates(target, comps)
 
         # Score and rank (raw scores stored separately before any boost).
-        if fixed_comp_pool:
-            comps_scored = [
-                (
-                    c,
-                    float(
-                        (fixed_comp_pool.get(build_comp_id(c.url or "")) or {}).get(
-                            "similarity", similarity_score(target, c)
-                        )
-                    ),
-                )
-                for c in filtered_comps
-            ]
-        else:
-            comps_scored = [(c, similarity_score(target, c)) for c in filtered_comps]
+        comps_scored = [(c, similarity_score(target, c)) for c in filtered_comps]
         # Capture raw scores keyed by object id before the boost step overwrites them.
         raw_sim_scores: Dict[int, float] = {id(c): s for c, s in comps_scored}
         comps_scored.sort(key=lambda x: x[1], reverse=True)
@@ -423,29 +310,6 @@ def estimate_base_price_for_date(
         below_floor_count = len(comps_scored) - len(above_floor)
         selection_mode = "strict"
         _using_fallback = False
-
-        # In fixed-comp mode, if strict-floor priced comps are too few for stable
-        # pricing, top up from lower similarity (down to fallback floor), preserving
-        # ranked order. This lets lower-sim comps contribute when higher-sim comps
-        # have no price for this day.
-        if fixed_comp_pool and 0 < len(above_floor) < max(1, FIXED_COMP_MIN_PRICED):
-            need = max(1, FIXED_COMP_MIN_PRICED) - len(above_floor)
-            relaxed_candidates = [
-                (c, s)
-                for c, s in comps_scored
-                if SIMILARITY_FLOOR_FALLBACK <= raw_sim_scores.get(id(c), 0.0) < SIMILARITY_FLOOR
-            ]
-            if relaxed_candidates:
-                added = relaxed_candidates[:need]
-                above_floor = above_floor + added
-                below_floor_count = len(comps_scored) - len(above_floor)
-                selection_mode = "fallback_relaxed"
-                _using_fallback = True
-                logger.info(
-                    f"[day_query] {checkin_str}: strict-floor comps={len(above_floor)-len(added)} "
-                    f"< min_priced={FIXED_COMP_MIN_PRICED}; added {len(added)} relaxed comps "
-                    f"(floor={SIMILARITY_FLOOR_FALLBACK})"
-                )
 
         if below_floor_count > 0:
             all_scores = [s for _, s in comps_scored]
@@ -592,7 +456,7 @@ def estimate_base_price_for_date(
         # top_comps uses the full above_floor list for transparency.
         # Comps excluded by price sanity are tagged priceOutlier=True;
         # comps excluded by price band are tagged priceBandExcluded=True.
-        top_comps_scored = above_floor[: min(max(3, top_k), len(above_floor))]
+        top_comps_scored = above_floor[: min(max(1, top_k), len(above_floor))]
         # Build date-specific deep links using each comp's own queried stay length.
         top_comps = [
             (

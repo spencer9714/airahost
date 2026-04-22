@@ -224,7 +224,6 @@ def _build_daily_transparent_result(
     target_price_confidence: Optional[str] = None,
     spec_backfill: Optional[Dict[str, Any]] = None,
     spec_extraction_meta: Optional[Dict[str, Any]] = None,
-    fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -258,13 +257,7 @@ def _build_daily_transparent_result(
         1 for r in all_day_results if r.get("selection_mode") == "fallback_relaxed"
     )
 
-    def _date_add(date_str: str, n: int) -> str:
-        """Add n days to a YYYY-MM-DD string, return YYYY-MM-DD."""
-        d = dt.strptime(date_str, "%Y-%m-%d") + timedelta(days=n)
-        return d.strftime("%Y-%m-%d")
-
     comparable_index: Dict[str, Dict[str, Any]] = {}
-    fixed_pool_mode = fixed_comp_pool is not None
 
     def _prefer_better_comp_value(current: Any, candidate: Any) -> Any:
         """Keep richer comp metadata when the same listing appears across days."""
@@ -278,51 +271,11 @@ def _build_daily_transparent_result(
             return candidate if not cur else current
         return candidate if current is None else current
 
-    day_comp_price_rows: List[Tuple[str, Dict[str, float]]] = []
     comp_seen_dates: Dict[str, set[str]] = {}
-
-    # Seed report index with fixed pool so comps can still surface in output
-    # even when they were not selected into a day's top_comps.
-    if fixed_pool_mode and fixed_comp_pool:
-        for comp_id, payload in fixed_comp_pool.items():
-            cid = str(comp_id or "").strip()
-            if not cid:
-                continue
-            comparable_index[cid] = {
-                "item": {
-                    "id": cid,
-                    "title": payload.get("title") or "Comparable listing",
-                    "propertyType": payload.get("property_type") or target.property_type or "entire_home",
-                    "accommodates": payload.get("accommodates"),
-                    "bedrooms": payload.get("bedrooms"),
-                    "baths": payload.get("baths"),
-                    "nightlyPrice": None,
-                    "currency": payload.get("currency") or target.currency or "USD",
-                    "similarity": round(float(payload.get("similarity") or 0.0), 3),
-                    "rating": payload.get("rating"),
-                    "reviews": payload.get("reviews"),
-                    "amenities": list(payload.get("amenities") or []),
-                    "location": payload.get("location"),
-                    "url": payload.get("url"),
-                    "queryNights": int(payload.get("query_nights") or 1),
-                    "queryTotalPrice": payload.get("query_total_price"),
-                },
-                "score_sum": float(payload.get("similarity") or 0.0),
-                "count": 0,
-                "price_by_date": {},
-                "max_query_nights": int(payload.get("query_nights") or 1),
-            }
 
     for day_result in all_day_results:
         day_date = day_result.get("date")
         day_comp_prices: Dict[str, float] = day_result.get("comp_prices") or {}
-        if day_date and day_comp_prices:
-            day_comp_price_rows.append((day_date, day_comp_prices))
-
-        if fixed_pool_mode:
-            # In fixed-pool mode, comparable set is created once and never expanded
-            # from daily top_comps. Daily queries only contribute price-by-date.
-            continue
 
         for comp in day_result.get("top_comps", []) or []:
             comp_id = str(comp.get("id") or comp.get("url") or "").strip()
@@ -352,36 +305,9 @@ def _build_daily_transparent_result(
                     comparable_index[comp_id]["max_query_nights"] = qn
             if day_date and isinstance(price, (int, float)) and price > 0:
                 _price_rounded = round(float(price), 2)
-                # Always write the primary check-in night.
                 comparable_index[comp_id]["price_by_date"][day_date] = _price_rounded
-                # Expand to all nights covered by this query (queryNights > 1 means
-                # the price was a multi-night total normalized to per-night; each of
-                # those nights should show the same per-night rate).
-                for i in range(1, qn):
-                    night = _date_add(day_date, i)
-                    # Only fill expanded nights when not already set by a direct query.
-                    comparable_index[comp_id]["price_by_date"].setdefault(night, _price_rounded)
-
-    # Second pass (global): fill priceByDate for comps that appeared in full-day
-    # results but were not in that day's top_comps. This must run after the
-    # top_comps pass for all days so comp creation order cannot drop early-day
-    # prices for comps that become top-comps on later days.
-    for day_date, day_comp_prices in day_comp_price_rows:
-        for comp_id, price in day_comp_prices.items():
-            if comp_id not in comparable_index:
-                continue
-            if not isinstance(price, (int, float)) or price <= 0:
-                continue
-            price_by_date = comparable_index[comp_id]["price_by_date"]
-            if day_date not in price_by_date:
-                price_by_date[day_date] = round(float(price), 2)
             if day_date:
                 comp_seen_dates.setdefault(comp_id, set()).add(day_date)
-            # Also expand to covered nights using the stored max_query_nights.
-            qn = comparable_index[comp_id].get("max_query_nights", 1)
-            for i in range(1, qn):
-                night = _date_add(day_date, i)
-                price_by_date.setdefault(night, round(float(price), 2))
 
     comparable_listings: List[Dict[str, Any]] = []
     for state in comparable_index.values():
@@ -397,7 +323,7 @@ def _build_daily_transparent_result(
         if avg_score < SIMILARITY_FLOOR_FALLBACK and not has_any_price:
             continue
         item["similarity"] = round(avg_score, 3)
-        item["usedInPricingDays"] = len(seen_days) if fixed_pool_mode else score_count
+        item["usedInPricingDays"] = score_count
         price_by_date = state.get("price_by_date", {})
         if price_by_date:
             item["priceByDate"] = price_by_date
@@ -448,9 +374,7 @@ def _build_daily_transparent_result(
     weekday_est = round(statistics.median(weekday_prices)) if weekday_prices else (round(overall_median) if overall_median else None)
     weekend_est = round(statistics.median(weekend_prices)) if weekend_prices else (round(overall_median) if overall_median else None)
 
-    unique_collected_comp_ids: set[str] = set()
-    for _day_date, _day_comp_prices in day_comp_price_rows:
-        unique_collected_comp_ids.update(str(cid) for cid in (_day_comp_prices or {}).keys() if cid)
+    unique_collected_comp_ids: set[str] = set(str(cid) for cid in comparable_index.keys() if cid)
 
     unique_filtered_comp_count = sum(
         1 for row in comparable_listings if isinstance(row.get("priceByDate"), dict) and bool(row.get("priceByDate"))
@@ -461,21 +385,6 @@ def _build_daily_transparent_result(
     summary_collected = len(unique_collected_comp_ids)
     summary_after_filtering = unique_filtered_comp_count
     summary_used_for_pricing = unique_used_for_pricing_count
-
-    if fixed_pool_mode and isinstance(query_criteria, dict):
-        # In fixed-pool mode, report stage counters from setup (anchor discovery).
-        # This preserves the expected funnel: collected > filtered > used.
-        setup_collected = int(query_criteria.get("fixedCompPoolCollectedTotal") or 0)
-        setup_filtered = int(query_criteria.get("fixedCompPoolFilteredTotal") or 0)
-        if setup_collected > 0:
-            summary_collected = setup_collected
-        if setup_filtered > 0:
-            summary_after_filtering = setup_filtered
-        summary_used_for_pricing = int(
-            query_criteria.get("fixedCompPoolSize")
-            or query_criteria.get("fixedCompPoolGlobalLimit")
-            or summary_used_for_pricing
-        )
 
     return {
         "targetSpec": {
@@ -1035,7 +944,7 @@ def run_scrape(
     checkout: str,
     cdp_url: str = "http://127.0.0.1:9222",
     adults: int = 2,
-    top_k: int = 10,
+    top_k: int = 20,
     max_scroll_rounds: int = DAY_SCROLL_ROUNDS,
     max_cards: int = DAY_MAX_CARDS,
     max_runtime_seconds: int = 180,
@@ -1124,6 +1033,7 @@ def run_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
+            "CDP_URL": cdp_url,
             "LOG_RAW_PAYLOADS": None,
         }
     )
@@ -1466,131 +1376,10 @@ def run_scrape(
             # Step 2: Day-by-day 1-night queries
             from worker.scraper.day_query import DayResult
 
-            # Build fixed comp set from three anchors: first day, midpoint day, last day.
-            _fixed_pool_start = time.time()
-            fixed_pool_pages = max(1, int(os.getenv("FIXED_POOL_PAGES", "6")))
-            fixed_pool_per_anchor = max(1, int(os.getenv("FIXED_POOL_PER_ANCHOR", "15")))
-            # Final compset cap: keep only the best-N similarity comps globally.
-            fixed_pool_global_limit = max(1, int(os.getenv("FIXED_POOL_GLOBAL_LIMIT", "20")))
-            fixed_pool_max_workers = _bounded_workers("FIXED_POOL_MAX_WORKERS", 5)
-            anchor_indices = sorted({0, len(all_nights) // 2, len(all_nights) - 1})
-            anchor_dates = [all_nights[i] for i in anchor_indices]
-            fixed_comp_pool: Dict[str, Dict[str, Any]] = {}
-            fixed_pool_merged_candidates: Dict[str, Dict[str, Any]] = {}
-            anchor_date_strs: List[str] = []
-            fixed_pool_collected_total = 0
-            fixed_pool_filtered_total = 0
-            fixed_pool_selected_total = 0
-
-            logger.info(
-                f"[fixed_pool] building anchor pools concurrently: "
-                f"anchors={len(anchor_dates)}, workers={min(fixed_pool_max_workers, len(anchor_dates))}"
-            )
-
-            def _build_anchor_pool(anchor_date):
-                # Use isolated client instance per anchor worker to avoid shared-session contention.
-                anchor_client = client.fork()
-                anchor_pool, anchor_meta = _build_fixed_comp_pool(
-                    anchor_client,
-                    target,
-                    base_origin,
-                    anchor_date,
-                    effective_adults,
-                    max_scroll_rounds=_eff_scroll_rounds,
-                    max_cards=max(_eff_max_cards, 40),
-                    rate_limit_seconds=rate_limit_seconds,
-                    max_radius_km=_effective_radius,
-                    pool_size=fixed_pool_per_anchor,
-                    page_count=fixed_pool_pages,
-                    return_meta=True,
-                )
-                return {
-                    "anchor_date": anchor_date.isoformat(),
-                    "anchor_pool": anchor_pool,
-                    "anchor_meta": anchor_meta,
-                }
-
-            anchor_pool_results, _anchor_state = execute_day_queries_concurrently(
-                query_func=_build_anchor_pool,
-                args_list=anchor_dates,
-                max_workers=min(fixed_pool_max_workers, len(anchor_dates)),
-                early_stop_threshold=None,
-                progress_callback=None,
-            )
-
-            for row in anchor_pool_results:
-                anchor_date_iso = str(row.get("anchor_date") or "")
-                anchor_pool = row.get("anchor_pool") or {}
-                anchor_meta = row.get("anchor_meta") or {}
-                anchor_date_strs.append(anchor_date_iso)
-                fixed_pool_collected_total += int(anchor_meta.get("collected") or 0)
-                fixed_pool_filtered_total += int(anchor_meta.get("afterFiltering") or 0)
-                fixed_pool_selected_total += int(anchor_meta.get("selected") or 0)
-
-                def _lowest_similarity_entry(pool: Dict[str, Dict[str, Any]]) -> Optional[Tuple[str, float]]:
-                    if not pool:
-                        return None
-                    return min(
-                        ((k, float((v or {}).get("similarity") or 0.0)) for k, v in pool.items()),
-                        key=lambda kv: kv[1],
-                    )
-
-                for cid, payload in anchor_pool.items():
-                    if cid in fixed_pool_merged_candidates:
-                        fixed_pool_merged_candidates[cid] = _merge_fixed_comp_entry(
-                            fixed_pool_merged_candidates[cid], payload
-                        )
-                    else:
-                        fixed_pool_merged_candidates[cid] = dict(payload)
-
-                    if cid not in fixed_comp_pool:
-                        # Keep bounded top-N by similarity while gathering.
-                        if len(fixed_comp_pool) < fixed_pool_global_limit:
-                            fixed_comp_pool[cid] = dict(payload)
-                        else:
-                            lowest = _lowest_similarity_entry(fixed_comp_pool)
-                            incoming_sim = float((payload or {}).get("similarity") or 0.0)
-                            if lowest is not None and incoming_sim > lowest[1]:
-                                del fixed_comp_pool[lowest[0]]
-                                fixed_comp_pool[cid] = dict(payload)
-                    else:
-                        fixed_comp_pool[cid] = _merge_fixed_comp_entry(fixed_comp_pool[cid], payload)
-                logger.info(
-                    f"[fixed_pool] anchor_date={anchor_date_iso} "
-                    f"size={len(anchor_pool)} (per_anchor_target={fixed_pool_per_anchor}, pages={fixed_pool_pages})"
-                )
-
-            # Defensive cap: keep only global top-N similarity comps.
-            max_fixed_pool_size = fixed_pool_global_limit
-            if len(fixed_comp_pool) > fixed_pool_global_limit:
-                ranked_fixed = sorted(
-                    fixed_comp_pool.items(),
-                    key=lambda kv: -float((kv[1] or {}).get("similarity") or 0.0),
-                )
-                fixed_comp_pool = dict(ranked_fixed[:fixed_pool_global_limit])
-
-            logger.info(
-                f"[fixed_pool] merged anchors={anchor_date_strs} total_size={len(fixed_comp_pool)}"
-            )
-            timings["fixed_pool_ms"] = round((time.time() - _fixed_pool_start) * 1000)
-
-            query_criteria["fixedCompPoolAnchorDates"] = anchor_date_strs
-            query_criteria["fixedCompPoolPerAnchor"] = fixed_pool_per_anchor
-            query_criteria["fixedCompPoolPages"] = fixed_pool_pages
-            query_criteria["fixedCompPoolGlobalLimit"] = fixed_pool_global_limit
-            query_criteria["fixedCompPoolSize"] = len(fixed_comp_pool)
-            # Funnel counters for report:
-            # collected = per-anchor selected comps before global dedupe/cap
-            # afterFiltering = unique comps after merge/dedupe before global cap
-            # usedForPricing = final capped fixed pool size (top-N global)
-            query_criteria["fixedCompPoolCollectedTotal"] = fixed_pool_selected_total
-            query_criteria["fixedCompPoolFilteredTotal"] = len(fixed_pool_merged_candidates)
-            query_criteria["fixedCompPoolSelectedTotal"] = fixed_pool_selected_total
-            # Keep raw setup counters for diagnostics.
-            query_criteria["fixedCompPoolRawCollectedTotal"] = fixed_pool_collected_total
-            query_criteria["fixedCompPoolRawFilteredTotal"] = fixed_pool_filtered_total
-            query_criteria["fixedCompPoolStrategy"] = "first_mid_last"
-            query_criteria["reportRanking"] = "price_presence_then_similarity"
+            # Per-day mode: no upfront fixed compset seeding. Each day collects and ranks
+            # its own comparable set, then keeps that day's top_k for display/pricing.
+            query_criteria["reportRanking"] = "per_day_top_k"
+            query_criteria["perDayTopK"] = max(1, int(top_k))
 
             def _run_day_query(night_idx: int) -> DayResult:
                 date_i = all_nights[night_idx]
@@ -1609,7 +1398,6 @@ def run_scrape(
                         top_k=top_k,
                         preferred_comps=preferred_comps,
                         max_radius_km=_effective_radius,
-                        fixed_comp_pool=fixed_comp_pool or None,
                     )
                     if result.median_price is not None:
                         break
@@ -1742,7 +1530,6 @@ def run_scrape(
                 target_price_confidence=_target_price_confidence,
                 spec_backfill=_spec_backfill_meta,
                 spec_extraction_meta=_spec_extraction_meta,
-                fixed_comp_pool=fixed_comp_pool,
             )
             # Phase 3B: surface page-extracted coords so main.py can write them back to DB
             if target.lat is not None and target.lng is not None:
@@ -1765,7 +1552,6 @@ def run_scrape(
                 f"{sum(1 for r in all_day_results if r['median_price'] is not None)} valid prices, "
                 f"{timings['total_ms']}ms total "
                 f"(extract={timings.get('extract_ms', 0)}ms, "
-                f"fixed_pool={timings.get('fixed_pool_ms', 0)}ms, "
                 f"day_queries={timings.get('day_queries_ms', 0)}ms, "
                 f"interpolation={timings.get('interpolation_ms', 0)}ms, "
                 f"discount_evidence={timings.get('discount_evidence_ms', 0)}ms)"
@@ -1875,6 +1661,7 @@ def run_benchmark_scrape(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
+            "CDP_URL": cdp_url,
             "LOG_RAW_PAYLOADS": None,
         }
     )
@@ -2910,7 +2697,7 @@ def run_criteria_search(
     checkin: str,
     checkout: str,
     cdp_url: str = "http://127.0.0.1:9222",
-    top_k: int = 10,
+    top_k: int = 20,
     max_scroll_rounds: int = DAY_SCROLL_ROUNDS,
     max_cards: int = DAY_MAX_CARDS,
     max_runtime_seconds: int = 180,
@@ -3154,6 +2941,7 @@ def run_criteria_search(
             "CHECKIN": checkin,
             "CHECKOUT": checkout,
             "ADULTS": adults,
+            "CDP_URL": cdp_url,
             "QUERY": search_location,
             "LOG_RAW_PAYLOADS": None,
         }

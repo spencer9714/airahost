@@ -350,10 +350,9 @@ export function HowWeEstimated({
   hideComparableListings = false,
 }: {
   report: PricingReport;
-  /** Effective price date — the nearest sampled date used for priceByDate lookup. */
+  /** Effective price date used for exact priceByDate lookup. */
   selectedDate?: string | null;
-  /** The date the user actually clicked. When this differs from selectedDate a
-   *  disclosure banner is shown in the comparable listings section. */
+  /** The date the user clicked on the heatmap. */
   clickedDate?: string | null;
   /**
    * When true, the comparable listings block is omitted from this section.

@@ -392,33 +392,7 @@ export default function ResultsPage({
   const reportId = report?.id ?? null;
   useEffect(() => { setClickedDate(null); }, [reportId]);
 
-  // Snap clickedDate to the nearest date that actually has comp price data.
-  // comps are only sampled on a handful of dates across the 30-day window,
-  // so without snapping most tile clicks would show "No data for this date".
-  const snappedDate = useMemo((): string | null => {
-    if (!clickedDate || !report) return clickedDate;
-    const listings =
-      report.comparableListings ?? report.resultSummary?.comparableListings ?? [];
-    const sampledDates = new Set<string>();
-    for (const listing of listings) {
-      if ((listing as { priceByDate?: Record<string, number> }).priceByDate) {
-        for (const d of Object.keys(
-          (listing as { priceByDate: Record<string, number> }).priceByDate
-        )) {
-          sampledDates.add(d);
-        }
-      }
-    }
-    if (sampledDates.size === 0) return clickedDate; // no data at all — pass through
-    const target = new Date(clickedDate + "T00:00:00Z").getTime();
-    let best = clickedDate;
-    let bestDiff = Infinity;
-    for (const d of sampledDates) {
-      const diff = Math.abs(new Date(d + "T00:00:00Z").getTime() - target);
-      if (diff < bestDiff) { bestDiff = diff; best = d; }
-    }
-    return best;
-  }, [clickedDate, report]);
+  const snappedDate = clickedDate;
 
   const contextualBenchmarkInfo = useMemo((): BenchmarkInfo | null => {
     return (report?.benchmarkInfo ?? report?.resultSummary?.benchmarkInfo ?? null) as BenchmarkInfo | null;
@@ -984,11 +958,9 @@ export default function ResultsPage({
                         for {clickedDate}
                       </span>
                     </p>
-                    {snappedDate !== clickedDate && (
-                      <p className="mt-0.5 text-xs text-amber-700">
-                        No comp data for {clickedDate} — showing nearest sampled day below.
-                      </p>
-                    )}
+                    <p className="mt-0.5 text-xs text-foreground/45">
+                      Showing listings scraped for this exact day.
+                    </p>
                   </div>
                   <button
                     type="button"

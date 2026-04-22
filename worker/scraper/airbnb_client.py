@@ -1,6 +1,7 @@
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 
 import requests
 
@@ -9,6 +10,7 @@ from worker.scraper.playwright_scraper import PlaywrightScraper
 from worker.scraper.scraper_errors import ScraperForbiddenError
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 class AirbnbClient:
@@ -28,6 +30,7 @@ class AirbnbClient:
         )
         self._playwright_scraper: Optional[PlaywrightScraper] = None
         self._deepbnb_session = requests.Session()
+        self._deepbnb_disabled_for_task = False
 
         use_deepbnb_cfg = self.config.get("USE_DEEPBNB_BACKEND", None)
         if use_deepbnb_cfg is None:
@@ -49,22 +52,14 @@ class AirbnbClient:
 
     def _get_playwright_scraper(self) -> PlaywrightScraper:
         if self._playwright_scraper is None:
-            self._playwright_scraper = PlaywrightScraper(self.config)
+            cfg = dict(self.config)
+            cfg.setdefault("USE_HARDCODED_STAYSPDP_TEMPLATE", False)
+            self._playwright_scraper = PlaywrightScraper(cfg)
         return self._playwright_scraper
 
     def sync_fetch_session_cookies_from_playwright(self) -> None:
-        """Copy current Playwright session cookies into the fetch backend session."""
-        scraper = self._get_playwright_scraper()
-        self._deepbnb_session.cookies.clear()
-        for cookie in scraper.session.cookies:
-            self._deepbnb_session.cookies.set(
-                cookie.name,
-                cookie.value,
-                domain=cookie.domain,
-                path=cookie.path,
-                secure=cookie.secure,
-                expires=cookie.expires,
-            )
+        """Disabled: do not replicate cookies from Playwright into Deepbnb session."""
+        logger.info("Skipping sync_fetch_session_cookies_from_playwright (disabled).")
 
     def refresh_session(self, force_capture: bool = False, bypass_cooldown: bool = False):
         return self._get_playwright_scraper().refresh_session(force_capture=force_capture, bypass_cooldown=bypass_cooldown)
@@ -100,42 +95,89 @@ class AirbnbClient:
             return scraper.search_listings()
         return scraper.search_listings_with_overrides(overrides)
 
-    def search_listings(self) -> Tuple[int, Dict[str, Any]]:
-        if self.deepbnb_scraper is not None:
+    @staticmethod
+    def _looks_challenge_exception(exc: Exception) -> bool:
+        text = str(exc or "").strip().lower()
+        if not text:
+            return False
+        markers = (
+            "challenge",
+            "captcha",
+            "checkpoint",
+            "forbidden",
+            "blocked",
+            "security",
+            "unauth",
+            "403",
+            "login required",
+            "verify",
+        )
+        return any(marker in text for marker in markers)
+
+    def _run_deepbnb_with_fallback(
+        self,
+        op_name: str,
+        deepbnb_call: Callable[[], _T],
+        fallback_call: Callable[[], _T],
+    ) -> _T:
+        if self.deepbnb_scraper is None:
+            return fallback_call()
+        if self._deepbnb_disabled_for_task:
+            logger.info(
+                "DeepBnbScraper disabled for current task after challenge; using Playwright for %s",
+                op_name,
+            )
+            return fallback_call()
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, 3):
             try:
-                self.sync_fetch_session_cookies_from_playwright()
-                return self.deepbnb_scraper.search_listings()
+                return deepbnb_call()
             except ScraperForbiddenError as exc:
+                self._deepbnb_disabled_for_task = True
                 logger.error(
-                    "DeepBnbScraper returned 403 Forbidden/block challenge for search_listings; "
-                    "falling back to PlaywrightScraper: %s",
+                    "DeepBnbScraper blocked/challenge for %s; immediate fallback to Playwright: %s",
+                    op_name,
                     exc,
                 )
+                return fallback_call()
             except Exception as exc:
-                logger.warning("DeepBnbScraper search_listings failed; falling back to PlaywrightScraper: %s", exc)
-        return self._search_via_playwright()
+                last_exc = exc
+                if self._looks_challenge_exception(exc):
+                    self._deepbnb_disabled_for_task = True
+                    logger.error(
+                        "DeepBnbScraper challenge-like error for %s; immediate fallback to Playwright: %s",
+                        op_name,
+                        exc,
+                    )
+                    return fallback_call()
+                logger.warning(
+                    "DeepBnbScraper %s attempt %s/2 failed; retrying/fallbacking: %s",
+                    op_name,
+                    attempt,
+                    exc,
+                )
+                if attempt < 2:
+                    time.sleep(0.8)
+        logger.warning("DeepBnbScraper %s failed after 2 attempts; falling back to Playwright: %s", op_name, last_exc)
+        return fallback_call()
+
+    def search_listings(self) -> Tuple[int, Dict[str, Any]]:
+        return self._run_deepbnb_with_fallback(
+            op_name="search_listings",
+            deepbnb_call=lambda: self.deepbnb_scraper.search_listings(),  # type: ignore[union-attr]
+            fallback_call=self._search_via_playwright,
+        )
 
     def search_listings_with_overrides(
         self,
         overrides: Dict[str, Any],
     ) -> Tuple[int, Dict[str, Any]]:
-        if self.deepbnb_scraper is not None:
-            try:
-                self.sync_fetch_session_cookies_from_playwright()
-                return self.deepbnb_scraper.search_listings_with_overrides(overrides)
-            except ScraperForbiddenError as exc:
-                logger.error(
-                    "DeepBnbScraper returned 403 Forbidden/block challenge for search_listings_with_overrides; "
-                    "falling back to PlaywrightScraper: %s",
-                    exc,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "DeepBnbScraper search_listings_with_overrides failed; "
-                    "falling back to PlaywrightScraper: %s",
-                    exc,
-                )
-        return self._search_via_playwright(overrides)
+        return self._run_deepbnb_with_fallback(
+            op_name="search_listings_with_overrides",
+            deepbnb_call=lambda: self.deepbnb_scraper.search_listings_with_overrides(overrides),  # type: ignore[union-attr]
+            fallback_call=lambda: self._search_via_playwright(overrides),
+        )
 
     def get_listing_details(
         self,
@@ -148,27 +190,18 @@ class AirbnbClient:
         effective_checkout = checkout or self.config.get("CHECKOUT", "")
         effective_adults = int(adults if adults is not None else self.config.get("ADULTS", 1))
 
-        if self.deepbnb_scraper is not None:
-            try:
-                self.sync_fetch_session_cookies_from_playwright()
-                return self.deepbnb_scraper.get_listing_details(
-                    str(listing_id),
-                    checkin=effective_checkin,
-                    checkout=effective_checkout,
-                    adults=effective_adults,
-                )
-            except ScraperForbiddenError as exc:
-                logger.error(
-                    "DeepBnbScraper returned 403 Forbidden/block challenge for get_listing_details; "
-                    "falling back to PlaywrightScraper: %s",
-                    exc,
-                )
-            except Exception as exc:
-                logger.warning("DeepBnbScraper get_listing_details failed; falling back to PlaywrightScraper: %s", exc)
-
-        return self._get_playwright_scraper().get_listing_details(
-            listing_id=str(listing_id),
-            checkin=effective_checkin,
-            checkout=effective_checkout,
-            adults=effective_adults,
+        return self._run_deepbnb_with_fallback(
+            op_name="get_listing_details",
+            deepbnb_call=lambda: self.deepbnb_scraper.get_listing_details(  # type: ignore[union-attr]
+                str(listing_id),
+                checkin=effective_checkin,
+                checkout=effective_checkout,
+                adults=effective_adults,
+            ),
+            fallback_call=lambda: self._get_playwright_scraper().get_listing_details(
+                listing_id=str(listing_id),
+                checkin=effective_checkin,
+                checkout=effective_checkout,
+                adults=effective_adults,
+            ),
         )

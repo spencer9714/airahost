@@ -319,32 +319,52 @@ def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str
     Returns (ListingSpec, extraction_warnings).
     """
     if hasattr(client, "get_listing_details"):
-        warnings: List[str] = []
-        listing_id = extract_listing_id_from_url(listing_url)
-        if not listing_id:
-            return (
-                ListingSpec(url=normalize_airbnb_url(listing_url)),
-                [f"Unable to parse listing_id from URL: {listing_url}"],
-            )
+        # Restore browser-HTML extraction path: open the listing page in Playwright
+        # and parse rendered DOM/JSON-LD instead of GraphQL response payloads.
         try:
-            pdp_data = client.get_listing_details(str(listing_id))
-            parsed = parse_pdp_response(pdp_data, str(listing_id), safe_domain_base(listing_url))
-            spec = map_pdp_to_listing_spec(parsed, listing_url)
-            if spec.accommodates is None:
-                warnings.append("Missing accommodates from PDP response")
-            if spec.bedrooms is None:
-                warnings.append("Missing bedrooms from PDP response")
-            if spec.beds is None:
-                warnings.append("Missing beds from PDP response")
-            if spec.baths is None:
-                warnings.append("Missing baths from PDP response")
-            if not spec.property_type:
-                warnings.append("Missing property_type from PDP response")
-            return spec, warnings
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/121.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 800},
+                )
+                try:
+                    session = getattr(client, "session", None)
+                    cookies = []
+                    if session is not None and hasattr(session, "cookies"):
+                        for c in session.cookies:
+                            try:
+                                cookies.append(
+                                    {
+                                        "name": c.name,
+                                        "value": c.value,
+                                        "domain": c.domain,
+                                        "path": c.path or "/",
+                                        "secure": bool(c.secure),
+                                    }
+                                )
+                            except Exception:
+                                continue
+                    if cookies:
+                        try:
+                            context.add_cookies(cookies)
+                        except Exception:
+                            pass
+
+                    page = context.new_page()
+                    return extract_target_spec(page, listing_url)
+                finally:
+                    browser.close()
         except Exception as exc:
             return (
                 ListingSpec(url=normalize_airbnb_url(listing_url)),
-                [f"PDP extraction failed: {exc}"],
+                [f"Browser HTML extraction failed: {exc}"],
             )
 
     # Legacy DOM fallback
@@ -1096,26 +1116,54 @@ def extract_nightly_price_from_listing_page(
         stay_nights = 1
 
     if hasattr(page, "get_listing_details"):
-        listing_id = extract_listing_id_from_url(listing_url)
-        if not listing_id:
-            return None, "failed"
+        # Restore browser-HTML extraction path: use a real Playwright page and
+        # parse rendered booking widget content instead of GraphQL PDP responses.
         try:
-            data = page.get_listing_details(
-                listing_id,
-                checkin=checkin,
-                checkout=checkout,
-                adults=2,
-            )
-            parsed = parse_pdp_response(data, listing_id, safe_domain_base(listing_url))
-            nightly = parsed.get("nightly_price")
-            if isinstance(nightly, (int, float)) and nightly > 0:
-                return float(nightly), "high"
-            total = parsed.get("total_price")
-            if isinstance(total, (int, float)) and total > 0:
-                return round(float(total) / stay_nights, 2), "medium"
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/121.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 800},
+                )
+                try:
+                    session = getattr(page, "session", None)
+                    cookies = []
+                    if session is not None and hasattr(session, "cookies"):
+                        for c in session.cookies:
+                            try:
+                                cookies.append(
+                                    {
+                                        "name": c.name,
+                                        "value": c.value,
+                                        "domain": c.domain,
+                                        "path": c.path or "/",
+                                        "secure": bool(c.secure),
+                                    }
+                                )
+                            except Exception:
+                                continue
+                    if cookies:
+                        try:
+                            context.add_cookies(cookies)
+                        except Exception:
+                            pass
+                    real_page = context.new_page()
+                    return extract_nightly_price_from_listing_page(
+                        real_page,
+                        listing_url=listing_url,
+                        checkin=checkin,
+                        checkout=checkout,
+                    )
+                finally:
+                    browser.close()
         except Exception:
             return None, "failed"
-        return None, "failed"
 
     parsed = urlparse(listing_url)
     # Reconstruct with only check_in / check_out — drop any pre-existing params.
@@ -1442,6 +1490,32 @@ def capture_target_live_price(
         listing_id = extract_listing_id_from_url(listing_url)
         if not listing_id:
             raise ValueError(f"Unable to parse listing_id from URL: {listing_url}")
+
+        # Prefer browser-rendered HTML extraction for live price capture.
+        # This restores pre-GraphQL behavior where booking-widget DOM is source of truth.
+        try:
+            _html_price, _html_conf = extract_nightly_price_from_listing_page(
+                client,
+                listing_url=listing_url,
+                checkin=checkin,
+                checkout=checkout,
+            )
+            if isinstance(_html_price, (int, float)) and _html_price > 0:
+                return {
+                    "observedListingPrice": round(float(_html_price)),
+                    "observedListingPriceDate": checkin,
+                    "observedListingPriceCapturedAt": captured_at,
+                    "observedListingPriceSource": _CONFIDENCE_TO_SOURCE.get(_html_conf, "unknown"),
+                    "observedListingPriceConfidence": _html_conf,
+                    "livePriceStatus": "captured",
+                    "livePriceStatusReason": (
+                        f"Nightly price captured from browser HTML for {checkin}/{checkout} "
+                        f"(confidence={_html_conf})"
+                    ),
+                }
+        except Exception:
+            pass
+
         playwright_client: Optional[Any] = None
 
         def _is_fetch_client(_client_obj: Any) -> bool:
@@ -1474,11 +1548,6 @@ def capture_target_live_price(
                     and _backend is not None
                     and hasattr(_backend, "get_listing_details_via_stays_pdp_sections")
                 ):
-                    if hasattr(_client_obj, "sync_fetch_session_cookies_from_playwright"):
-                        try:
-                            _client_obj.sync_fetch_session_cookies_from_playwright()
-                        except Exception:
-                            pass
                     _pdp_data = _backend.get_listing_details_via_stays_pdp_sections(
                         str(listing_id),
                         checkin=_checkin,

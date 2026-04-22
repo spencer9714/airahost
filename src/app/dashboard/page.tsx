@@ -488,27 +488,6 @@ export default function DashboardPage() {
     return urls;
   }, [activeListing, activeBenchmarkInfo]);
 
-  // Snap the focused date to the nearest date that has comp price data.
-  // Most reports only sample a few dates across 30 days, so this is essential.
-  const snappedFocusedDate = useMemo((): string | null => {
-    if (!focusedDate || !activeComparableListings) return focusedDate;
-    const allSampledDates = new Set<string>();
-    for (const listing of activeComparableListings) {
-      if (listing.priceByDate) {
-        for (const d of Object.keys(listing.priceByDate)) allSampledDates.add(d);
-      }
-    }
-    if (allSampledDates.size === 0) return focusedDate;
-    const target = new Date(focusedDate + "T00:00:00Z").getTime();
-    let best = focusedDate;
-    let bestDiff = Infinity;
-    for (const d of allSampledDates) {
-      const diff = Math.abs(new Date(d + "T00:00:00Z").getTime() - target);
-      if (diff < bestDiff) { bestDiff = diff; best = d; }
-    }
-    return best;
-  }, [focusedDate, activeComparableListings]);
-
   // Auto-apply settings for the active listing — used to compute the preview
   // passed to ManualApplyPanel when the user applies from PricingHeatmap.
   const activeAutoApplySettings = useMemo((): AutoApplySettings | null => {
@@ -822,11 +801,9 @@ export default function DashboardPage() {
                             for {focusedDate}
                           </span>
                         </p>
-                        {snappedFocusedDate !== focusedDate && (
-                          <p className="mt-0.5 text-xs text-amber-700">
-                            No comp data for {focusedDate} — showing nearest sampled day below.
-                          </p>
-                        )}
+                        <p className="mt-0.5 text-xs text-foreground/45">
+                          Showing listings scraped for this exact day.
+                        </p>
                       </div>
                       <button
                         type="button"
@@ -844,7 +821,7 @@ export default function DashboardPage() {
                         benchmarkInfo={activeBenchmarkInfo}
                         embedded={true}
                         pinnedUrls={activePinnedUrls}
-                        selectedDate={snappedFocusedDate}
+                        selectedDate={focusedDate}
                         clickedDate={focusedDate}
                       />
                     </div>
