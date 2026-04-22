@@ -258,6 +258,7 @@ def collect_search_comps(
                     "query": search_location,
                     "locationSearch": search_location,
                     "location": search_location,
+                    "dailySearch": True,
                     "itemsPerGrid": max_cards,
                 }
                 if center_lat is not None:

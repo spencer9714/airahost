@@ -325,7 +325,7 @@ def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(headless=False)
                 context = browser.new_context(
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1122,7 +1122,7 @@ def extract_nightly_price_from_listing_page(
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(headless=False)
                 context = browser.new_context(
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

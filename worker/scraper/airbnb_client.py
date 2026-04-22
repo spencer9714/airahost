@@ -163,16 +163,17 @@ class AirbnbClient:
         return fallback_call()
 
     def search_listings(self) -> Tuple[int, Dict[str, Any]]:
-        return self._run_deepbnb_with_fallback(
-            op_name="search_listings",
-            deepbnb_call=lambda: self.deepbnb_scraper.search_listings(),  # type: ignore[union-attr]
-            fallback_call=self._search_via_playwright,
-        )
+        # Default non-daily path: browser Playwright search.
+        return self._search_via_playwright()
 
     def search_listings_with_overrides(
         self,
         overrides: Dict[str, Any],
     ) -> Tuple[int, Dict[str, Any]]:
+        # Deepbnb is allowed only for explicit daily-search calls.
+        is_daily_search = bool((overrides or {}).get("dailySearch"))
+        if not is_daily_search:
+            return self._search_via_playwright(overrides)
         return self._run_deepbnb_with_fallback(
             op_name="search_listings_with_overrides",
             deepbnb_call=lambda: self.deepbnb_scraper.search_listings_with_overrides(overrides),  # type: ignore[union-attr]
