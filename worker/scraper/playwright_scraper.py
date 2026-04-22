@@ -67,6 +67,11 @@ class PlaywrightScraper:
         self._session_cookie_lock = threading.Lock()
         self._thread_local = threading.local()
         self._thread_contexts: Dict[int, Any] = {}
+        self._cdp_url = str(
+            self.config.get("CDP_URL")
+            or os.getenv("CDP_URL", "http://127.0.0.1:9222")
+        ).strip()
+        self._uses_external_browser = True
         self._pw = None
         self._browser = None
         if self.use_hardcoded_stayspdp_template:
@@ -170,6 +175,8 @@ class PlaywrightScraper:
         clone._session_cookie_lock = threading.Lock()
         clone._thread_local = threading.local()
         clone._thread_contexts = {}
+        clone._cdp_url = self._cdp_url
+        clone._uses_external_browser = self._uses_external_browser
         clone._pw = None
         clone._browser = None
         for c in self.session.cookies:
@@ -433,8 +440,11 @@ class PlaywrightScraper:
         with self._browser_init_lock:
             if self._browser is not None and self._pw is not None:
                 return self._browser
+            if not self._cdp_url:
+                raise RuntimeError("CDP_URL is required; Playwright scraper must attach to existing browser.")
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.launch(headless=False)
+            logger.info("Connecting Playwright to existing browser via CDP: %s", self._cdp_url)
+            self._browser = self._pw.chromium.connect_over_cdp(self._cdp_url, timeout=15000)
             return self._browser
 
     def _get_thread_context(self):
@@ -442,13 +452,16 @@ class PlaywrightScraper:
         if ctx is not None:
             return ctx
         browser = self._ensure_browser()
-        user_agent = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/121.0.0.0 Safari/537.36"
-        )
-        viewport = {"width": 1280, "height": 800}
-        ctx = browser.new_context(user_agent=user_agent, viewport=viewport)
+        if browser.contexts:
+            ctx = browser.contexts[0]
+        else:
+            user_agent = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/121.0.0.0 Safari/537.36"
+            )
+            viewport = {"width": 1280, "height": 800}
+            ctx = browser.new_context(user_agent=user_agent, viewport=viewport)
         self._thread_local.context = ctx
         self._thread_contexts[threading.get_ident()] = ctx
         return ctx
@@ -472,12 +485,9 @@ class PlaywrightScraper:
         return out
 
     def _sync_session_cookies_into_context(self, context) -> None:
-        existing_cookies = self._snapshot_session_cookies()
-        if existing_cookies:
-            try:
-                context.add_cookies(existing_cookies)
-            except Exception:
-                pass
+        # When attached over CDP, rely on cookies from the existing browser profile/session.
+        # Do not mutate context cookies from requests.Session.
+        return
 
     def _sync_context_cookies_into_session(self, context) -> None:
         try:
@@ -496,15 +506,11 @@ class PlaywrightScraper:
 
     def close_browser(self) -> None:
         with self._browser_init_lock:
-            for ctx in list(self._thread_contexts.values()):
-                try:
-                    ctx.close()
-                except Exception:
-                    pass
             self._thread_contexts = {}
             try:
                 if self._browser is not None:
-                    self._browser.close()
+                    if not self._uses_external_browser:
+                        self._browser.close()
             except Exception:
                 pass
             try:

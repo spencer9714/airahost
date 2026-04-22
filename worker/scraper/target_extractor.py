@@ -322,45 +322,26 @@ def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str
         # Restore browser-HTML extraction path: open the listing page in Playwright
         # and parse rendered DOM/JSON-LD instead of GraphQL response payloads.
         try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=False)
-                context = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/121.0.0.0 Safari/537.36"
-                    ),
-                    viewport={"width": 1280, "height": 800},
-                )
+            if hasattr(client, "_get_playwright_scraper"):
+                scraper = client._get_playwright_scraper()
+                context = scraper._get_thread_context()
+                scraper._sync_session_cookies_into_context(context)
+                page = context.new_page()
                 try:
-                    session = getattr(client, "session", None)
-                    cookies = []
-                    if session is not None and hasattr(session, "cookies"):
-                        for c in session.cookies:
-                            try:
-                                cookies.append(
-                                    {
-                                        "name": c.name,
-                                        "value": c.value,
-                                        "domain": c.domain,
-                                        "path": c.path or "/",
-                                        "secure": bool(c.secure),
-                                    }
-                                )
-                            except Exception:
-                                continue
-                    if cookies:
-                        try:
-                            context.add_cookies(cookies)
-                        except Exception:
-                            pass
-
-                    page = context.new_page()
                     return extract_target_spec(page, listing_url)
                 finally:
-                    browser.close()
+                    try:
+                        scraper._sync_context_cookies_into_session(context)
+                    except Exception:
+                        pass
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+            return (
+                ListingSpec(url=normalize_airbnb_url(listing_url)),
+                ["Browser HTML extraction failed: missing Playwright scraper bridge on client"],
+            )
         except Exception as exc:
             return (
                 ListingSpec(url=normalize_airbnb_url(listing_url)),
@@ -1119,41 +1100,12 @@ def extract_nightly_price_from_listing_page(
         # Restore browser-HTML extraction path: use a real Playwright page and
         # parse rendered booking widget content instead of GraphQL PDP responses.
         try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=False)
-                context = browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/121.0.0.0 Safari/537.36"
-                    ),
-                    viewport={"width": 1280, "height": 800},
-                )
+            if hasattr(page, "_get_playwright_scraper"):
+                scraper = page._get_playwright_scraper()
+                context = scraper._get_thread_context()
+                scraper._sync_session_cookies_into_context(context)
+                real_page = context.new_page()
                 try:
-                    session = getattr(page, "session", None)
-                    cookies = []
-                    if session is not None and hasattr(session, "cookies"):
-                        for c in session.cookies:
-                            try:
-                                cookies.append(
-                                    {
-                                        "name": c.name,
-                                        "value": c.value,
-                                        "domain": c.domain,
-                                        "path": c.path or "/",
-                                        "secure": bool(c.secure),
-                                    }
-                                )
-                            except Exception:
-                                continue
-                    if cookies:
-                        try:
-                            context.add_cookies(cookies)
-                        except Exception:
-                            pass
-                    real_page = context.new_page()
                     return extract_nightly_price_from_listing_page(
                         real_page,
                         listing_url=listing_url,
@@ -1161,7 +1113,15 @@ def extract_nightly_price_from_listing_page(
                         checkout=checkout,
                     )
                 finally:
-                    browser.close()
+                    try:
+                        scraper._sync_context_cookies_into_session(context)
+                    except Exception:
+                        pass
+                    try:
+                        real_page.close()
+                    except Exception:
+                        pass
+            return None, "failed"
         except Exception:
             return None, "failed"
 
