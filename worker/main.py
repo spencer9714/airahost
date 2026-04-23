@@ -34,6 +34,7 @@ load_dotenv(override=False)
 
 from worker.core import db as db_helpers
 from worker.core.cache import compute_cache_key, get_cached, set_cached
+from worker.core.concurrent_runner import MAX_SCRAPER_WORKERS
 from worker.core.discounts import (
     apply_discount,
     average_refundable_price_for_stay,
@@ -65,11 +66,11 @@ WORKER_LANE = os.getenv("WORKER_LANE", "interactive")
 MAX_SCROLL_ROUNDS = int(os.getenv("MAX_SCROLL_ROUNDS", "12"))
 MAX_CARDS = int(os.getenv("MAX_CARDS", "80"))
 RATE_LIMIT_SECONDS = float(os.getenv("SCRAPE_RATE_LIMIT_SECONDS", "1.0"))
-DAY_QUERY_MAX_WORKERS = max(1, min(int(os.getenv("DAY_QUERY_MAX_WORKERS", "2")), 8))
+DAY_QUERY_MAX_WORKERS = max(1, min(int(os.getenv("DAY_QUERY_MAX_WORKERS", "2")), MAX_SCRAPER_WORKERS))
 BENCHMARK_DAY_QUERY_MAX_WORKERS = max(
-    1, min(int(os.getenv("BENCHMARK_DAY_QUERY_MAX_WORKERS", "2")), 8)
+    1, min(int(os.getenv("BENCHMARK_DAY_QUERY_MAX_WORKERS", "2")), MAX_SCRAPER_WORKERS)
 )
-FIXED_POOL_MAX_WORKERS = max(1, min(int(os.getenv("FIXED_POOL_MAX_WORKERS", "3")), 8))
+FIXED_POOL_MAX_WORKERS = max(1, min(int(os.getenv("FIXED_POOL_MAX_WORKERS", "3")), MAX_SCRAPER_WORKERS))
 AIRBNB_DISABLE_MAP_SEARCH = bool(
     str(os.getenv("AIRBNB_DISABLE_MAP_SEARCH", "0")).strip().lower() in ("1", "true", "yes", "on")
 )

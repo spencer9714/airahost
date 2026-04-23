@@ -8,6 +8,9 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
+MAX_SCRAPER_WORKERS = 5
+
+
 @dataclass
 class ConcurrentRunState:
     completed_indices: List[int]
@@ -40,6 +43,7 @@ def execute_day_queries_concurrently(
     """
     if max_workers < 1:
         raise ValueError("max_workers must be >= 1")
+    max_workers = min(int(max_workers), MAX_SCRAPER_WORKERS)
 
     total = len(args_list)
     if total == 0:

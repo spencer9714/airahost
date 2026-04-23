@@ -71,6 +71,7 @@ class PlaywrightScraper:
         self._session_cookie_lock = threading.Lock()
         self._thread_local = threading.local()
         self._thread_contexts: Dict[int, Any] = {}
+        self._thread_runtimes: Dict[int, Dict[str, Any]] = {}
         self._cdp_url = str(
             self.config.get("CDP_URL")
             or os.getenv("CDP_URL", "http://127.0.0.1:9222")
@@ -232,6 +233,7 @@ class PlaywrightScraper:
         clone._session_cookie_lock = threading.Lock()
         clone._thread_local = threading.local()
         clone._thread_contexts = {}
+        clone._thread_runtimes = {}
         clone._cdp_url = self._cdp_url
         clone._uses_external_browser = self._uses_external_browser
         clone._pw = None
@@ -491,18 +493,31 @@ class PlaywrightScraper:
         return f"{self.base_url}{search_path}?{urlencode(params)}"
 
     def _ensure_browser(self):
-        if self._browser is not None and self._pw is not None:
-            return self._browser
+        # Playwright sync API is thread-affine. Each worker thread must own
+        # its own Playwright runtime/browser connection.
+        browser = getattr(self._thread_local, "browser", None)
+        pw = getattr(self._thread_local, "pw", None)
+        if browser is not None and pw is not None:
+            return browser
 
         with self._browser_init_lock:
-            if self._browser is not None and self._pw is not None:
-                return self._browser
+            browser = getattr(self._thread_local, "browser", None)
+            pw = getattr(self._thread_local, "pw", None)
+            if browser is not None and pw is not None:
+                return browser
             if not self._cdp_url:
                 raise RuntimeError("CDP_URL is required; Playwright scraper must attach to existing browser.")
-            self._pw = sync_playwright().start()
-            logger.info("Connecting Playwright to existing browser via CDP: %s", self._cdp_url)
-            self._browser = self._pw.chromium.connect_over_cdp(self._cdp_url, timeout=15000)
-            return self._browser
+            pw = sync_playwright().start()
+            logger.info(
+                "Connecting Playwright to existing browser via CDP: %s [thread=%s]",
+                self._cdp_url,
+                threading.get_ident(),
+            )
+            browser = pw.chromium.connect_over_cdp(self._cdp_url, timeout=15000)
+            self._thread_local.pw = pw
+            self._thread_local.browser = browser
+            self._thread_runtimes[threading.get_ident()] = {"pw": pw, "browser": browser}
+            return browser
 
     def _get_thread_context(self):
         ctx = getattr(self._thread_local, "context", None)
@@ -521,6 +536,9 @@ class PlaywrightScraper:
             ctx = browser.new_context(user_agent=user_agent, viewport=viewport)
         self._thread_local.context = ctx
         self._thread_contexts[threading.get_ident()] = ctx
+        rt = self._thread_runtimes.get(threading.get_ident())
+        if isinstance(rt, dict):
+            rt["context"] = ctx
         return ctx
 
     def _snapshot_session_cookies(self) -> list[dict]:
@@ -562,21 +580,30 @@ class PlaywrightScraper:
                 )
 
     def close_browser(self) -> None:
+        # Close only this thread's runtime. Cross-thread Playwright stop/close
+        # can trigger greenlet/thread-affinity errors.
+        tid = threading.get_ident()
         with self._browser_init_lock:
-            self._thread_contexts = {}
+            runtime = self._thread_runtimes.pop(tid, None) or {}
+            browser = runtime.get("browser", getattr(self._thread_local, "browser", None))
+            pw = runtime.get("pw", getattr(self._thread_local, "pw", None))
+            self._thread_contexts.pop(tid, None)
             try:
-                if self._browser is not None:
-                    if not self._uses_external_browser:
-                        self._browser.close()
+                if browser is not None and not self._uses_external_browser:
+                    browser.close()
             except Exception:
                 pass
             try:
-                if self._pw is not None:
-                    self._pw.stop()
+                if pw is not None:
+                    pw.stop()
             except Exception:
                 pass
-            self._browser = None
-            self._pw = None
+            try:
+                self._thread_local.context = None
+                self._thread_local.browser = None
+                self._thread_local.pw = None
+            except Exception:
+                pass
 
     def __del__(self):
         try:

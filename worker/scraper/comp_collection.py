@@ -3,10 +3,13 @@ from __future__ import annotations
 import logging
 import math
 import re
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from worker.core.similarity import comp_urls_match
+from worker.core.concurrent_runner import MAX_SCRAPER_WORKERS
 from worker.scraper.parsers import (
     parse_pdp_baths_property_type_fast,
     parse_search_listing_context,
@@ -141,13 +144,19 @@ def _enrich_comps_baths_and_property_type_from_pdp(
         comp.baths = None
         comp.property_type = ""
 
-    updated = 0
-    attempted = 0
-    for comp in comps:
+    work_items: List[Tuple[int, ListingSpec, str]] = []
+    for idx, comp in enumerate(comps):
         lid = _extract_listing_id_from_url(str(comp.url or ""))
         if not lid:
             continue
-        attempted += 1
+        work_items.append((idx, comp, lid))
+
+    attempted = len(work_items)
+    if attempted == 0:
+        return
+
+    def _fetch(item: Tuple[int, ListingSpec, str]) -> Tuple[int, Optional[float], str]:
+        idx, _comp, lid = item
         try:
             pdp_data = client.get_listing_details(
                 lid,
@@ -159,27 +168,37 @@ def _enrich_comps_baths_and_property_type_from_pdp(
             baths = fast.get("baths")
             ptype_raw = fast.get("property_type")
             ptype_norm = normalize_property_type(str(ptype_raw or ""))
+            b_val = float(baths) if isinstance(baths, (int, float)) else None
+            p_val = ptype_norm.strip() if isinstance(ptype_norm, str) and ptype_norm.strip() else ""
+            return idx, b_val, p_val
+        except Exception:
+            return idx, None, ""
 
+    max_workers = max(1, min(int(os.getenv("PDP_DETAIL_MAX_WORKERS", str(MAX_SCRAPER_WORKERS))), MAX_SCRAPER_WORKERS))
+    updated = 0
+    with ThreadPoolExecutor(max_workers=min(max_workers, attempted)) as ex:
+        futures = [ex.submit(_fetch, item) for item in work_items]
+        for f in as_completed(futures):
+            idx, b_val, p_val = f.result()
+            comp = comps[idx]
             changed = False
-            if isinstance(baths, (int, float)):
-                b = float(baths)
-                if comp.baths != b:
-                    comp.baths = b
+            if isinstance(b_val, (int, float)):
+                if comp.baths != float(b_val):
+                    comp.baths = float(b_val)
                     changed = True
-            if isinstance(ptype_norm, str) and ptype_norm.strip():
-                if comp.property_type != ptype_norm.strip():
-                    comp.property_type = ptype_norm.strip()
+            if p_val:
+                if comp.property_type != p_val:
+                    comp.property_type = p_val
                     changed = True
             if changed:
                 updated += 1
-        except Exception:
-            continue
 
     if attempted:
         logger.info(
-            "[comp_collection] PDP structural enrichment attempted=%s updated=%s",
+            "[comp_collection] PDP structural enrichment attempted=%s updated=%s workers=%s",
             attempted,
             updated,
+            max_workers,
         )
 
 
