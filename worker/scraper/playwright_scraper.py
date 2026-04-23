@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -27,7 +27,7 @@ class PlaywrightScraper:
 
     def __init__(self, config: dict):
         self.config = config
-        self.base_url = self.config.get("AIRBNB_BASE_URL", "https://www.airbnb.ca").rstrip("/")
+        self.base_url = self._normalize_base_url(self.config.get("AIRBNB_BASE_URL", "https://www.airbnb.ca"))
         self.session = requests.Session()
         self.captured_search_req = None
         self.captured_pdp_req = None
@@ -82,6 +82,19 @@ class PlaywrightScraper:
         self._ensure_tab_gate()
         if self.use_hardcoded_stayspdp_template:
             self._load_hardcoded_stayspdp_template()
+
+    @staticmethod
+    def _normalize_base_url(raw_base: Any) -> str:
+        raw = str(raw_base or "").strip()
+        if not raw:
+            return "https://www.airbnb.com"
+        try:
+            parsed = urlparse(raw)
+            if parsed.scheme in ("http", "https") and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        except Exception:
+            pass
+        return "https://www.airbnb.com"
 
     @classmethod
     def _ensure_tab_gate(cls) -> None:
@@ -490,7 +503,8 @@ class PlaywrightScraper:
             params["items_per_grid"] = ov.get("itemsPerGrid")
         if "itemsOffset" in ov and ov.get("itemsOffset") is not None:
             params["items_offset"] = ov.get("itemsOffset")
-        return f"{self.base_url}{search_path}?{urlencode(params)}"
+        base_url = self._normalize_base_url(self.base_url)
+        return f"{base_url}{search_path}?{urlencode(params)}"
 
     def _ensure_browser(self):
         # Playwright sync API is thread-affine. Each worker thread must own
@@ -637,8 +651,20 @@ class PlaywrightScraper:
             page.on("response", _on_response)
 
             search_url = self._build_search_navigation_url(overrides)
+            if str(search_url).lower().startswith("about:"):
+                logger.warning("Resolved about:* search URL; rebuilding with safe default base.")
+                safe_base = self._normalize_base_url(None)
+                search_url = search_url.replace(str(self.base_url), safe_base, 1)
             logger.info("Playwright browser search navigate: %s", search_url)
             page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+            if str(page.url or "").lower().startswith("about:blank"):
+                logger.warning("Browser remained on about:blank after search navigate; retrying with safe base URL.")
+                safe_base = self._normalize_base_url(None)
+                safe_search_url = self._build_search_navigation_url(
+                    {**(overrides or {}), "query": (overrides or {}).get("query")}
+                ).replace(self._normalize_base_url(self.base_url), safe_base, 1)
+                logger.info("Playwright browser search re-navigate: %s", safe_search_url)
+                page.goto(safe_search_url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(int(random.uniform(900, 1600)))
             page.mouse.wheel(0, 600)
 
