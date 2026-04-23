@@ -338,6 +338,19 @@ export interface ComparableListing {
   nightlyPrice: number;
   /** Nightly price keyed by date ("YYYY-MM-DD"). Present on new reports only. */
   priceByDate?: Record<string, number>;
+  /**
+   * Day-level scraped detail keyed by date ("YYYY-MM-DD").
+   * Used to keep date-price alignment with the exact listing URL/query window.
+   */
+  priceByDateDetails?: Record<
+    string,
+    {
+      price: number;
+      url?: string;
+      queryNights?: number;
+      queryTotalPrice?: number;
+    }
+  >;
   currency: string;
   similarity: number; // 0–1
   rating: number | null;

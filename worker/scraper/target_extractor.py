@@ -820,8 +820,9 @@ _BOOKING_WIDGET_PRICE_JS = """
     return false;
   }
 
-  // Matches a bare dollar amount (with or without leading $): "$465", "$1,234"
-  const BARE_PRICE_RE = /^\\$?\\s*(\\d{1,4}(?:,\\d{3})*)\\s*$/;
+  // Matches a bare price amount with optional symbol/prefix/suffix currency, e.g.:
+  // "$465", "$1,234", "$363 CAD", "C$363", "€299", "299 EUR"
+  const BARE_PRICE_RE = /^(?:[^\\d\\s]{1,4}\\s*)?(\\d{1,6}(?:,\\d{3})*(?:\\.\\d{1,2})?)\\s*(?:[A-Z]{3})?\\s*$/i;
 
   // Matches price+night label in a SINGLE element (Strategy 1, compound-text scan).
   // Handles: "$X /night" | "$X per night" | "$X for 1 night" | "$X for N nights"
@@ -1094,27 +1095,31 @@ def extract_nightly_price_from_listing_page(
         stay_nights = 1
 
     if hasattr(page, "get_listing_details"):
-        # Restore browser-HTML extraction path: use a real Playwright page and
-        # parse rendered booking widget content instead of GraphQL PDP responses.
+        # Client-backed path: fetch PDP payload for this exact date window and
+        # parse nightly price directly. This avoids mixing async Playwright
+        # page objects with sync extraction logic.
         try:
-            if hasattr(page, "_get_playwright_scraper"):
-                scraper = page._get_playwright_scraper()
-                context = scraper._get_thread_context()
-                scraper._sync_session_cookies_into_context(context)
-                real_page = scraper._open_capped_page(context)
-                try:
-                    return extract_nightly_price_from_listing_page(
-                        real_page,
-                        listing_url=listing_url,
-                        checkin=checkin,
-                        checkout=checkout,
-                    )
-                finally:
-                    try:
-                        scraper._sync_context_cookies_into_session(context)
-                    except Exception:
-                        pass
-                    scraper._close_capped_page(real_page)
+            listing_id = extract_listing_id_from_url(listing_url)
+            if not listing_id:
+                return None, "failed"
+            pdp = page.get_listing_details(
+                str(listing_id),
+                checkin=checkin,
+                checkout=checkout,
+                adults=1,
+            )
+            parsed_pdp = parse_pdp_response(
+                pdp,
+                str(listing_id),
+                safe_domain_base(listing_url),
+            )
+            nightly = parsed_pdp.get("nightly_price")
+            if nightly is None:
+                total = parsed_pdp.get("total_price")
+                if isinstance(total, (int, float)) and total > 0:
+                    nightly = round(float(total) / max(1, stay_nights), 2)
+            if isinstance(nightly, (int, float)) and nightly > 0:
+                return float(nightly), "high"
             return None, "failed"
         except Exception:
             return None, "failed"
@@ -1380,6 +1385,14 @@ def extract_nightly_price_from_listing_page(
         f"[price_extract] All layers failed for {listing_url}. "
         f"body[:400]={search_area[:400]!r}"
     )
+    try:
+        raw_html = page.content()
+        logger.info(
+            f"[price_extract_raw_html] url={listing_url} "
+            f"checkin={checkin} checkout={checkout} html={raw_html}"
+        )
+    except Exception as exc:
+        logger.warning(f"[price_extract_raw_html] failed to read page.content(): {exc}")
     return None, "failed"
 
 

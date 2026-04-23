@@ -95,6 +95,21 @@ class AirbnbClient:
             return scraper.search_listings()
         return scraper.search_listings_with_overrides(overrides)
 
+    def browse_url_html(
+        self,
+        url: str,
+        *,
+        label: str = "generic_browser_nav",
+        wait_until: str = "commit",
+        timeout: int = 30000,
+    ) -> Dict[str, Any]:
+        return self._get_playwright_scraper().browse_url_html(
+            url=url,
+            label=label,
+            wait_until=wait_until,
+            timeout=timeout,
+        )
+
     @staticmethod
     def _looks_challenge_exception(exc: Exception) -> bool:
         text = str(exc or "").strip().lower()

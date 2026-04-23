@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import copy
 import json
 import logging
@@ -11,7 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote, urlencode, urlparse
 
 import requests
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 from worker.scraper.stayspdp_template import HARDCODED_STAYS_PDP_TEMPLATE
 
 logger = logging.getLogger(__name__)
@@ -69,9 +70,10 @@ class PlaywrightScraper:
         self._pdp_unresolved_windows: Dict[str, float] = {}
         self._browser_init_lock = threading.Lock()
         self._session_cookie_lock = threading.Lock()
-        self._thread_local = threading.local()
-        self._thread_contexts: Dict[int, Any] = {}
-        self._thread_runtimes: Dict[int, Dict[str, Any]] = {}
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+        self._loop_ready = threading.Event()
+        self._runtime_owner_tid: Optional[int] = None
         self._cdp_url = str(
             self.config.get("CDP_URL")
             or os.getenv("CDP_URL", "http://127.0.0.1:9222")
@@ -79,6 +81,8 @@ class PlaywrightScraper:
         self._uses_external_browser = True
         self._pw = None
         self._browser = None
+        self._context = None
+        self._context_owned = False
         self._ensure_tab_gate()
         if self.use_hardcoded_stayspdp_template:
             self._load_hardcoded_stayspdp_template()
@@ -111,16 +115,20 @@ class PlaywrightScraper:
             cls._tab_gate = threading.BoundedSemaphore(cls._tab_limit)
 
     @classmethod
-    def _acquire_tab_slot(cls, timeout_seconds: float = 120.0) -> None:
+    async def _acquire_tab_slot(cls, timeout_seconds: float = 120.0) -> None:
         cls._ensure_tab_gate()
         assert cls._tab_gate is not None
-        acquired = cls._tab_gate.acquire(timeout=timeout_seconds)
-        if not acquired:
-            raise RuntimeError(
-                f"Timed out waiting for Playwright tab slot (limit={cls._tab_limit})"
-            )
-        with cls._tab_gate_lock:
-            cls._open_tab_count += 1
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if cls._tab_gate.acquire(blocking=False):
+                with cls._tab_gate_lock:
+                    cls._open_tab_count += 1
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Timed out waiting for Playwright tab slot (limit={cls._tab_limit})"
+                )
+            await asyncio.sleep(0.05)
 
     @classmethod
     def _release_tab_slot(cls) -> None:
@@ -132,21 +140,181 @@ class PlaywrightScraper:
             except Exception:
                 pass
 
-    def _open_capped_page(self, context):
-        self._acquire_tab_slot()
+    def _ensure_async_loop(self) -> asyncio.AbstractEventLoop:
+        with self._browser_init_lock:
+            if self._loop is not None and self._loop_thread is not None and self._loop_thread.is_alive():
+                return self._loop
+            self._loop_ready.clear()
+            self._loop_thread = threading.Thread(
+                target=self._run_loop_forever,
+                name="playwright-async-runtime",
+                daemon=True,
+            )
+            self._loop_thread.start()
+            if not self._loop_ready.wait(timeout=10.0):
+                raise RuntimeError("Timed out starting Playwright async runtime")
+            if self._loop is None:
+                raise RuntimeError("Playwright async runtime failed to initialize")
+            return self._loop
+
+    def _run_loop_forever(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._runtime_owner_tid = threading.get_ident()
+        self._loop_ready.set()
         try:
-            return context.new_page()
+            loop.run_forever()
+        finally:
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    def _run_async(self, coro, *, op_name: str):
+        loop = self._ensure_async_loop()
+        if threading.get_ident() == self._runtime_owner_tid:
+            raise RuntimeError(f"Playwright {op_name} called from runtime loop thread")
+        if callable(coro):
+            coro = coro()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
+
+    async def _open_capped_page(self, context):
+        await self._acquire_tab_slot()
+        try:
+            page = await context.new_page()
+            try:
+                logger.info(
+                    "Playwright new_page opened [thread=%s] initial_url=%s open_tabs=%s/%s",
+                    threading.get_ident(),
+                    str(getattr(page, "url", "") or ""),
+                    self._open_tab_count,
+                    self._tab_limit,
+                )
+            except Exception:
+                pass
+            return page
         except Exception:
             self._release_tab_slot()
             raise
 
-    def _close_capped_page(self, page) -> None:
+    async def _close_capped_page(self, page) -> None:
         try:
-            page.close()
+            await page.close()
         except Exception:
             pass
         finally:
             self._release_tab_slot()
+
+    @staticmethod
+    async def _goto_with_logging(page, url: str, *, wait_until: str, timeout: int, label: str):
+        logger.info(
+            "Playwright goto[%s] request_url=%s wait_until=%s thread=%s",
+            label,
+            url,
+            wait_until,
+            threading.get_ident(),
+        )
+        try:
+            response = await page.goto(url, wait_until=wait_until, timeout=timeout)
+        except Exception as exc:
+            try:
+                current_url = str(page.url or "")
+            except Exception:
+                current_url = ""
+            logger.warning(
+                "Playwright goto[%s] failed thread=%s current_url=%s err=%s",
+                label,
+                threading.get_ident(),
+                current_url,
+                exc,
+            )
+            raise
+        try:
+            final_url = str(page.url or "")
+        except Exception:
+            final_url = ""
+        status = None
+        try:
+            status = response.status if response is not None else None
+        except Exception:
+            status = None
+        logger.info("Playwright goto[%s] final_url=%s status=%s", label, final_url, status)
+        return response
+
+    async def _navigate_and_capture_html(
+        self,
+        page,
+        *,
+        url: str,
+        label: str,
+        wait_until: str,
+        timeout: int,
+    ) -> Dict[str, Any]:
+        response = await self._goto_with_logging(
+            page,
+            url,
+            wait_until=wait_until,
+            timeout=timeout,
+            label=label,
+        )
+        final_url = str(getattr(page, "url", "") or "")
+        status: Optional[int] = None
+        try:
+            status = response.status if response is not None else None
+        except Exception:
+            status = None
+        html = ""
+        try:
+            html = await page.content() or ""
+        except Exception:
+            html = ""
+        return {
+            "requested_url": url,
+            "final_url": final_url,
+            "status": status,
+            "html": html,
+        }
+
+    def browse_url_html(
+        self,
+        url: str,
+        *,
+        label: str = "generic_browser_nav",
+        wait_until: str = "commit",
+        timeout: int = 30000,
+    ) -> Dict[str, Any]:
+        """
+        General browser-navigation entrypoint for any caller:
+        opens a capped page, navigates, and returns HTML + navigation metadata.
+        """
+        async def _run():
+            context = await self._get_thread_context()
+            self._sync_session_cookies_into_context(context)
+            page = await self._open_capped_page(context)
+            try:
+                result = await self._navigate_and_capture_html(
+                    page,
+                    url=url,
+                    label=label,
+                    wait_until=wait_until,
+                    timeout=timeout,
+                )
+                await self._sync_context_cookies_into_session(context)
+                self._save_cached_state()
+                return result
+            finally:
+                await self._close_capped_page(page)
+        return self._run_async(_run(), op_name="browse_url_html")
 
     def _load_hardcoded_stayspdp_template(self) -> bool:
         if not isinstance(HARDCODED_STAYS_PDP_TEMPLATE, dict):
@@ -244,13 +412,16 @@ class PlaywrightScraper:
         clone._pdp_unresolved_windows = copy.deepcopy(self._pdp_unresolved_windows)
         clone._browser_init_lock = threading.Lock()
         clone._session_cookie_lock = threading.Lock()
-        clone._thread_local = threading.local()
-        clone._thread_contexts = {}
-        clone._thread_runtimes = {}
+        clone._loop = None
+        clone._loop_thread = None
+        clone._loop_ready = threading.Event()
+        clone._runtime_owner_tid = None
         clone._cdp_url = self._cdp_url
         clone._uses_external_browser = self._uses_external_browser
         clone._pw = None
         clone._browser = None
+        clone._context = None
+        clone._context_owned = False
         for c in self.session.cookies:
             clone.session.cookies.set(
                 c.name,
@@ -417,12 +588,115 @@ class PlaywrightScraper:
                 saw_not_complete = True
         return saw_booking and saw_not_complete and not cls._pdp_booking_has_price(response_data)
 
+    @staticmethod
+    def _pdp_dates_unavailable(response_data: Dict[str, Any]) -> bool:
+        try:
+            payload_text = json.dumps(response_data, ensure_ascii=False).lower()
+        except Exception:
+            payload_text = str(response_data or "").lower()
+        markers = (
+            "those dates are not available",
+            "dates are not available",
+            "date_not_available",
+            "not available for these dates",
+        )
+        return any(m in payload_text for m in markers)
+
+    @staticmethod
+    def _extract_dom_price_text(raw_text: str) -> Optional[str]:
+        if not isinstance(raw_text, str):
+            return None
+        text = raw_text.replace("\xa0", " ").strip()
+        if not text:
+            return None
+        # Keep this broad for multi-currency formats:
+        # "$363 CAD", "C$363", "€363", "363 EUR"
+        money_re = re.compile(
+            r"(?:[A-Z]{1,3}\$|[$€£¥₹₩₪₫₽₴₱฿₦₺]|[A-Z]{3}\s+)?\s*"
+            r"\d[\d,]*(?:\.\d{1,2})?"
+            r"(?:\s*[A-Z]{3})?"
+        )
+        m = money_re.search(text)
+        if not m:
+            return None
+        candidate = m.group(0).strip()
+        return candidate or None
+
+    @staticmethod
+    async def _read_dom_price_text(page, timeout_ms: int = 5000) -> Optional[str]:
+        deadline = time.monotonic() + (max(0, int(timeout_ms)) / 1000.0)
+        poll_ms = 150
+        js = """
+() => {
+  const roots = [
+    ...document.querySelectorAll('[data-section-id*="BOOK_IT"], [data-plugin-in-point-id*="BOOK_IT"], [id*="book-it"], [class*="book-it"]'),
+    document.querySelector('main'),
+    document.body,
+  ].filter(Boolean);
+  const seen = new Set();
+  const texts = [];
+  for (const root of roots) {
+    const nodes = root.querySelectorAll ? root.querySelectorAll('span,div') : [];
+    for (const n of nodes) {
+      const t = (n.textContent || '').replace(/\\u00a0/g, ' ').trim();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      texts.push(t);
+    }
+  }
+  return texts;
+}
+"""
+        while time.monotonic() < deadline:
+            try:
+                values = await page.evaluate(js)
+            except Exception:
+                values = []
+            if isinstance(values, list):
+                for raw in values:
+                    candidate = PlaywrightScraper._extract_dom_price_text(str(raw or ""))
+                    if candidate:
+                        return candidate
+            await page.wait_for_timeout(poll_ms)
+        return None
+
+    @classmethod
+    def _inject_price_into_pdp_payload(cls, response_data: Dict[str, Any], price_text: str) -> Dict[str, Any]:
+        if not isinstance(response_data, dict):
+            return response_data
+        sections = cls._extract_pdp_sections(response_data)
+        if not sections:
+            return response_data
+        for entry in sections:
+            sid = entry.get("sectionId")
+            if sid not in ("BOOK_IT_FLOATING_FOOTER", "BOOK_IT_SIDEBAR", "BOOK_IT_NAV"):
+                continue
+            sec = entry.get("section")
+            if not isinstance(sec, dict):
+                continue
+            sdp = sec.get("structuredDisplayPrice")
+            if not isinstance(sdp, dict):
+                sdp = {}
+                sec["structuredDisplayPrice"] = sdp
+            primary = sdp.get("primaryLine")
+            if not isinstance(primary, dict):
+                primary = {}
+                sdp["primaryLine"] = primary
+            primary["price"] = str(price_text)
+            primary.setdefault("qualifier", "night")
+            primary["accessibilityLabel"] = str(price_text)
+            return response_data
+        return response_data
+
     def search_listings(self) -> Tuple[int, Dict[str, Any]]:
         """Browser-only StaysSearch (no API replay)."""
         last_exc: Optional[Exception] = None
         for attempt in range(1, 3):
             try:
-                status_code, response_data = self._search_via_browser()
+                status_code, response_data = self._run_async(
+                    self._search_via_browser(),
+                    op_name="search_listings",
+                )
                 if response_data.get("errors") and self._response_looks_auth_or_challenge_error(status_code, response_data):
                     raise RuntimeError("Browser StaysSearch returned auth/challenge-like GraphQL error")
                 return status_code, response_data
@@ -506,54 +780,48 @@ class PlaywrightScraper:
         base_url = self._normalize_base_url(self.base_url)
         return f"{base_url}{search_path}?{urlencode(params)}"
 
-    def _ensure_browser(self):
-        # Playwright sync API is thread-affine. Each worker thread must own
-        # its own Playwright runtime/browser connection.
-        browser = getattr(self._thread_local, "browser", None)
-        pw = getattr(self._thread_local, "pw", None)
-        if browser is not None and pw is not None:
-            return browser
+    async def _ensure_browser(self):
+        if self._browser is not None and self._pw is not None:
+            return self._browser
+        if not self._cdp_url:
+            raise RuntimeError("CDP_URL is required; Playwright scraper must attach to existing browser.")
+        self._pw = await async_playwright().start()
+        logger.info(
+            "Connecting Playwright to existing browser via CDP: %s [thread=%s]",
+            self._cdp_url,
+            threading.get_ident(),
+        )
+        self._browser = await self._pw.chromium.connect_over_cdp(self._cdp_url, timeout=15000)
+        return self._browser
 
-        with self._browser_init_lock:
-            browser = getattr(self._thread_local, "browser", None)
-            pw = getattr(self._thread_local, "pw", None)
-            if browser is not None and pw is not None:
-                return browser
-            if not self._cdp_url:
-                raise RuntimeError("CDP_URL is required; Playwright scraper must attach to existing browser.")
-            pw = sync_playwright().start()
+    async def _get_thread_context(self):
+        if self._context is not None:
+            return self._context
+        browser = await self._ensure_browser()
+        if browser.contexts:
+            # Prefer the existing persistent context so new pages open as tabs
+            # in the original browser window.
+            self._context = browser.contexts[0]
+            self._context_owned = False
             logger.info(
-                "Connecting Playwright to existing browser via CDP: %s [thread=%s]",
-                self._cdp_url,
+                "Playwright context selected [thread=%s] mode=existing_context",
                 threading.get_ident(),
             )
-            browser = pw.chromium.connect_over_cdp(self._cdp_url, timeout=15000)
-            self._thread_local.pw = pw
-            self._thread_local.browser = browser
-            self._thread_runtimes[threading.get_ident()] = {"pw": pw, "browser": browser}
-            return browser
-
-    def _get_thread_context(self):
-        ctx = getattr(self._thread_local, "context", None)
-        if ctx is not None:
-            return ctx
-        browser = self._ensure_browser()
-        if browser.contexts:
-            ctx = browser.contexts[0]
         else:
+            # Fallback only when no existing browser context is available.
             user_agent = (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/121.0.0.0 Safari/537.36"
             )
             viewport = {"width": 1280, "height": 800}
-            ctx = browser.new_context(user_agent=user_agent, viewport=viewport)
-        self._thread_local.context = ctx
-        self._thread_contexts[threading.get_ident()] = ctx
-        rt = self._thread_runtimes.get(threading.get_ident())
-        if isinstance(rt, dict):
-            rt["context"] = ctx
-        return ctx
+            self._context = await browser.new_context(user_agent=user_agent, viewport=viewport)
+            self._context_owned = True
+            logger.info(
+                "Playwright context created [thread=%s] mode=new_context_fallback",
+                threading.get_ident(),
+            )
+        return self._context
 
     def _snapshot_session_cookies(self) -> list[dict]:
         out: list[dict] = []
@@ -578,9 +846,9 @@ class PlaywrightScraper:
         # Do not mutate context cookies from requests.Session.
         return
 
-    def _sync_context_cookies_into_session(self, context) -> None:
+    async def _sync_context_cookies_into_session(self, context) -> None:
         try:
-            context_cookies = context.cookies()
+            context_cookies = await context.cookies()
         except Exception:
             return
         with self._session_cookie_lock:
@@ -593,31 +861,55 @@ class PlaywrightScraper:
                     path=cookie["path"],
                 )
 
+    async def _close_browser_async(self) -> None:
+        try:
+            if self._context is not None and self._context_owned:
+                await self._context.close()
+        except Exception:
+            pass
+        try:
+            if self._browser is not None and not self._uses_external_browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._pw is not None:
+                await self._pw.stop()
+        except Exception:
+            pass
+        self._context = None
+        self._context_owned = False
+        self._browser = None
+        self._pw = None
+
     def close_browser(self) -> None:
-        # Close only this thread's runtime. Cross-thread Playwright stop/close
-        # can trigger greenlet/thread-affinity errors.
-        tid = threading.get_ident()
+        loop = self._loop
+        loop_thread = self._loop_thread
+        if loop is None:
+            return
+        try:
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(self._close_browser_async(), loop)
+                future.result(timeout=20)
+            else:
+                asyncio.run(self._close_browser_async())
+        except Exception:
+            pass
+        try:
+            if loop.is_running():
+                loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
+        if loop_thread is not None and loop_thread.is_alive() and loop_thread.ident != threading.get_ident():
+            try:
+                loop_thread.join(timeout=5)
+            except Exception:
+                pass
         with self._browser_init_lock:
-            runtime = self._thread_runtimes.pop(tid, None) or {}
-            browser = runtime.get("browser", getattr(self._thread_local, "browser", None))
-            pw = runtime.get("pw", getattr(self._thread_local, "pw", None))
-            self._thread_contexts.pop(tid, None)
-            try:
-                if browser is not None and not self._uses_external_browser:
-                    browser.close()
-            except Exception:
-                pass
-            try:
-                if pw is not None:
-                    pw.stop()
-            except Exception:
-                pass
-            try:
-                self._thread_local.context = None
-                self._thread_local.browser = None
-                self._thread_local.pw = None
-            except Exception:
-                pass
+            self._loop = None
+            self._loop_thread = None
+            self._runtime_owner_tid = None
+            self._loop_ready.clear()
 
     def __del__(self):
         try:
@@ -625,28 +917,37 @@ class PlaywrightScraper:
         except Exception:
             pass
 
-    def _search_via_browser(self, overrides: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
+    async def _search_via_browser(self, overrides: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
         """Run a real browser search and capture the live StaysSearch JSON response."""
-        context = self._get_thread_context()
+        context = await self._get_thread_context()
         self._sync_session_cookies_into_context(context)
-        page = self._open_capped_page(context)
+        page = await self._open_capped_page(context)
         try:
             captured_status: int = 0
             captured_data: Optional[Dict[str, Any]] = None
+            response_tasks: set[asyncio.Task] = set()
 
-            def _on_response(resp):
+            async def _handle_response(resp):
                 nonlocal captured_status, captured_data
                 try:
-                    if resp.request.method != "POST":
+                    if captured_data is not None:
+                        return
+                    req = resp.request
+                    if req.method != "POST":
                         return
                     if "/api/v3/StaysSearch/" not in resp.url:
                         return
                     captured_status = int(resp.status)
-                    payload = resp.json()
+                    payload = await resp.json()
                     if isinstance(payload, dict):
                         captured_data = payload
                 except Exception:
                     return
+
+            def _on_response(resp):
+                task = asyncio.create_task(_handle_response(resp))
+                response_tasks.add(task)
+                task.add_done_callback(lambda t: response_tasks.discard(t))
 
             page.on("response", _on_response)
 
@@ -656,44 +957,71 @@ class PlaywrightScraper:
                 safe_base = self._normalize_base_url(None)
                 search_url = search_url.replace(str(self.base_url), safe_base, 1)
             logger.info("Playwright browser search navigate: %s", search_url)
-            page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-            if str(page.url or "").lower().startswith("about:blank"):
+            nav = await self._navigate_and_capture_html(
+                page,
+                url=search_url,
+                wait_until="commit",
+                timeout=30000,
+                label="search_primary",
+            )
+            logger.info(
+                "Playwright search nav result final_url=%s status=%s html_len=%s",
+                str((nav or {}).get("final_url") or ""),
+                str((nav or {}).get("status")),
+                len(str((nav or {}).get("html") or "")),
+            )
+            if str((nav or {}).get("final_url") or "").lower().startswith("about:blank"):
                 logger.warning("Browser remained on about:blank after search navigate; retrying with safe base URL.")
                 safe_base = self._normalize_base_url(None)
                 safe_search_url = self._build_search_navigation_url(
                     {**(overrides or {}), "query": (overrides or {}).get("query")}
                 ).replace(self._normalize_base_url(self.base_url), safe_base, 1)
                 logger.info("Playwright browser search re-navigate: %s", safe_search_url)
-                page.goto(safe_search_url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(int(random.uniform(900, 1600)))
-            page.mouse.wheel(0, 600)
+                nav = await self._navigate_and_capture_html(
+                    page,
+                    url=safe_search_url,
+                    wait_until="commit",
+                    timeout=30000,
+                    label="search_about_blank_retry",
+                )
+            await page.wait_for_timeout(int(random.uniform(900, 1600)))
+            await page.mouse.wheel(0, 600)
 
             for _ in range(24):
                 if captured_data is not None:
                     break
-                page.wait_for_timeout(int(random.uniform(250, 550)))
+                await page.wait_for_timeout(int(random.uniform(250, 550)))
 
             if captured_data is None:
                 # One fallback nudge to trigger XHR search.
                 fallback_url = search_url + ("&search_type=filter_change" if "search_type=" in search_url else "")
-                page.goto(fallback_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(int(random.uniform(900, 1600)))
-                page.mouse.wheel(0, 700)
+                nav = await self._navigate_and_capture_html(
+                    page,
+                    url=fallback_url,
+                    wait_until="commit",
+                    timeout=30000,
+                    label="search_filter_change_fallback",
+                )
+                await page.wait_for_timeout(int(random.uniform(900, 1600)))
+                await page.mouse.wheel(0, 700)
                 for _ in range(24):
                     if captured_data is not None:
                         break
-                    page.wait_for_timeout(int(random.uniform(250, 550)))
+                    await page.wait_for_timeout(int(random.uniform(250, 550)))
 
-            self._sync_context_cookies_into_session(context)
+            if response_tasks:
+                await asyncio.gather(*list(response_tasks), return_exceptions=True)
+
+            await self._sync_context_cookies_into_session(context)
             self._save_cached_state()
 
             if captured_data is None:
                 raise RuntimeError("Playwright browser search did not capture StaysSearch response")
             return (captured_status or 200), captured_data
         finally:
-            self._close_capped_page(page)
+            await self._close_capped_page(page)
 
-    def _get_listing_details_via_browser(
+    async def _get_listing_details_via_browser(
         self,
         listing_id: str,
         checkin: str,
@@ -701,26 +1029,65 @@ class PlaywrightScraper:
         adults: int,
     ) -> Tuple[int, Dict[str, Any]]:
         """Run a real browser PDP visit and capture live StaysPdpSections JSON response."""
-        context = self._get_thread_context()
+        context = await self._get_thread_context()
         self._sync_session_cookies_into_context(context)
-        page = self._open_capped_page(context)
+        page = await self._open_capped_page(context)
         try:
             captured_status: int = 0
             captured_data: Optional[Dict[str, Any]] = None
+            terminal_reason: Optional[str] = None
+            first_pdp_seen_at: Optional[float] = None
+            response_tasks: set[asyncio.Task] = set()
 
-            def _on_response(resp):
-                nonlocal captured_status, captured_data
+            async def _handle_response(resp):
+                nonlocal captured_status, captured_data, terminal_reason, first_pdp_seen_at
                 try:
-                    if resp.request.method != "POST":
+                    req = resp.request
+                    if req.method != "POST":
                         return
                     if "/api/v3/StaysPdpSections/" not in resp.url:
                         return
+                    if first_pdp_seen_at is None:
+                        first_pdp_seen_at = time.monotonic()
                     captured_status = int(resp.status)
-                    payload = resp.json()
+                    payload = await resp.json()
                     if isinstance(payload, dict):
+                        try:
+                            logger.info(
+                                "Playwright PDP raw response listing=%s status=%s payload=%s",
+                                listing_id,
+                                captured_status,
+                                json.dumps(payload, ensure_ascii=False),
+                            )
+                        except Exception:
+                            logger.info(
+                                "Playwright PDP raw response listing=%s status=%s payload_unserializable=%s",
+                                listing_id,
+                                captured_status,
+                                str(payload),
+                            )
                         captured_data = payload
+                        has_price = self._pdp_booking_has_price(payload)
+                        dates_unavailable = self._pdp_dates_unavailable(payload)
+                        if has_price:
+                            terminal_reason = "price"
+                        elif dates_unavailable:
+                            terminal_reason = "dates_unavailable"
+                        logger.info(
+                            "Playwright PDP payload listing=%s status=%s has_price=%s dates_unavailable=%s terminal=%s",
+                            listing_id,
+                            captured_status,
+                            has_price,
+                            dates_unavailable,
+                            terminal_reason or "",
+                        )
                 except Exception:
                     return
+
+            def _on_response(resp):
+                task = asyncio.create_task(_handle_response(resp))
+                response_tasks.add(task)
+                task.add_done_callback(lambda t: response_tasks.discard(t))
 
             page.on("response", _on_response)
 
@@ -729,22 +1096,93 @@ class PlaywrightScraper:
                 f"?check_in={checkin}&check_out={checkout}&guests={adults}&adults={adults}"
             )
             logger.info("Playwright browser PDP navigate: %s", listing_url)
-            page.goto(listing_url, wait_until="domcontentloaded", timeout=35000)
-            page.wait_for_timeout(int(random.uniform(900, 1600)))
-            if self._page_looks_challenged(page.content(), str(page.url or "")):
+            nav = await self._navigate_and_capture_html(
+                page,
+                url=listing_url,
+                wait_until="commit",
+                timeout=35000,
+                label=f"pdp_{listing_id}",
+            )
+            logger.info(
+                "Playwright PDP nav result listing=%s final_url=%s status=%s html_len=%s",
+                listing_id,
+                str((nav or {}).get("final_url") or ""),
+                str((nav or {}).get("status")),
+                len(str((nav or {}).get("html") or "")),
+            )
+            if str((nav or {}).get("final_url") or "").lower().startswith("about:blank"):
+                raise RuntimeError(f"Playwright PDP landed on about:blank for listing={listing_id}")
+            await page.wait_for_timeout(int(random.uniform(900, 1600)))
+            if self._page_looks_challenged(str((nav or {}).get("html") or ""), str((nav or {}).get("final_url") or "")):
                 raise RuntimeError("Airbnb challenge/login page detected during browser PDP fetch")
-            page.mouse.wheel(0, 1200)
+            await page.mouse.wheel(0, 1200)
 
-            for _ in range(28):
-                if captured_data is not None:
-                    break
-                page.wait_for_timeout(int(random.uniform(250, 550)))
+            # Phase 1: wait until StaysPdpSections starts arriving.
+            prefetch_deadline = time.monotonic() + 10.0
+            while first_pdp_seen_at is None and time.monotonic() < prefetch_deadline:
+                await page.wait_for_timeout(120)
 
-            self._sync_context_cookies_into_session(context)
+            # Phase 2: API-only terminal detection.
+            if first_pdp_seen_at is not None:
+                while True:
+                    if terminal_reason is not None:
+                        break
+                    await page.wait_for_timeout(120)
+
+            if terminal_reason is not None:
+                # Hold very briefly after terminal detection so last payload
+                # updates can settle before closing the tab.
+                await page.wait_for_timeout(100)
+
+            if response_tasks:
+                await asyncio.gather(*list(response_tasks), return_exceptions=True)
+
+            await self._sync_context_cookies_into_session(context)
             self._save_cached_state()
 
             if captured_data is None:
                 raise RuntimeError("Playwright browser PDP fetch did not capture StaysPdpSections response")
+            if (
+                terminal_reason is None
+                and not self._pdp_booking_has_price(captured_data)
+                and not self._pdp_dates_unavailable(captured_data)
+            ):
+                try:
+                    logger.info(
+                        "Playwright PDP raw html listing=%s final_url=%s html=%s",
+                        listing_id,
+                        str((nav or {}).get("final_url") or ""),
+                        str((nav or {}).get("html") or ""),
+                    )
+                except Exception:
+                    logger.info(
+                        "Playwright PDP raw html listing=%s final_url=%s <unserializable_html>",
+                        listing_id,
+                        str((nav or {}).get("final_url") or ""),
+                    )
+                logger.info(
+                    "Playwright PDP API payload has no price for listing=%s; waiting up to 5s for DOM price element",
+                    listing_id,
+                )
+                dom_price_text = await self._read_dom_price_text(page, timeout_ms=5000)
+                if dom_price_text:
+                    captured_data = self._inject_price_into_pdp_payload(captured_data, dom_price_text)
+                    terminal_reason = "dom_price_fallback"
+                    logger.info(
+                        "Playwright PDP DOM fallback price listing=%s price_text=%s",
+                        listing_id,
+                        dom_price_text,
+                    )
+                else:
+                    logger.info(
+                        "Playwright PDP DOM fallback price not found within 5s listing=%s; returning no-price payload",
+                        listing_id,
+                    )
+            if terminal_reason is None:
+                logger.warning(
+                    "Playwright PDP had no price/unavailable terminal signal for listing=%s; returning latest payload.",
+                    listing_id,
+                )
             if captured_data.get("errors") and self._response_looks_auth_or_challenge_error(
                 captured_status,
                 captured_data,
@@ -752,7 +1190,7 @@ class PlaywrightScraper:
                 raise RuntimeError("Playwright browser PDP returned auth/challenge-like GraphQL error")
             return (captured_status or 200), captured_data
         finally:
-            self._close_capped_page(page)
+            await self._close_capped_page(page)
 
     def search_listings_with_overrides(
         self,
@@ -763,7 +1201,10 @@ class PlaywrightScraper:
         last_exc: Optional[Exception] = None
         for attempt in range(1, 3):
             try:
-                status_code, response_data = self._search_via_browser(overrides)
+                status_code, response_data = self._run_async(
+                    self._search_via_browser(overrides),
+                    op_name="search_listings_with_overrides",
+                )
                 if response_data.get("errors") and self._response_looks_auth_or_challenge_error(status_code, response_data):
                     raise RuntimeError("Browser StaysSearch(with overrides) returned auth/challenge-like GraphQL error")
                 return status_code, response_data
@@ -805,11 +1246,14 @@ class PlaywrightScraper:
         last_exc: Optional[Exception] = None
         for attempt in range(1, 3):
             try:
-                _, response_data = self._get_listing_details_via_browser(
-                    listing_id=str(listing_id),
-                    checkin=effective_checkin,
-                    checkout=effective_checkout,
-                    adults=effective_adults,
+                _, response_data = self._run_async(
+                    self._get_listing_details_via_browser(
+                        listing_id=str(listing_id),
+                        checkin=effective_checkin,
+                        checkout=effective_checkout,
+                        adults=effective_adults,
+                    ),
+                    op_name="get_listing_details",
                 )
                 return response_data
             except Exception as exc:

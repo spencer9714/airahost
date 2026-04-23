@@ -593,21 +593,21 @@ def _capture_user_listing_prices_for_range(
     end = _dt.strptime(end_date, "%Y-%m-%d")
     total_days = max(1, (end - start).days)
     nights = max(1, int(minimum_booking_nights or 1))
-    playwright_live_client = AirbnbClient(
-        {
-            "CHECKIN": start_date,
-            "CHECKOUT": end_date,
-            "ADULTS": 1,
-            # User-listing day-level capture should use browser scraping path.
-            "USE_DEEPBNB_BACKEND": False,
-        }
-    )
-
     def _capture_for_index(i: int) -> Dict[str, Any]:
         checkin_dt = start + _td(days=i)
         checkin = checkin_dt.strftime("%Y-%m-%d")
         checkout = (checkin_dt + _td(days=nights)).strftime("%Y-%m-%d")
         time.sleep(RATE_LIMIT_SECONDS)
+        # Strict isolation: never reuse Playwright client/scraper objects across
+        # user-listing day captures.
+        playwright_live_client = AirbnbClient(
+            {
+                "CHECKIN": start_date,
+                "CHECKOUT": end_date,
+                "ADULTS": 1,
+                "USE_DEEPBNB_BACKEND": False,
+            }
+        )
         try:
             live = capture_target_live_price(
                 listing_url=listing_url,
@@ -626,6 +626,11 @@ def _capture_user_listing_prices_for_range(
                 "livePriceStatus": "scrape_failed",
                 "livePriceStatusReason": str(exc)[:300],
             }
+        finally:
+            try:
+                playwright_live_client._get_playwright_scraper().close_browser()  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
         obs = live.get("observedListingPrice")
         price = round(float(obs)) if isinstance(obs, (int, float)) and obs > 0 else None
@@ -639,9 +644,11 @@ def _capture_user_listing_prices_for_range(
             "captured_at": live.get("observedListingPriceCapturedAt"),
         }
 
+    # Use the exact same max-worker setting as daily comps/deepbnb day-query pool.
     worker_count = DAY_QUERY_MAX_WORKERS
     logger.info(
-        f"[{report_id}] user-listing daily capture: workers={worker_count}, dates={total_days}"
+        f"[{report_id}] user-listing daily capture phase start "
+        f"(after daily-query phase complete): workers={worker_count}, dates={total_days}"
     )
     rows, _state = execute_day_queries_concurrently(
         query_func=_capture_for_index,

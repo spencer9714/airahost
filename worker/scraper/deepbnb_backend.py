@@ -358,6 +358,23 @@ class DeepBnbBackend:
             if status in (401, 403):
                 raise ScraperForbiddenError(f"DeepBnb StaysSearch blocked with status={status}")
             raw_json = resp.json() if resp.content else {}
+            try:
+                logger.info(
+                    "[deepbnb_raw_search][checkin=%s][checkout=%s][adults=%s][status=%s] %s",
+                    checkin,
+                    checkout,
+                    adults,
+                    status,
+                    json.dumps(raw_json, ensure_ascii=False, default=str),
+                )
+            except Exception:
+                logger.info(
+                    "[deepbnb_raw_search][checkin=%s][checkout=%s][adults=%s][status=%s] <unserializable_payload>",
+                    checkin,
+                    checkout,
+                    adults,
+                    status,
+                )
             if self._looks_blocked(status, raw_json if isinstance(raw_json, dict) else {}):
                 raise ScraperForbiddenError(f"DeepBnb StaysSearch blocked with status={status}")
         except Exception as exc:

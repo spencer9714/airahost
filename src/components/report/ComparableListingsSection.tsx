@@ -28,14 +28,14 @@ function isPinnedListing(listing: ComparableListing, pinnedUrls: string[]): bool
 
 // ── Date helpers ────────────────────────────────────────────────
 
-function nextDay(dateStr: string): string {
+function nextDay(dateStr: string, nights = 1): string {
   const d = new Date(dateStr + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + 1);
+  d.setUTCDate(d.getUTCDate() + Math.max(1, nights));
   return d.toISOString().slice(0, 10);
 }
 
-function listingUrlForDate(url: string, date: string): string {
-  const checkout = nextDay(date);
+function listingUrlForDate(url: string, date: string, nights = 1): string {
+  const checkout = nextDay(date, nights);
   try {
     // Canonicalize: strip any existing date params (old or new key names),
     // then inject the correct Airbnb params check_in / check_out.
@@ -151,7 +151,7 @@ function ComparableCard({
   // When a date is selected, use only the exact scraped price for that date.
   // Do NOT fall back to nightlyPrice or an average — that would mislead the user.
   const datePrice: number | undefined = selectedDate
-    ? listing.priceByDate?.[selectedDate]
+    ? (listing.priceByDateDetails?.[selectedDate]?.price ?? listing.priceByDate?.[selectedDate])
     : undefined;
   // No date selected → show the general comparable price.
   // Date selected + price found → show sampled date price.
@@ -161,11 +161,19 @@ function ComparableCard({
   const displayPrice = selectedDate ? datePrice : listing.nightlyPrice;
   const hasDisplayPrice =
     typeof displayPrice === "number" && Number.isFinite(displayPrice) && displayPrice > 0;
-  const queryNights = listing.queryNights != null ? listing.queryNights : 1;
+  const detailForDate = selectedDate ? listing.priceByDateDetails?.[selectedDate] : undefined;
+  const queryNights =
+    selectedDate && detailForDate?.queryNights != null
+      ? detailForDate.queryNights
+      : listing.queryNights != null
+        ? listing.queryNights
+        : 1;
   const queryTotalPrice =
     queryNights > 1
-      ? typeof listing.queryTotalPrice === "number" && listing.queryTotalPrice > 0
-        ? listing.queryTotalPrice
+      ? typeof detailForDate?.queryTotalPrice === "number" && detailForDate.queryTotalPrice > 0
+        ? detailForDate.queryTotalPrice
+        : typeof listing.queryTotalPrice === "number" && listing.queryTotalPrice > 0
+          ? listing.queryTotalPrice
         : typeof displayPrice === "number" && displayPrice > 0
           ? Number((displayPrice * queryNights).toFixed(2))
           : null
@@ -175,7 +183,9 @@ function ComparableCard({
   // listing page opens in the same date context as our shown price.
   const viewUrl = listing.url
     ? selectedDate
-      ? listingUrlForDate(listing.url, selectedDate)
+      ? detailForDate?.url
+        ? detailForDate.url
+        : listingUrlForDate(listing.url, selectedDate, queryNights)
       : listing.url
     : null;
 

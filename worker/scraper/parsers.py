@@ -197,22 +197,72 @@ def _extract_price_nights(text: str) -> int:
 
 def _parse_dollar_amount_currency(text: str) -> tuple[Optional[float], Optional[str]]:
     """
-    Parse strict Airbnb primaryLine.price shapes like '$173 CAD' / 'US$241 CAD'.
+    Parse Airbnb primaryLine price text across common currency shapes, e.g.:
+    '$173 CAD', 'US$241 CAD', '€199', '199 EUR', 'C$363'.
     Returns (amount, currency_code).
     """
     if not isinstance(text, str) or not text.strip():
         return None, None
     s = text.replace("\xa0", " ").strip()
-    # Search for "$<amount>" with optional trailing currency token.
-    # US Airbnb omits the currency suffix ("$1,661") while CA/AU use it ("$173 CAD").
-    m = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s+([^\d\s]+))?", s)
-    if not m:
+    symbol_to_ccy = {
+        "€": "EUR",
+        "£": "GBP",
+        "¥": "JPY",
+        "₹": "INR",
+        "₩": "KRW",
+        "$": "USD",
+    }
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+
+    # Pattern A: [prefix/code]$<amount> [CCY]
+    m = re.search(
+        r"(?:(?P<prefix>[A-Za-z]{1,3})\s*)?(?P<sym>[$€£¥₹₩])\s*"
+        r"(?P<amt>[0-9][0-9,]*(?:\.[0-9]+)?)"
+        r"(?:\s+(?P<ccy>[A-Za-z]{3}))?",
+        s,
+    )
+    if m:
+        try:
+            amount = float(str(m.group("amt")).replace(",", ""))
+        except Exception:
+            amount = None
+        ccy = (m.group("ccy") or "").strip().upper()
+        prefix = (m.group("prefix") or "").strip().upper()
+        sym = m.group("sym")
+        if ccy:
+            currency = ccy
+        elif sym == "$" and prefix in ("US", "CA", "C", "AU", "A", "NZ"):
+            currency = {
+                "US": "USD",
+                "CA": "CAD",
+                "C": "CAD",
+                "AU": "AUD",
+                "A": "AUD",
+                "NZ": "NZD",
+            }.get(prefix, "USD")
+        else:
+            currency = symbol_to_ccy.get(sym, "USD")
+    else:
+        # Pattern B: <amount> <CCY>
+        m2 = re.search(
+            r"(?P<amt>[0-9][0-9,]*(?:\.[0-9]+)?)\s+(?P<ccy>[A-Za-z]{3})\b",
+            s,
+        )
+        if m2:
+            try:
+                amount = float(str(m2.group("amt")).replace(",", ""))
+            except Exception:
+                amount = None
+            currency = str(m2.group("ccy") or "").strip().upper() or None
+
+    if amount is None:
         return None, None
     try:
-        amount = float(m.group(1).replace(",", ""))
+        amount = float(amount)
     except Exception:
         return None, None
-    currency = str(m.group(2) or "USD").strip().upper()
+    currency = str(currency or "USD").strip().upper()
     return (amount if amount > 0 else None), currency
 
 
@@ -735,6 +785,7 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
             if isinstance(primary, dict):
                 price_text = primary.get("price") or primary.get("discountedPrice")
                 qualifier = str(primary.get("qualifier") or "").lower()
+                accessibility_label = str(primary.get("accessibilityLabel") or "")
 
                 # Exact payload rule:
                 # if available=true and primaryLine.price is '$<num> <ccy>',
@@ -745,7 +796,10 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                         if strict_ccy and not row.get("currency"):
                             row["currency"] = strict_ccy
                         # "for N nights" → total price; derive nightly.
-                        _for_n = re.search(r"\bfor\s+(\d+)\s+nights?\b", qualifier)
+                        # Some payloads omit qualifier but include "for N nights" in
+                        # accessibilityLabel, so inspect both fields.
+                        qualifier_ctx = f"{qualifier} {accessibility_label}".strip()
+                        _for_n = re.search(r"\bfor\s+(\d+)\s+nights?\b", qualifier_ctx)
                         if _for_n:
                             _n = int(_for_n.group(1))
                             row["total_price"] = strict_val
@@ -754,14 +808,15 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                         elif "night" in qualifier:
                             row["nightly_price"] = strict_val
                             row["price_nights"] = 1
-                        elif "total" in qualifier or nights_hint > 1:
+                        elif "total" in qualifier_ctx or nights_hint > 1:
                             row["total_price"] = strict_val
                             row["price_nights"] = max(1, nights_hint)
                         else:
-                            # Conservative fallback: treat unknown qualifier as nightly
-                            # so pricing isn't dropped when Airbnb omits qualifier text.
-                            row["nightly_price"] = strict_val
-                            row["price_nights"] = 1
+                            # Conservative fallback: unknown qualifier is treated as
+                            # TOTAL (not nightly) to avoid inflating nightly prices
+                            # when multi-night totals omit explicit qualifier text.
+                            row["total_price"] = strict_val
+                            row["price_nights"] = max(1, nights_hint)
 
         # Structural/context fields used for similarity scoring.
         derived = _extract_structural_context_from_search_result(r)

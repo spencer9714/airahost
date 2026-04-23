@@ -24,6 +24,7 @@ import re
 import statistics
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime as dt, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlencode
@@ -54,7 +55,6 @@ from worker.scraper.day_query import (
     SIMILARITY_FLOOR_FALLBACK,
     compute_sample_dates,
     daterange_nights,
-    detect_discount_evidence,
     estimate_base_price_for_date,
     interpolate_missing_days,
 )
@@ -119,27 +119,48 @@ def _repair_suspicious_comparable_titles(
     if not isinstance(listings, list) or not listings:
         return
 
-    repaired = 0
+    candidates: List[Tuple[Dict[str, Any], str]] = []
     for item in listings:
-        if repaired >= limit:
-            break
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
         url = normalize_airbnb_url(str(item.get("url") or "").strip())
         if not url or not _title_looks_suspicious(title):
             continue
-        try:
-            spec, title_warnings = extract_target_spec(client, url)
+        candidates.append((item, url))
+    if not candidates:
+        return
+
+    worker_count = min(_bounded_workers("DAY_QUERY_MAX_WORKERS", 5), len(candidates))
+    logger.info(
+        "[comp_title] repair start candidates=%s workers=%s limit=%s",
+        len(candidates),
+        worker_count,
+        limit,
+    )
+
+    def _fetch_title(item_url: str):
+        spec, title_warnings = extract_target_spec(client, item_url)
+        return item_url, spec, title_warnings
+
+    repaired = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        future_map = {ex.submit(_fetch_title, url): (item, url) for item, url in candidates}
+        for future in as_completed(future_map):
+            item, url = future_map[future]
+            try:
+                _, spec, title_warnings = future.result()
+            except Exception as exc:
+                extraction_warnings.append(f"Comparable title repair failed for {url}: {exc}")
+                continue
+            extraction_warnings.extend(title_warnings)
+            if repaired >= limit:
+                continue
             resolved_title = spec.title
-        except Exception as exc:
-            extraction_warnings.append(f"Comparable title repair failed for {url}: {exc}")
-            continue
-        extraction_warnings.extend(title_warnings)
-        if resolved_title and not _title_looks_suspicious(resolved_title):
-            item["title"] = resolved_title
-            repaired += 1
-            logger.info(f"[comp_title] repaired title for {url} -> {resolved_title!r}")
+            if resolved_title and not _title_looks_suspicious(resolved_title):
+                item["title"] = resolved_title
+                repaired += 1
+                logger.info(f"[comp_title] repaired title for {url} -> {resolved_title!r}")
 
 
 def _repair_incomplete_comparable_specs(
@@ -153,59 +174,75 @@ def _repair_incomplete_comparable_specs(
     if not isinstance(listings, list) or not listings:
         return
 
-    repaired = 0
+    candidates: List[Tuple[Dict[str, Any], str]] = []
     for item in listings:
-        if repaired >= limit:
-            break
         if not isinstance(item, dict):
             continue
-
         url = normalize_airbnb_url(str(item.get("url") or "").strip())
         if not url:
             continue
-
         needs_repair = any(
             item.get(key) in (None, "", 0)
             for key in ("accommodates", "bedrooms", "baths")
         ) or not str(item.get("location") or "").strip()
-
         if not needs_repair and not _title_looks_suspicious(str(item.get("title") or "")):
             continue
+        candidates.append((item, url))
+    if not candidates:
+        return
 
-        try:
-            spec, warnings = extract_target_spec(client, url)
-        except Exception as exc:
-            extraction_warnings.append(f"Comparable spec repair failed for {url}: {exc}")
-            continue
+    worker_count = min(_bounded_workers("DAY_QUERY_MAX_WORKERS", 5), len(candidates))
+    logger.info(
+        "[comp_spec] repair start candidates=%s workers=%s limit=%s",
+        len(candidates),
+        worker_count,
+        limit,
+    )
 
-        extraction_warnings.extend(warnings)
+    def _fetch_spec(item_url: str):
+        spec, warnings = extract_target_spec(client, item_url)
+        return item_url, spec, warnings
 
-        if spec.title and _title_looks_suspicious(str(item.get("title") or "")):
-            item["title"] = spec.title
-        if spec.property_type:
-            item["propertyType"] = spec.property_type
-        if isinstance(spec.accommodates, (int, float)):
-            item["accommodates"] = int(spec.accommodates)
-        if isinstance(spec.bedrooms, (int, float)):
-            item["bedrooms"] = int(spec.bedrooms)
-        if isinstance(spec.baths, (int, float)):
-            item["baths"] = round(float(spec.baths), 1)
-        if spec.location:
-            item["location"] = spec.location
-        if isinstance(spec.rating, (int, float)) and item.get("rating") is None:
-            item["rating"] = round(float(spec.rating), 2)
-        if isinstance(spec.reviews, (int, float)) and item.get("reviews") is None:
-            item["reviews"] = int(spec.reviews)
+    repaired = 0
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        future_map = {ex.submit(_fetch_spec, url): (item, url) for item, url in candidates}
+        for future in as_completed(future_map):
+            item, url = future_map[future]
+            try:
+                _, spec, warnings = future.result()
+            except Exception as exc:
+                extraction_warnings.append(f"Comparable spec repair failed for {url}: {exc}")
+                continue
+            extraction_warnings.extend(warnings)
+            if repaired >= limit:
+                continue
 
-        repaired += 1
-        logger.info(
-            "[comp_spec] repaired %s -> accommodates=%s bedrooms=%s baths=%s location=%r",
-            url,
-            item.get("accommodates"),
-            item.get("bedrooms"),
-            item.get("baths"),
-            item.get("location"),
-        )
+            if spec.title and _title_looks_suspicious(str(item.get("title") or "")):
+                item["title"] = spec.title
+            if spec.property_type:
+                item["propertyType"] = spec.property_type
+            if isinstance(spec.accommodates, (int, float)):
+                item["accommodates"] = int(spec.accommodates)
+            if isinstance(spec.bedrooms, (int, float)):
+                item["bedrooms"] = int(spec.bedrooms)
+            if isinstance(spec.baths, (int, float)):
+                item["baths"] = round(float(spec.baths), 1)
+            if spec.location:
+                item["location"] = spec.location
+            if isinstance(spec.rating, (int, float)) and item.get("rating") is None:
+                item["rating"] = round(float(spec.rating), 2)
+            if isinstance(spec.reviews, (int, float)) and item.get("reviews") is None:
+                item["reviews"] = int(spec.reviews)
+
+            repaired += 1
+            logger.info(
+                "[comp_spec] repaired %s -> accommodates=%s bedrooms=%s baths=%s location=%r",
+                url,
+                item.get("accommodates"),
+                item.get("bedrooms"),
+                item.get("baths"),
+                item.get("location"),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -272,11 +309,25 @@ def _build_daily_transparent_result(
             return candidate if not cur else current
         return candidate if current is None else current
 
+    def _canonical_airbnb_room_url(raw_url: Any) -> Optional[str]:
+        s = str(raw_url or "").strip()
+        if not s:
+            return None
+        m = re.search(r"(https?://[^/?#]+)?/rooms/(\d+)", s)
+        if not m:
+            return s
+        origin = (m.group(1) or "https://www.airbnb.com").rstrip("/")
+        return f"{origin}/rooms/{m.group(2)}"
+
     comp_seen_dates: Dict[str, set[str]] = {}
 
     for day_result in all_day_results:
         day_date = day_result.get("date")
         day_comp_prices: Dict[str, float] = day_result.get("comp_prices") or {}
+        day_has_valid_sample = bool(
+            day_result.get("is_sampled", False)
+            and isinstance(day_result.get("median_price"), (int, float))
+        )
 
         for comp in day_result.get("top_comps", []) or []:
             comp_id = str(comp.get("id") or comp.get("url") or "").strip()
@@ -292,6 +343,7 @@ def _build_daily_transparent_result(
                     "score_sum": score,
                     "count": 1,
                     "price_by_date": {},
+                    "price_by_date_details": {},
                     "max_query_nights": qn,
                 }
             else:
@@ -304,9 +356,19 @@ def _build_daily_transparent_result(
                 comparable_index[comp_id]["count"] += 1
                 if qn > comparable_index[comp_id]["max_query_nights"]:
                     comparable_index[comp_id]["max_query_nights"] = qn
-            if day_date and isinstance(price, (int, float)) and price > 0:
+            if day_has_valid_sample and day_date and isinstance(price, (int, float)) and price > 0:
                 _price_rounded = round(float(price), 2)
                 comparable_index[comp_id]["price_by_date"][day_date] = _price_rounded
+                day_detail: Dict[str, Any] = {"price": _price_rounded}
+                _day_url = str(comp.get("url") or "").strip()
+                if _day_url:
+                    day_detail["url"] = _day_url
+                if qn > 1:
+                    day_detail["queryNights"] = qn
+                _day_total = comp.get("queryTotalPrice")
+                if isinstance(_day_total, (int, float)) and _day_total > 0:
+                    day_detail["queryTotalPrice"] = round(float(_day_total), 2)
+                comparable_index[comp_id]["price_by_date_details"][day_date] = day_detail
             if day_date:
                 comp_seen_dates.setdefault(comp_id, set()).add(day_date)
 
@@ -328,6 +390,12 @@ def _build_daily_transparent_result(
         price_by_date = state.get("price_by_date", {})
         if price_by_date:
             item["priceByDate"] = price_by_date
+        price_by_date_details = state.get("price_by_date_details", {})
+        if isinstance(price_by_date_details, dict) and price_by_date_details:
+            item["priceByDateDetails"] = price_by_date_details
+        _canonical_url = _canonical_airbnb_room_url(item.get("url"))
+        if _canonical_url:
+            item["url"] = _canonical_url
         max_qn = state.get("max_query_nights", 1)
         if max_qn > 1:
             item["queryNights"] = max_qn
@@ -1491,21 +1559,6 @@ def run_scrape(
             except Exception as _tp_exc:
                 logger.warning(f"[run_scrape] Target price capture failed (non-fatal): {_tp_exc}")
 
-            # Step 4: Discount evidence (debug only, if time permits)
-            discount_evidence = None
-            elapsed = time.time() - start_time
-            if elapsed < max_runtime_seconds - 20 and total_nights > 1:
-                _discount_start = time.time()
-                try:
-                    discount_evidence = detect_discount_evidence(
-                        client, base_origin, target, checkin, checkout,
-                        effective_adults, rate_limit_seconds=rate_limit_seconds,
-                    )
-                except Exception as exc:
-                    logger.warning(f"Discount evidence query failed: {exc}")
-                finally:
-                    timings["discount_evidence_ms"] = round((time.time() - _discount_start) * 1000)
-
             timings["total_ms"] = round((time.time() - start_time) * 1000)
 
             transparent = _build_daily_transparent_result(
@@ -1515,7 +1568,7 @@ def run_scrape(
                 timings_ms=timings,
                 source="scrape",
                 extraction_warnings=extraction_warnings,
-                discount_evidence=discount_evidence,
+                discount_evidence=None,
                 benchmark_info=_build_url_mode_benchmark_info(
                     all_day_results,
                     preferred_comps,
@@ -1546,8 +1599,7 @@ def run_scrape(
                 f"{timings['total_ms']}ms total "
                 f"(extract={timings.get('extract_ms', 0)}ms, "
                 f"day_queries={timings.get('day_queries_ms', 0)}ms, "
-                f"interpolation={timings.get('interpolation_ms', 0)}ms, "
-                f"discount_evidence={timings.get('discount_evidence_ms', 0)}ms)"
+                f"interpolation={timings.get('interpolation_ms', 0)}ms)"
             )
 
             return all_day_results, transparent

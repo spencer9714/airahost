@@ -119,9 +119,10 @@ def parse_deepbnb_search_to_stayssearch_payload(
                 if not primary_price and isinstance(pricing.get("price"), dict):
                     amount = _to_float((pricing.get("price") or {}).get("amount"))
                     if isinstance(amount, (int, float)) and amount > 0:
-                        total_amount = amount * nights
-                        primary_price = f"${float(total_amount):.2f} {currency}"
-                        primary_qualifier = f"for {nights} nights" if nights > 1 else "night"
+                        # pricing.price.amount in Deepbnb payload is treated as a
+                        # stay total; do not multiply by nights here.
+                        primary_price = f"${float(amount):.2f} {currency}"
+                        primary_qualifier = f"for {nights} nights" if nights > 1 else "total"
 
                 row: Dict[str, Any] = {
                     "__typename": "SkinnyListingItem",

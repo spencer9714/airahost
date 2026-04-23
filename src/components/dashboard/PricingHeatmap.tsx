@@ -256,9 +256,9 @@ export function PricingHeatmap({
           let compareToneCls = "border-gray-200/80 bg-white";
           if (!isMissingPriceDay && hasComparablePrices) {
             const diffPct = ((originalUserPrice / suggested) - 1) * 100;
-            if (diffPct > 8) compareToneCls = "border-rose-200 bg-rose-50/60";
-            else if (diffPct > 3) compareToneCls = "border-amber-200 bg-amber-50/60";
-            else if (diffPct < -3) compareToneCls = "border-emerald-200 bg-emerald-50/60";
+            const absDiffPct = Math.abs(diffPct);
+            if (absDiffPct > 8) compareToneCls = "border-rose-200 bg-rose-50/60";
+            else if (absDiffPct > 3) compareToneCls = "border-amber-200 bg-amber-50/60";
           }
 
           const tileCls = applyMode && isSelected && !isPast
