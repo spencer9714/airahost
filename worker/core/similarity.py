@@ -10,6 +10,7 @@ Extracted from price_estimator.py for modularity.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -62,9 +63,11 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
       - property_type: 3.0  (categorical; mismatch → 0.0, unknown → partial)
       - beds:          2.8  (tolerance 3)
       - accommodates:  2.8  (tolerance 3)
-      - bedrooms:      1.6  (tolerance 2)
-      - baths:         1.0  (tolerance 1.5)
-      - amenities:     0.6  (Jaccard overlap; auxiliary role)
+      - bedrooms:      2.5  (tolerance 2)
+      - baths:         2.5  (tolerance 1.5)
+      - rating:        2.0  (tolerance 1.0)
+      - reviews:       2.0  (log-scaled count similarity)
+      - amenities:     1.0  (Jaccard overlap; auxiliary role)
 
     Property-type mismatch scores 0.0 (not 0.15) because the hard gate in
     filter_similar_candidates already blocks clear type conflicts; this
@@ -83,10 +86,33 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
         s = max(0.0, 1.0 - diff / tol)
         score += s * w
 
+    def add_reviews(t, c, w: float):
+        """
+        Review-count similarity on a log scale so 10 vs 30 is meaningful, while
+        300 vs 600 is not treated as a massive mismatch.
+        """
+        nonlocal score, weight_sum
+        weight_sum += w
+        if t is None or c is None:
+            score += 0.35 * w
+            return
+        try:
+            t_log = math.log1p(max(0.0, float(t)))
+            c_log = math.log1p(max(0.0, float(c)))
+        except Exception:
+            score += 0.35 * w
+            return
+        hi = max(t_log, c_log)
+        lo = min(t_log, c_log)
+        s = 1.0 if hi <= 0 else (lo / hi)
+        score += max(0.0, min(1.0, s)) * w
+
     add_num(target.beds, cand.beds, w=2.8, tol=3.0)
     add_num(target.accommodates, cand.accommodates, w=2.8, tol=3.0)
-    add_num(target.bedrooms, cand.bedrooms, w=1.6, tol=2.0)
-    add_num(target.baths, cand.baths, w=1.0, tol=1.5)
+    add_num(target.bedrooms, cand.bedrooms, w=2.5, tol=2.0)
+    add_num(target.baths, cand.baths, w=2.5, tol=1.5)
+    add_num(target.rating, cand.rating, w=2.0, tol=1.0)
+    add_reviews(target.reviews, cand.reviews, w=2.0)
 
     # Property-type: strongest categorical signal.
     # Both known → exact match scores 1.0, mismatch scores 0.0.
@@ -97,16 +123,16 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
     else:
         score += 0.35 * 3.0
 
-    # Amenity overlap: auxiliary signal (weight 0.6).
+    # Amenity overlap: auxiliary signal (weight 1.0).
     # If either side has no amenities, give partial credit rather than zero.
-    weight_sum += 0.6
+    weight_sum += 1.0
     t_set = set(target.amenities or [])
     c_set = set(cand.amenities or [])
     if t_set and c_set:
         overlap = len(t_set & c_set) / max(1, len(t_set | c_set))
-        score += overlap * 0.6
+        score += overlap * 1.0
     else:
-        score += 0.35 * 0.6
+        score += 0.35 * 1.0
 
     if weight_sum <= 0:
         return 0.0

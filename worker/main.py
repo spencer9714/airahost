@@ -616,6 +616,7 @@ def _capture_user_listing_prices_for_range(
                 cdp_url=CDP_URL,
                 cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                 client=playwright_live_client,
+                allow_retry_matrix=False,
             )
         except Exception as exc:
             logger.warning(

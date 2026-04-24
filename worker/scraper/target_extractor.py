@@ -1408,6 +1408,7 @@ def capture_target_live_price(
     cdp_url: Optional[str] = None,
     cdp_connect_timeout_ms: int = 15000,
     client: Optional[Any] = None,
+    allow_retry_matrix: bool = True,
 ) -> Dict[str, Any]:
     """
     Open a short Playwright session to extract the target listing's current
@@ -1483,6 +1484,20 @@ def capture_target_live_price(
         except Exception:
             pass
 
+        if not allow_retry_matrix:
+            return {
+                "observedListingPrice": None,
+                "observedListingPriceDate": checkin,
+                "observedListingPriceCapturedAt": captured_at,
+                "observedListingPriceSource": None,
+                "observedListingPriceConfidence": "failed",
+                "livePriceStatus": "no_price_found",
+                "livePriceStatusReason": (
+                    f"No nightly price found on listing page for {checkin}/{checkout} "
+                    "(single-attempt mode)"
+                ),
+            }
+
         playwright_client: Optional[Any] = None
 
         def _extract_price_for_window(
@@ -1509,16 +1524,6 @@ def capture_target_live_price(
                     checkout=_checkout,
                     adults=_adults,
                 )
-                try:
-                    logger.info(
-                        f"[target_live_price_raw][listing={listing_id}][checkin={_checkin}][checkout={_checkout}][adults={_adults}][backend={_backend_label}] "
-                        + json.dumps(_pdp_data, ensure_ascii=False, default=str)
-                    )
-                except Exception:
-                    logger.info(
-                        f"[target_live_price_raw][listing={listing_id}][checkin={_checkin}][checkout={_checkout}][adults={_adults}][backend={_backend_label}] "
-                        "<unserializable_payload>"
-                    )
                 _has_errors = bool((_pdp_data or {}).get("errors"))
                 _sections = (
                     (((_pdp_data or {}).get("data") or {}).get("presentation") or {})
@@ -1533,6 +1538,16 @@ def capture_target_live_price(
                         for s in _sections
                         if isinstance(s, dict) and s.get("sectionId") is not None
                     ][:8]
+                logger.info(
+                    "[target_live_price_raw] listing=%s checkin=%s checkout=%s adults=%s backend=%s has_errors=%s section_ids=%s",
+                    listing_id,
+                    _checkin,
+                    _checkout,
+                    _adults,
+                    _backend_label,
+                    _has_errors,
+                    _section_ids,
+                )
                 _parsed = parse_pdp_response(_pdp_data, str(listing_id), safe_domain_base(listing_url))
                 return _parsed.get("nightly_price"), _parsed.get("total_price"), _section_ids, _has_errors
 

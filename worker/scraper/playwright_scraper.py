@@ -193,6 +193,18 @@ class PlaywrightScraper:
         try:
             page = await context.new_page()
             try:
+                await page.bring_to_front()
+                logger.info(
+                    "Playwright tab brought to front [thread=%s]",
+                    threading.get_ident(),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Playwright failed to bring tab to front [thread=%s]: %s",
+                    threading.get_ident(),
+                    exc,
+                )
+            try:
                 logger.info(
                     "Playwright new_page opened [thread=%s] initial_url=%s open_tabs=%s/%s",
                     threading.get_ident(),
@@ -626,66 +638,132 @@ class PlaywrightScraper:
 
     @staticmethod
     async def _read_dom_price_text(page, timeout_ms: int = 5000) -> Optional[str]:
-        deadline = time.monotonic() + (max(0, int(timeout_ms)) / 1000.0)
-        poll_ms = 150
         js = """
 () => {
-  const selectors = [
-    '[data-section-id="BOOK_IT_FLOATING_FOOTER"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
-    '[data-section-id="BOOK_IT_SIDEBAR"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
-    '[data-plugin-in-point-id="BOOK_IT_FLOATING_FOOTER"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
-    '[data-plugin-in-point-id="BOOK_IT_SIDEBAR"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
-    'span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
-    'span.u174bpcy',
-    '[data-section-id*="BOOK_IT"] span',
-    '[data-plugin-in-point-id*="BOOK_IT"] span',
-  ];
-  const out = [];
-  const seen = new Set();
-  for (const sel of selectors) {
-    const nodes = document.querySelectorAll(sel);
-    for (const n of nodes) {
-      const t = (n.textContent || '').replace(/\\u00a0/g, ' ').trim();
-      if (!t) continue;
-      const key = `${sel}::${t}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ selector: sel, text: t });
+  const clean = (s) => (s || '').replace(/\\u00a0/g, ' ').replace(/\\s+/g, ' ').trim();
+  const parsePrice = (text) => {
+    const t = clean(text);
+    if (!t) return null;
+    const m1 = t.match(/(?:[A-Z]{1,3}\\$|\\$|€|£|¥|₹|₩|₪|₫|₽|₴|₱|฿|₦|₺)\\s*\\d[\\d,]*(?:\\.\\d{1,2})?(?:\\s*[A-Z]{3})?/);
+    if (m1) return m1[0].trim();
+    const m2 = t.match(/\\d[\\d,]*(?:\\.\\d{1,2})?\\s*[A-Z]{3}/);
+    return m2 ? m2[0].trim() : null;
+  };
+  const getNumeric = (priceText) => {
+    const m = (priceText || '').match(/\\d[\\d,]*(?:\\.\\d{1,2})?/);
+    return m ? Number(m[0].replace(/,/g, '')) : null;
+  };
+  const isStrikethrough = (el) => {
+    let node = el;
+    for (let i = 0; i < 4 && node; i++) {
+      const cs = getComputedStyle(node);
+      const td = (cs.textDecorationLine || cs.textDecoration || '').toLowerCase();
+      if (td.includes('line-through')) return true;
+      node = node.parentElement;
     }
+    return false;
+  };
+  const inBookIt = (el) =>
+    !!el.closest(
+      '[data-testid="book-it-default"], [data-testid="book-it-sidebar"], [data-testid="price-block"], [data-testid="book-it-price-breakdown"], [data-section-id*="BOOK_IT"], [data-plugin-in-point-id*="BOOK_IT"]'
+    );
+  const hasNightContext = (el) => {
+    const box = el.closest(
+      '[data-testid="book-it-default"], [data-testid="book-it-sidebar"], [data-testid="price-block"], [data-testid="book-it-price-breakdown"], [data-section-id*="BOOK_IT"], [data-plugin-in-point-id*="BOOK_IT"]'
+    ) || el.parentElement;
+    const txt = clean(box ? (box.innerText || box.textContent || '') : '');
+    return /\\/\\s*night|per\\s+night|night/i.test(txt);
+  };
+
+  const nodes = Array.from(document.querySelectorAll('span, div, b, strong'));
+  const candidates = [];
+  let idx = 0;
+  for (const el of nodes) {
+    if (!inBookIt(el)) continue;
+    const text = clean(el.textContent || '');
+    if (!text) continue;
+    const priceText = parsePrice(text);
+    if (!priceText) continue;
+    const value = getNumeric(priceText);
+    if (!(value > 0)) continue;
+    candidates.push({
+      idx: idx++,
+      text,
+      priceText,
+      value,
+      strikethrough: isStrikethrough(el),
+      nightContext: hasNightContext(el),
+    });
   }
-  return out;
+
+  if (!candidates.length) {
+    return { extracted: null, candidates: [] };
+  }
+
+  const preferred = candidates.filter(c => c.nightContext && !c.strikethrough).sort((a, b) => a.idx - b.idx);
+  const fallbackNonStrike = candidates.filter(c => !c.strikethrough).sort((a, b) => a.idx - b.idx);
+  const pool = preferred.length ? preferred : (fallbackNonStrike.length ? fallbackNonStrike : candidates.sort((a, b) => a.idx - b.idx));
+  const picked = pool[pool.length - 1];
+  return {
+    extracted: picked ? picked.priceText : null,
+    candidates: candidates.slice(0, 30),
+  };
 }
 """
-        while time.monotonic() < deadline:
-            try:
-                values = await page.evaluate(js)
-            except Exception:
-                values = []
-            if isinstance(values, list) and values:
-                sample = [
-                    str((row or {}).get("text") or "")
-                    for row in values[:8]
-                    if isinstance(row, dict)
-                ]
+        try:
+            values = await page.evaluate(js)
+        except Exception:
+            values = {}
+        if isinstance(values, dict):
+            candidates = values.get("candidates")
+            if isinstance(candidates, list) and candidates:
                 logger.info(
-                    "Playwright PDP DOM candidates count=%s sample=%s",
-                    len(values),
-                    sample,
+                    "Playwright PDP DOM discount-aware candidates count=%s sample=%s",
+                    len(candidates),
+                    [
+                        {
+                            "priceText": str(c.get("priceText") or ""),
+                            "strike": bool(c.get("strikethrough")),
+                            "night": bool(c.get("nightContext")),
+                        }
+                        for c in candidates[:8]
+                        if isinstance(c, dict)
+                    ],
                 )
-                for row in values:
-                    if not isinstance(row, dict):
-                        continue
-                    candidate = PlaywrightScraper._extract_dom_price_text(str(row.get("text") or ""))
-                    if candidate:
-                        logger.info(
-                            "Playwright PDP DOM price match selector=%s text=%s extracted=%s",
-                            str(row.get("selector") or ""),
-                            str(row.get("text") or ""),
-                            candidate,
-                        )
-                        return candidate
-            await page.wait_for_timeout(poll_ms)
+            extracted = values.get("extracted")
+            if isinstance(extracted, str) and extracted.strip():
+                logger.info("Playwright PDP DOM discount-aware match extracted=%s", extracted.strip())
+                return extracted.strip()
         return None
+
+    @staticmethod
+    def _build_minimal_pdp_payload(price_text: Optional[str] = None) -> Dict[str, Any]:
+        primary_line: Dict[str, Any] = {}
+        if isinstance(price_text, str) and price_text.strip():
+            primary_line = {
+                "price": price_text.strip(),
+                "qualifier": "night",
+                "accessibilityLabel": price_text.strip(),
+            }
+        return {
+            "data": {
+                "presentation": {
+                    "stayProductDetailPage": {
+                        "sections": {
+                            "sections": [
+                                {
+                                    "sectionId": "BOOK_IT_SIDEBAR",
+                                    "section": {
+                                        "available": True,
+                                        "structuredDisplayPrice": {"primaryLine": primary_line} if primary_line else {},
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
 
     @classmethod
     def _inject_price_into_pdp_payload(cls, response_data: Dict[str, Any], price_text: str) -> Dict[str, Any]:
@@ -1064,6 +1142,7 @@ class PlaywrightScraper:
             captured_data: Optional[Dict[str, Any]] = None
             terminal_reason: Optional[str] = None
             first_pdp_seen_at: Optional[float] = None
+            challenged_at_nav: bool = False
             response_tasks: set[asyncio.Task] = set()
 
             async def _handle_response(resp):
@@ -1079,27 +1158,17 @@ class PlaywrightScraper:
                     captured_status = int(resp.status)
                     payload = await resp.json()
                     if isinstance(payload, dict):
-                        try:
-                            logger.info(
-                                "Playwright PDP raw response listing=%s status=%s payload=%s",
-                                listing_id,
-                                captured_status,
-                                json.dumps(payload, ensure_ascii=False),
-                            )
-                        except Exception:
-                            logger.info(
-                                "Playwright PDP raw response listing=%s status=%s payload_unserializable=%s",
-                                listing_id,
-                                captured_status,
-                                str(payload),
-                            )
+                        logger.info(
+                            "Playwright PDP API read listing=%s status=%s url=%s",
+                            listing_id,
+                            captured_status,
+                            str(resp.url or ""),
+                        )
                         captured_data = payload
                         has_price = self._pdp_booking_has_price(payload)
                         dates_unavailable = self._pdp_dates_unavailable(payload)
                         if has_price:
                             terminal_reason = "price"
-                        elif dates_unavailable:
-                            terminal_reason = "dates_unavailable"
                         logger.info(
                             "Playwright PDP payload listing=%s status=%s has_price=%s dates_unavailable=%s terminal=%s",
                             listing_id,
@@ -1141,18 +1210,26 @@ class PlaywrightScraper:
                 raise RuntimeError(f"Playwright PDP landed on about:blank for listing={listing_id}")
             await page.wait_for_timeout(int(random.uniform(900, 1600)))
             if self._page_looks_challenged(str((nav or {}).get("html") or ""), str((nav or {}).get("final_url") or "")):
-                raise RuntimeError("Airbnb challenge/login page detected during browser PDP fetch")
+                challenged_at_nav = True
+                logger.info(
+                    "Playwright PDP challenge/login detected listing=%s; proceeding to same-tab HTML reads",
+                    listing_id,
+                )
             await page.mouse.wheel(0, 1200)
 
             # Phase 1: wait until StaysPdpSections starts arriving.
-            prefetch_deadline = time.monotonic() + 10.0
-            while first_pdp_seen_at is None and time.monotonic() < prefetch_deadline:
-                await page.wait_for_timeout(120)
+            if not challenged_at_nav:
+                prefetch_deadline = time.monotonic() + 10.0
+                while first_pdp_seen_at is None and time.monotonic() < prefetch_deadline:
+                    await page.wait_for_timeout(120)
 
             # Phase 2: API-only terminal detection.
-            if first_pdp_seen_at is not None:
+            if (not challenged_at_nav) and first_pdp_seen_at is not None:
+                phase2_deadline = time.monotonic() + 3.0
                 while True:
                     if terminal_reason is not None:
+                        break
+                    if time.monotonic() >= phase2_deadline:
                         break
                     await page.wait_for_timeout(120)
 
@@ -1167,44 +1244,48 @@ class PlaywrightScraper:
             await self._sync_context_cookies_into_session(context)
             self._save_cached_state()
 
-            if captured_data is None:
-                raise RuntimeError("Playwright browser PDP fetch did not capture StaysPdpSections response")
-            if (
-                terminal_reason is None
-                and not self._pdp_booking_has_price(captured_data)
-                and not self._pdp_dates_unavailable(captured_data)
-            ):
-                try:
+            has_api_price = bool(captured_data and self._pdp_booking_has_price(captured_data))
+            if not has_api_price:
+                if captured_data is None:
                     logger.info(
-                        "Playwright PDP raw html listing=%s final_url=%s html=%s",
+                        "Playwright PDP API read missing listing=%s; switching to HTML read on same tab",
                         listing_id,
-                        str((nav or {}).get("final_url") or ""),
-                        str((nav or {}).get("html") or ""),
                     )
-                except Exception:
+                else:
                     logger.info(
-                        "Playwright PDP raw html listing=%s final_url=%s <unserializable_html>",
+                        "Playwright PDP API price missing listing=%s; switching to HTML read on same tab",
                         listing_id,
-                        str((nav or {}).get("final_url") or ""),
                     )
-                logger.info(
-                    "Playwright PDP API payload has no price for listing=%s; waiting up to 5s for DOM price element",
-                    listing_id,
-                )
-                dom_price_text = await self._read_dom_price_text(page, timeout_ms=5000)
+                dom_price_text: Optional[str] = None
+                for attempt in range(1, 6):
+                    logger.info(
+                        "Playwright PDP HTML read attempt %s/5 listing=%s",
+                        attempt,
+                        listing_id,
+                    )
+                    dom_price_text = await self._read_dom_price_text(page, timeout_ms=0)
+                    if dom_price_text:
+                        break
+                    if attempt < 5:
+                        await page.wait_for_timeout(1000)
                 if dom_price_text:
-                    captured_data = self._inject_price_into_pdp_payload(captured_data, dom_price_text)
+                    if captured_data is None:
+                        captured_data = self._build_minimal_pdp_payload(dom_price_text)
+                    else:
+                        captured_data = self._inject_price_into_pdp_payload(captured_data, dom_price_text)
                     terminal_reason = "dom_price_fallback"
                     logger.info(
-                        "Playwright PDP DOM fallback price listing=%s price_text=%s",
+                        "Playwright PDP HTML read success listing=%s price_text=%s",
                         listing_id,
                         dom_price_text,
                     )
                 else:
                     logger.info(
-                        "Playwright PDP DOM fallback price not found within 5s listing=%s; returning no-price payload",
+                        "Playwright PDP HTML read exhausted (5 attempts) listing=%s; skipping day with no price",
                         listing_id,
                     )
+                    if captured_data is None:
+                        captured_data = self._build_minimal_pdp_payload(None)
             if terminal_reason is None:
                 logger.warning(
                     "Playwright PDP had no price/unavailable terminal signal for listing=%s; returning latest payload.",
@@ -1214,7 +1295,11 @@ class PlaywrightScraper:
                 captured_status,
                 captured_data,
             ):
-                raise RuntimeError("Playwright browser PDP returned auth/challenge-like GraphQL error")
+                logger.info(
+                    "Playwright PDP API returned auth/challenge-like errors listing=%s; returning no-price payload after HTML attempts",
+                    listing_id,
+                )
+                return (captured_status or 200), self._build_minimal_pdp_payload(None)
             return (captured_status or 200), captured_data
         finally:
             await self._close_capped_page(page)

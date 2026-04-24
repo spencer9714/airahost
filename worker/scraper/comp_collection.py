@@ -320,10 +320,18 @@ def collect_search_comps(
                 page_ctx = parse_search_listing_context(search_data)
                 for lid in page_ids:
                     sid = str(lid)
+                    row = page_ctx.get(sid, {})
                     if sid not in seen_ids:
                         listing_ids.append(sid)
                         seen_ids.add(sid)
-                    row = page_ctx.get(sid, {})
+                        logger.info(
+                            "[%s] %s: new comp listing id=%s rating=%s reviews=%s",
+                            log_prefix,
+                            checkin_str,
+                            sid,
+                            row.get("rating"),
+                            row.get("reviews"),
+                        )
                     existing = context.get(sid)
                     if existing is None:
                         context[sid] = row
