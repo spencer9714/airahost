@@ -195,6 +195,11 @@ class TestExtractSearchLocation:
         assert loc == "Belmont"
         assert conf == "medium"
 
+    def test_listing_placeholder_rejected(self):
+        loc, conf = _extract_search_location("Airbnb Listing #1408676238256636483 · Entire home")
+        assert loc == ""
+        assert conf == "low"
+
     def test_city_state_zip_inline(self):
         """'NY 10001' as a single comma-part — ZIP not separately parseable here."""
         loc, conf = _extract_search_location("123 Main St, New York, NY 10001")

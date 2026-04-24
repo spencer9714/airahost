@@ -134,6 +134,8 @@ def compute_sample_dates(total_nights: int, max_queries: int = MAX_SAMPLE_QUERIE
 # ── Single-day query ─────────────────────────────────────────────
 
 def _derive_canonical_search_location(target: ListingSpec) -> str:
+    if isinstance(target.lat, (int, float)) and isinstance(target.lng, (int, float)):
+        return f"{float(target.lat):.5f},{float(target.lng):.5f}"
     city = str(target.city or "").strip()
     state = str(target.state or "").strip()
     if city and state:
