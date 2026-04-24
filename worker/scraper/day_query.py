@@ -415,8 +415,11 @@ def estimate_base_price_for_date(
                         if c.nightly_price and c.nightly_price > 0:
                             price_band_anchor = float(c.nightly_price)
                             break
-            if price_band_anchor is None and isinstance(target.nightly_price, (int, float)) and target.nightly_price > 0:
-                price_band_anchor = float(target.nightly_price)
+            # Do not anchor price-band to target.nightly_price in daily comps mode.
+            # Target PDP price can be promotional/base and become an overly-low anchor,
+            # which can incorrectly exclude almost all valid market comps.
+            # If no preferred-comp anchor is available, apply_price_band_filter()
+            # will derive a majority band from the comp pool itself.
             try:
                 pricing_pool, _pb_excluded, _pb_info = apply_price_band_filter(
                     pricing_pool_pre_band, price_band_anchor

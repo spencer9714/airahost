@@ -1,10 +1,10 @@
-"use client";
+﻿"use client";
 
 import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
 import type { AutoApplyPreviewResult } from "@/lib/autoApplyPreview";
 
-// ── Types ──────────────────────────────────────────────────────────────────
+// â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface NightApplyResult {
   date: string;
@@ -47,7 +47,7 @@ interface ManualApplyPanelProps {
   onBack: () => void;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function fmtDate(dateStr: string): string {
   try {
@@ -64,11 +64,11 @@ function fmtDate(dateStr: string): string {
 }
 
 function fmtPrice(n: number | null): string {
-  if (n == null) return "—";
+  if (n == null) return "â€”";
   return `$${n}`;
 }
 
-// ── Sub-components ─────────────────────────────────────────────────────────
+// â”€â”€ Sub-components â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function StubBanner({ note }: { note: string }) {
   return (
@@ -113,7 +113,7 @@ function ConfirmPhase({
 
   return (
     <>
-      {/* ── Summary stats ── */}
+      {/* â”€â”€ Summary stats â”€â”€ */}
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-xl border border-gray-100 bg-gray-50/60 px-4 py-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-foreground/35">
@@ -153,10 +153,10 @@ function ConfirmPhase({
             {preview.finalApplyPriceRange
               ? preview.finalApplyPriceRange.min === preview.finalApplyPriceRange.max
                 ? fmtPrice(preview.finalApplyPriceRange.min)
-                : `${fmtPrice(preview.finalApplyPriceRange.min)} – ${fmtPrice(
+                : `${fmtPrice(preview.finalApplyPriceRange.min)} â€“ ${fmtPrice(
                     preview.finalApplyPriceRange.max
                   )}`
-              : "—"}
+              : "â€”"}
           </p>
           {preview.nightsFloored > 0 && (
             <p className="mt-0.5 text-xs text-amber-600/70">
@@ -166,10 +166,10 @@ function ConfirmPhase({
         </div>
       </div>
 
-      {/* ── Stub mode banner ── */}
-      <StubBanner note="Airbnb sync is not yet enabled. Clicking 'Apply' will prepare a plan and record the run — no prices will actually change on your listing." />
+      {/* â”€â”€ Stub mode banner â”€â”€ */}
+      <StubBanner note="Airbnb sync is not yet enabled. Clicking 'Apply' will prepare a plan and record the run â€” no prices will actually change on your listing." />
 
-      {/* ── Included nights table ── */}
+      {/* â”€â”€ Included nights table â”€â”€ */}
       {includedNights.length > 0 && (
         <div>
           <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-foreground/35">
@@ -222,7 +222,7 @@ function ConfirmPhase({
         </div>
       )}
 
-      {/* ── Footer ── */}
+      {/* â”€â”€ Footer â”€â”€ */}
       <div className="flex items-center justify-between border-t border-gray-100 pt-4">
         <button
           type="button"
@@ -230,7 +230,7 @@ function ConfirmPhase({
           disabled={applying}
           className="text-sm font-medium text-foreground/40 transition-colors hover:text-foreground/70 disabled:opacity-40"
         >
-          ← Back to preview
+          â† Back to preview
         </button>
         <button
           type="button"
@@ -238,7 +238,7 @@ function ConfirmPhase({
           disabled={applying || includedNights.length === 0}
           className="rounded-xl bg-foreground px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-foreground/85 disabled:opacity-40"
         >
-          {applying ? "Preparing…" : `Apply ${includedNights.length} nights`}
+          {applying ? "Preparingâ€¦" : `Apply ${includedNights.length} nights`}
         </button>
       </div>
     </>
@@ -264,7 +264,7 @@ function ResultPhase({
 
   return (
     <>
-      {/* ── Summary stats ── */}
+      {/* â”€â”€ Summary stats â”€â”€ */}
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-xl border border-gray-100 bg-gray-50/60 px-4 py-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-foreground/35">
@@ -315,10 +315,10 @@ function ResultPhase({
         )}
       </div>
 
-      {/* ── Stub mode banner ── */}
+      {/* â”€â”€ Stub mode banner â”€â”€ */}
       <StubBanner note={executionModeNote} />
 
-      {/* ── Execution mode badge ── */}
+      {/* â”€â”€ Execution mode badge â”€â”€ */}
       <div className="flex items-center gap-2 rounded-xl border border-gray-100 bg-gray-50/60 px-4 py-2.5">
           <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400" />
           <p className="text-xs text-foreground/50">
@@ -328,12 +328,12 @@ function ResultPhase({
               : result.executionMode === "stub"
               ? "preview-only stub"
               : "queued job"}
-            {" · "}
+            {" Â· "}
             <span className="font-mono text-[10px] text-foreground/35">{result.runId.slice(0, 8)}</span>
           </p>
         </div>
 
-      {/* ── Per-night results ── */}
+      {/* â”€â”€ Per-night results â”€â”€ */}
       {successNights.length > 0 && (
         <div>
           <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-foreground/35">
@@ -376,21 +376,21 @@ function ResultPhase({
         </div>
       )}
 
-      {/* ── Footer ── */}
+      {/* â”€â”€ Footer â”€â”€ */}
       <div className="flex justify-end border-t border-gray-100 pt-4">
         <button
           type="button"
           onClick={onClose}
           className="rounded-xl bg-foreground px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-foreground/85"
         >
-          Done
+          Close
         </button>
       </div>
     </>
   );
 }
 
-// ── Main panel ─────────────────────────────────────────────────────────────
+// â”€â”€ Main panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function ManualApplyPanel({
   listingId,
@@ -445,14 +445,14 @@ export function ManualApplyPanel({
 
   const phaseTitle: Record<Phase, string> = {
     confirm: "Apply prices",
-    applying: "Applying…",
+    applying: "Applyingâ€¦",
     result: "Run complete",
   };
 
   const phaseSubtitle: Record<Phase, string> = {
-    confirm: "Manual apply · preview-only stub",
-    applying: "Preparing execution plan…",
-    result: "Airbnb sync not enabled — no prices changed",
+    confirm: "Manual apply Â· preview-only stub",
+    applying: "Preparing execution planâ€¦",
+    result: "Airbnb sync not enabled â€” no prices changed",
   };
 
   return createPortal(
@@ -472,7 +472,7 @@ export function ManualApplyPanel({
         aria-modal="true"
         aria-labelledby="ma-title"
       >
-        {/* ── Header ── */}
+        {/* â”€â”€ Header â”€â”€ */}
         <div className="flex items-start justify-between border-b border-gray-100 px-6 pt-6 pb-4">
           <div className="mr-6">
             <div className="flex items-center gap-2">
@@ -510,7 +510,7 @@ export function ManualApplyPanel({
           )}
         </div>
 
-        {/* ── Body ── */}
+        {/* â”€â”€ Body â”€â”€ */}
         <div className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
           {/* Error message (shown when execution fails) */}
           {errorMessage && (
@@ -520,9 +520,12 @@ export function ManualApplyPanel({
           )}
 
           {phase === "applying" ? (
-            <div className="flex flex-col items-center justify-center py-12 gap-3">
-              <div className="h-6 w-6 animate-spin rounded-full border-2 border-gray-200 border-t-foreground/60" />
-              <p className="text-sm text-foreground/45">Building execution plan…</p>
+            <div className="flex flex-col items-center justify-center rounded-xl border border-gray-100 bg-gray-50/70 py-14">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-gray-200 border-t-foreground/60" />
+              <p className="mt-4 text-sm font-medium text-foreground/70">Assigning prices...</p>
+              <p className="mt-1 text-xs text-foreground/45">
+                Please keep this window open until the run completes.
+              </p>
             </div>
           ) : phase === "result" && result ? (
             <ResultPhase result={result} onClose={onClose} />
@@ -541,3 +544,4 @@ export function ManualApplyPanel({
     document.body
   );
 }
+

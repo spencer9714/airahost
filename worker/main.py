@@ -1568,8 +1568,147 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     else:
                         logger.warning(
                             f"[{report_id}] URL scrape calendar build returned no valid prices; "
+                            "retrying with Playwright location-search daily comps"
+                        )
+                        try:
+                            daily_results_pw, transparent_result_pw = run_scrape(
+                                listing_url=listing_url,
+                                checkin=start_date,
+                                checkout=end_date,
+                                cdp_url=CDP_URL,
+                                max_scroll_rounds=MAX_SCROLL_ROUNDS,
+                                max_cards=MAX_CARDS,
+                                max_runtime_seconds=MAX_RUNTIME_SECONDS,
+                                rate_limit_seconds=RATE_LIMIT_SECONDS,
+                                cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                                preferred_comps=preferred_comps,
+                                target_lat=_job_target_lat,
+                                target_lng=_job_target_lng,
+                                max_radius_km=_job_radius_km,
+                                progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
+                                nightly_plan=_nightly_plan,
+                                fallback_attributes=attributes,
+                                fallback_address=address,
+                                force_playwright_daily_search=True,
+                            )
+                            valid_prices_pw = [r["median_price"] for r in daily_results_pw if r.get("median_price")]
+                            if daily_results_pw and valid_prices_pw:
+                                daily_results = daily_results_pw
+                                transparent_result = transparent_result_pw
+                                result_pw = _build_scrape_calendar(
+                                    daily_results, start_date, end_date, discount_policy, transparent_result,
+                                )
+                                if result_pw[0] is not None and result_pw[1] is not None:
+                                    summary, calendar = result_pw
+                                    finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                                        finalized_input_attributes, transparent_result
+                                    )
+                                    core_version = WORKER_VERSION + "+scrape_playwright_retry"
+                                    logger.info(
+                                        f"[{report_id}] URL scrape recovered via Playwright location-search daily retry"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[{report_id}] Playwright daily retry still returned no valid calendar; "
+                                        "trying target-listing-only fallback"
+                                    )
+                            else:
+                                logger.warning(
+                                    f"[{report_id}] Playwright daily retry returned no valid prices; "
+                                    "trying target-listing-only fallback"
+                                )
+                        except Exception as _pw_retry_exc:
+                            logger.warning(
+                                f"[{report_id}] Playwright daily retry failed ({_pw_retry_exc}); "
+                                "trying target-listing-only fallback"
+                            )
+                        if summary is not None and calendar is not None:
+                            pass
+                        else:
+                            fallback_daily = _build_target_listing_only_daily_results(
+                                listing_url=listing_url,
+                                start_date=start_date,
+                                end_date=end_date,
+                                minimum_booking_nights=minimum_booking_nights,
+                                report_id=report_id,
+                            )
+                            fallback_valid = [r["median_price"] for r in fallback_daily if r.get("median_price")]
+                            if not (fallback_daily and fallback_valid):
+                                _fail(
+                                    "Service is busy. Could not collect enough pricing data — please try again later.",
+                                    "Both comps scrape and target-listing fallback returned no valid prices",
+                                )
+                                return
+                            if not isinstance(transparent_result, dict):
+                                transparent_result = {}
+                            transparent_result.setdefault("debug", {})
+                            if isinstance(transparent_result.get("debug"), dict):
+                                transparent_result["debug"]["target_only_fallback"] = True
+                            result = _build_scrape_calendar(
+                                fallback_daily, start_date, end_date, discount_policy, transparent_result,
+                            )
+                            if result[0] is None or result[1] is None:
+                                _fail(
+                                    "Service is busy. Could not collect enough pricing data — please try again later.",
+                                    "Both comps scrape and target-listing fallback returned no valid prices",
+                                )
+                                return
+                            summary, calendar = result
+                            finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                                finalized_input_attributes, transparent_result
+                            )
+                            core_version = WORKER_VERSION + "+self_only"
+                else:
+                    scrape_err = ((transparent_result or {}).get("debug") or {}).get("error") or "No results"
+                    logger.warning(
+                        f"[{report_id}] URL scrape produced no daily results ({scrape_err}); "
+                        "retrying with Playwright location-search daily comps"
+                    )
+                    try:
+                        daily_results_pw, transparent_result_pw = run_scrape(
+                            listing_url=listing_url,
+                            checkin=start_date,
+                            checkout=end_date,
+                            cdp_url=CDP_URL,
+                            max_scroll_rounds=MAX_SCROLL_ROUNDS,
+                            max_cards=MAX_CARDS,
+                            max_runtime_seconds=MAX_RUNTIME_SECONDS,
+                            rate_limit_seconds=RATE_LIMIT_SECONDS,
+                            cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
+                            preferred_comps=preferred_comps,
+                            target_lat=_job_target_lat,
+                            target_lng=_job_target_lng,
+                            max_radius_km=_job_radius_km,
+                            progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
+                            nightly_plan=_nightly_plan,
+                            fallback_attributes=attributes,
+                            fallback_address=address,
+                            force_playwright_daily_search=True,
+                        )
+                        valid_prices_pw = [r["median_price"] for r in daily_results_pw if r.get("median_price")]
+                        if daily_results_pw and valid_prices_pw:
+                            daily_results = daily_results_pw
+                            transparent_result = transparent_result_pw
+                            result_pw = _build_scrape_calendar(
+                                daily_results, start_date, end_date, discount_policy, transparent_result,
+                            )
+                            if result_pw[0] is not None and result_pw[1] is not None:
+                                summary, calendar = result_pw
+                                finalized_input_attributes = _merge_extracted_specs_into_attributes(
+                                    finalized_input_attributes, transparent_result
+                                )
+                                core_version = WORKER_VERSION + "+scrape_playwright_retry"
+                                logger.info(
+                                    f"[{report_id}] URL scrape recovered via Playwright location-search daily retry"
+                                )
+                    except Exception as _pw_retry_exc:
+                        logger.warning(
+                            f"[{report_id}] Playwright daily retry failed ({_pw_retry_exc}); "
                             "trying target-listing-only fallback"
                         )
+                    if summary is not None and calendar is not None:
+                        pass
+                    else:
                         fallback_daily = _build_target_listing_only_daily_results(
                             listing_url=listing_url,
                             start_date=start_date,
@@ -1580,8 +1719,8 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                         fallback_valid = [r["median_price"] for r in fallback_daily if r.get("median_price")]
                         if not (fallback_daily and fallback_valid):
                             _fail(
-                                "Service is busy. Could not collect enough pricing data — please try again later.",
-                                "Both comps scrape and target-listing fallback returned no valid prices",
+                                "Service is busy. Could not reach Airbnb data — please try again later.",
+                                f"Scrape and target-listing fallback produced no valid prices: {scrape_err}",
                             )
                             return
                         if not isinstance(transparent_result, dict):
@@ -1589,13 +1728,14 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                         transparent_result.setdefault("debug", {})
                         if isinstance(transparent_result.get("debug"), dict):
                             transparent_result["debug"]["target_only_fallback"] = True
+                            transparent_result["debug"]["fallback_reason"] = f"no_comp_results: {scrape_err}"
                         result = _build_scrape_calendar(
                             fallback_daily, start_date, end_date, discount_policy, transparent_result,
                         )
                         if result[0] is None or result[1] is None:
                             _fail(
-                                "Service is busy. Could not collect enough pricing data — please try again later.",
-                                "Both comps scrape and target-listing fallback returned no valid prices",
+                                "Service is busy. Could not reach Airbnb data — please try again later.",
+                                f"Scrape and target-listing fallback produced no valid prices: {scrape_err}",
                             )
                             return
                         summary, calendar = result
@@ -1603,46 +1743,6 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                             finalized_input_attributes, transparent_result
                         )
                         core_version = WORKER_VERSION + "+self_only"
-                else:
-                    scrape_err = ((transparent_result or {}).get("debug") or {}).get("error") or "No results"
-                    logger.warning(
-                        f"[{report_id}] URL scrape produced no daily results ({scrape_err}); "
-                        "trying target-listing-only fallback"
-                    )
-                    fallback_daily = _build_target_listing_only_daily_results(
-                        listing_url=listing_url,
-                        start_date=start_date,
-                        end_date=end_date,
-                        minimum_booking_nights=minimum_booking_nights,
-                        report_id=report_id,
-                    )
-                    fallback_valid = [r["median_price"] for r in fallback_daily if r.get("median_price")]
-                    if not (fallback_daily and fallback_valid):
-                        _fail(
-                            "Service is busy. Could not reach Airbnb data — please try again later.",
-                            f"Scrape and target-listing fallback produced no valid prices: {scrape_err}",
-                        )
-                        return
-                    if not isinstance(transparent_result, dict):
-                        transparent_result = {}
-                    transparent_result.setdefault("debug", {})
-                    if isinstance(transparent_result.get("debug"), dict):
-                        transparent_result["debug"]["target_only_fallback"] = True
-                        transparent_result["debug"]["fallback_reason"] = f"no_comp_results: {scrape_err}"
-                    result = _build_scrape_calendar(
-                        fallback_daily, start_date, end_date, discount_policy, transparent_result,
-                    )
-                    if result[0] is None or result[1] is None:
-                        _fail(
-                            "Service is busy. Could not reach Airbnb data — please try again later.",
-                            f"Scrape and target-listing fallback produced no valid prices: {scrape_err}",
-                        )
-                        return
-                    summary, calendar = result
-                    finalized_input_attributes = _merge_extracted_specs_into_attributes(
-                        finalized_input_attributes, transparent_result
-                    )
-                    core_version = WORKER_VERSION + "+self_only"
 
             except ValueError as exc:
                 logger.exception(f"[{report_id}] ValueError in URL mode")

@@ -319,30 +319,89 @@ def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str
     Returns (ListingSpec, extraction_warnings).
     """
     if hasattr(client, "get_listing_details"):
-        # Restore browser-HTML extraction path: open the listing page in Playwright
-        # and parse rendered DOM/JSON-LD instead of GraphQL response payloads.
-        try:
-            if hasattr(client, "_get_playwright_scraper"):
+        warnings: List[str] = []
+        listing_id = extract_listing_id_from_url(listing_url)
+        if not listing_id:
+            return (
+                ListingSpec(url=normalize_airbnb_url(listing_url)),
+                [f"Unable to parse listing_id from URL: {listing_url}"],
+            )
+
+        def _extract_via_browser_dom() -> Tuple[Optional[ListingSpec], List[str]]:
+            if not hasattr(client, "_get_playwright_scraper"):
+                return None, ["Browser DOM fallback unavailable: missing Playwright scraper bridge on client"]
+            try:
                 scraper = client._get_playwright_scraper()
-                context = scraper._get_thread_context()
+                context = scraper._run_async(
+                    scraper._get_thread_context(),
+                    op_name="target_dom_get_context",
+                )
                 scraper._sync_session_cookies_into_context(context)
-                page = scraper._open_capped_page(context)
+                page = scraper._run_async(
+                    scraper._open_capped_page(context),
+                    op_name="target_dom_open_page",
+                )
                 try:
-                    return extract_target_spec(page, listing_url)
+                    spec, dom_warnings = extract_target_spec(page, listing_url)
                 finally:
                     try:
-                        scraper._sync_context_cookies_into_session(context)
+                        scraper._run_async(
+                            scraper._sync_context_cookies_into_session(context),
+                            op_name="target_dom_sync_cookies",
+                        )
                     except Exception:
                         pass
-                    scraper._close_capped_page(page)
-            return (
-                ListingSpec(url=normalize_airbnb_url(listing_url)),
-                ["Browser HTML extraction failed: missing Playwright scraper bridge on client"],
-            )
+                    scraper._run_async(
+                        scraper._close_capped_page(page),
+                        op_name="target_dom_close_page",
+                    )
+                return spec, dom_warnings
+            except Exception as exc:
+                return None, [f"Browser DOM fallback failed: {exc}"]
+
+        # Apr-20 behavior: use PDP payload parsing as primary extraction source.
+        try:
+            pdp_data = client.get_listing_details(str(listing_id))
+            parsed = parse_pdp_response(pdp_data, str(listing_id), safe_domain_base(listing_url))
+            spec = map_pdp_to_listing_spec(parsed, listing_url)
+            if spec.accommodates is None:
+                warnings.append("Missing accommodates from PDP response")
+            if spec.bedrooms is None:
+                warnings.append("Missing bedrooms from PDP response")
+            if spec.beds is None:
+                warnings.append("Missing beds from PDP response")
+            if spec.baths is None:
+                warnings.append("Missing baths from PDP response")
+            if not spec.property_type:
+                warnings.append("Missing property_type from PDP response")
+            if not spec.location and spec.lat is None and spec.lng is None:
+                dom_spec, dom_warnings = _extract_via_browser_dom()
+                warnings.extend(dom_warnings)
+                if isinstance(dom_spec, ListingSpec):
+                    if dom_spec.title and not spec.title:
+                        spec.title = dom_spec.title
+                    if dom_spec.location and not spec.location:
+                        spec.location = dom_spec.location
+                    if dom_spec.city and not spec.city:
+                        spec.city = dom_spec.city
+                    if dom_spec.state and not spec.state:
+                        spec.state = dom_spec.state
+                    if dom_spec.country and not spec.country:
+                        spec.country = dom_spec.country
+                    if spec.lat is None and isinstance(dom_spec.lat, (int, float)):
+                        spec.lat = float(dom_spec.lat)
+                    if spec.lng is None and isinstance(dom_spec.lng, (int, float)):
+                        spec.lng = float(dom_spec.lng)
+            return spec, warnings
         except Exception as exc:
+            warnings.append(f"PDP extraction failed: {exc}")
+            dom_spec, dom_warnings = _extract_via_browser_dom()
+            warnings.extend(dom_warnings)
+            if isinstance(dom_spec, ListingSpec):
+                return dom_spec, warnings
             return (
                 ListingSpec(url=normalize_airbnb_url(listing_url)),
-                [f"Browser HTML extraction failed: {exc}"],
+                warnings,
             )
 
     # Legacy DOM fallback
