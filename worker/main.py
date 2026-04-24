@@ -197,6 +197,26 @@ def _merge_extracted_specs_into_attributes(
         merged["bathrooms"] = float(specs["baths"])
     if isinstance(specs.get("beds"), int) and specs["beds"] > 0:
         merged["beds"] = specs["beds"]
+    if isinstance(specs.get("amenities"), list):
+        merged_amenities: list[str] = []
+        seen_amenities: set[str] = set()
+        existing_amenities = merged.get("amenities")
+        amenity_sources = [specs["amenities"]]
+        if isinstance(existing_amenities, list):
+            amenity_sources.append(existing_amenities)
+
+        for amenity_source in amenity_sources:
+            for item in amenity_source:
+                if not isinstance(item, str):
+                    continue
+                amenity = item.strip()
+                if not amenity or amenity in seen_amenities:
+                    continue
+                seen_amenities.add(amenity)
+                merged_amenities.append(amenity)
+
+        if merged_amenities:
+            merged["amenities"] = merged_amenities
 
     return merged
 
