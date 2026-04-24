@@ -2278,7 +2278,12 @@ CREATE INDEX idx_reports_lane_env_status_created
 <section id="s29">
 <h2>29. 特徵工程</h2>
 
-<p>特徵建構由 <code>ml/model.py::_clean_training_frame()</code> 與 <code>_feature_matrix()</code> 負責。最終特徵矩陣分三類：</p>
+<p>目前正式使用的 ML 特徵工程實作位於 <code>ml_sidecar/</code>。特徵建構由 <code>ml_sidecar/model.py::_clean_training_frame()</code> 與 <code>_feature_matrix()</code> 負責；amenities 的 canonical normalize 則先由 <code>ml_sidecar/data.py::_normalize_amenities()</code> 完成，再進入特徵矩陣。</p>
+
+<div class="callout callout-current">
+  <strong>Current Behavior — amenities 先做 canonical normalize</strong>
+  目前會先把 UI、scraper 與人工輸入中的 amenities 別名統一成 canonical key，再去展開 ML 特徵。例如 <code>Air conditioning</code>、<code>A/C</code> → <code>ac</code>；<code>washing machine</code>、<code>laundry</code> → <code>washer</code>；<code>free parking on premises</code> → <code>free_parking</code>。同語意重複值會去重，避免同一設施被算兩次。
+</div>
 
 <div class="table-wrap">
   <table>
@@ -2287,24 +2292,17 @@ CREATE INDEX idx_reports_lane_env_status_created
     </thead>
     <tbody>
       <tr>
-        <td rowspan="11"><strong>數值特徵</strong><br><code>NUMERIC_FEATURES</code></td>
+        <td rowspan="4"><strong>數值特徵</strong><br><code>NUMERIC_FEATURES</code></td>
         <td><code>bedrooms, baths, accommodates, beds</code></td>
         <td>房源結構特徵</td>
       </tr>
-      <tr><td><code>similarity_score</code></td><td>競品與目標房源的相似度分數</td></tr>
-      <tr><td><code>pool_score, effective_rank_score</code></td><td>競品在 pool 中的排名分數</td></tr>
-      <tr><td><code>price_reliability_score</code></td><td>競品價格資料可靠度</td></tr>
-      <tr><td><code>rating, reviews, tenure_runs</code></td><td>競品房源品質與曝光歷史</td></tr>
-      <tr><td><code>day_of_week, lead_time_days, day_of_year, month</code></td><td>時間特徵（線性）</td></tr>
-      <tr><td><code>dow_sin, dow_cos</code></td><td>星期幾的 cyclical 正弦/餘弦編碼</td></tr>
-      <tr><td><code>doy_sin, doy_cos</code></td><td>年內第幾天的 cyclical 正弦/餘弦編碼</td></tr>
-      <tr><td><code>is_weekend</code></td><td>1 = 週五或週六（定義與 Live pipeline 一致）</td></tr>
-      <tr><td><code>is_holiday</code></td><td>1 = 公假日（需安裝 <code>holidays</code> 套件，國家由 <code>ML_HOLIDAY_COUNTRY</code> 決定）</td></tr>
-      <tr><td><code>lat, lng</code></td><td>地理位置座標</td></tr>
+      <tr><td><code>comps_used, lat, lng</code></td><td>市場密度與地理位置訊號</td></tr>
+      <tr><td><code>day_of_week, lead_time_days, day_of_year, month, dow_sin, dow_cos, doy_sin, doy_cos, is_weekend, is_holiday</code></td><td>時間與季節性特徵；訓練與推論共用同一套 <code>_compute_date_features()</code></td></tr>
+      <tr><td><code>amenity_weighted_score, priority_amenity_score, priority_amenity_ratio, laundry_amenity_count</code></td><td>由 amenities 產生的聚合特徵；其中 priority 欄位專門強化 <code>ac</code>、<code>kitchen</code>、<code>washer</code>、<code>dryer</code></td></tr>
       <tr>
         <td><strong>設施 one-hot</strong></td>
-        <td><code>has_wifi, has_pool, has_kitchen, has_washer, …</code>（共 12 項）</td>
-        <td>從 <code>saved_listings.input_attributes.amenities</code> 陣列展開</td>
+        <td><code>has_wifi, has_kitchen, has_washer, has_dryer, has_ac, …</code>（共 12 項）</td>
+        <td>由 <code>build_amenity_feature_map()</code> 統一產生；訓練資料與 target listing 推論時都走同一套邏輯</td>
       </tr>
       <tr>
         <td><strong>房型 one-hot</strong></td>
@@ -2316,54 +2314,65 @@ CREATE INDEX idx_reports_lane_env_status_created
 </div>
 
 <div class="callout callout-current">
-  <strong>Current Behavior — 目標欄位</strong>
-  目標欄位（y）為 <code>last_nightly_price</code>，代表競品的逐日掛牌價。訓練時取 <code>log1p(y)</code>，預測後再 <code>expm1()</code> 還原到原始價格空間。離群值（超出 ±3 個標準差）在 <code>_clean_training_frame()</code> 中被移除。
+  <strong>Current Behavior — priority amenities 會被額外強化</strong>
+  目前 <code>AMENITY_FEATURE_WEIGHTS</code> 會對特定 amenities 給更高訊號：<code>ac = 1.45</code>、<code>kitchen = 1.35</code>、<code>washer = 1.25</code>、<code>dryer = 1.25</code>；其餘現行 amenities 預設為 <code>1.0</code>。也就是說，具備冷氣、廚房與洗烘設備的房源，在 ML 模型中不只是「有這個欄位」，而是會被明確強化。
 </div>
 
-<div class="sources">來源：ml/model.py（NUMERIC_FEATURES, AMENITIES_LIST, _clean_training_frame, _feature_matrix）</div>
+<div class="callout callout-infer">
+  <strong>Inference — 目標欄位與推論對齊</strong>
+  目標欄位（y）目前是 <code>observed_market_price</code>。訓練時取 <code>log1p(y)</code>，預測後再用 <code>expm1()</code> 還原到原始價格空間。離群值（超出 ±3 個標準差）在 <code>_clean_training_frame()</code> 中移除；而推論端的 <code>ml_sidecar/batch_pipeline.py::_build_target_features()</code> 也會呼叫同一套 amenity feature map，確保訓練 / 推論欄位完全對齊。
+</div>
+
+<div class="sources">來源：ml_sidecar/data.py（_normalize_amenities, extract_listing_features）、ml_sidecar/model.py（NUMERIC_FEATURES, AMENITIES_LIST, AMENITY_FEATURE_WEIGHTS, build_amenity_feature_map, _clean_training_frame, _feature_matrix）、ml_sidecar/batch_pipeline.py</div>
 </section>
 
 <section id="s30">
 <h2>30. 模型訓練與驗證</h2>
 
-<p>訓練由 <code>ml/model.py::train_model()</code> 執行，使用 XGBoost（<code>reg:squarederror</code>）在 log1p(price) 空間中訓練。</p>
+<p>訓練由 <code>ml_sidecar/model.py::train_model()</code> 執行，使用 XGBoost（<code>reg:squarederror</code>）在 log1p(price) 空間中訓練。</p>
 
 <h3>樣本權重</h3>
-<p>每筆訓練行的 sample weight = <code>similarity_score × recency_decay × source_weight</code></p>
+<p>目前 <code>ml_sidecar</code> 的每筆訓練行 sample weight = <code>recency_decay × comps_used_weight × priority_amenity_weight</code></p>
 <ul>
-  <li><strong>Recency decay</strong>：<code>exp(−0.05 × days_old)</code>，半衰期約 14 天</li>
-  <li><strong>Source weight</strong>：pool_snapshot = 1.0、target_observation = 1.0、market_comp_observation = 1.0、report_calendar = 0.5</li>
-  <li>最終 weight 被 cap 在 5× 平均值，並正規化至 mean = 1</li>
+  <li><strong>Recency decay</strong>：<code>exp(−0.03 × days_old)</code>；越新的 observation 權重越高</li>
+  <li><strong>Comparable density weight</strong>：<code>1 + clip(comps_used, 0, 20) / 20</code>；可比房源越多，樣本權重越高</li>
+  <li><strong>Priority amenity weight</strong>：<code>1 + (priority_amenity_ratio × 0.20)</code>；冷氣 / 廚房 / 洗衣 / 烘衣訊號完整的樣本會被輕度上調</li>
+  <li>最終 weight 會先 cap 在 5× 平均值，再正規化至 mean = 1</li>
 </ul>
+
+<div class="callout callout-current">
+  <strong>Current Behavior — 舊版 similarity/source-weight 公式已不適用</strong>
+  舊版文件中的 <code>similarity_score × source_weight</code> 屬於早期 research / legacy pipeline 概念；目前正式 <code>ml_sidecar</code> 訓練不再依賴這組欄位，而是直接使用 observation-based feature matrix 與上列三段權重。
+</div>
 
 <h3>交叉驗證策略</h3>
 <div class="callout callout-current">
   <strong>Current Behavior — 兩種 CV 模式</strong>
-  訓練前先計算 <code>price_date</code> 的唯一日期數：<br>
-  <strong>≥ 6 個唯一日期</strong>：使用 <code>TimeSeriesSplit(n_splits=5)</code>，time-safe，指標可信。<br>
-  <strong>&lt; 6 個唯一日期</strong>：退回 <code>KFold(n_splits=5, shuffle=False)</code>（chronological），指標為近似值，模型輸出會印出 warning。
+  訓練前先計算 <code>price_date</code> 的唯一日期數與可用樣本量：<br>
+  <strong>日期多樣性足夠</strong>：使用 <code>TimeSeriesSplit</code>，最多 5 folds，確保驗證遵守時間順序。<br>
+  <strong>日期多樣性不足</strong>：退回 <code>KFold(shuffle=False)</code>，fold 數依樣本量自動落在 2–5 之間。
 </div>
 
 <div class="callout callout-risk">
   <strong>Risk — Degraded 驗證模式</strong>
-  當訓練資料日期多樣性不足（例如 legacy fallback 僅提供單日快照），CV 策略自動降級為 KFold。此時 MAE / Q2 可能<em>過度樂觀</em>，不應作為模型品質的強信號。<code>metrics.cv_time_safe = false</code> 是程式碼層級的警告旗標。
+  當訓練資料日期多樣性不足時，CV 策略會自動降級為 <code>KFold</code>。此時 MAE / Q2 / R2 仍可作為方向性指標，但不能等同於 time-safe 的 out-of-time 驗證。
 </div>
 
 <h3>XGBoost 超參數（目前固定值）</h3>
 <div class="formula">
   <span class="key">objective</span>       = reg:squarederror<br>
-  <span class="key">n_estimators</span>    = <span class="num">1000</span>  (+ early_stopping_rounds=<span class="num">50</span> 於 fold 訓練)<br>
-  <span class="key">max_depth</span>       = <span class="num">6</span><br>
+  <span class="key">n_estimators</span>    = <span class="num">600</span>  (+ early_stopping_rounds=<span class="num">50</span> 僅用於 fold 訓練)<br>
+  <span class="key">max_depth</span>       = <span class="num">5</span><br>
   <span class="key">learning_rate</span>   = <span class="num">0.05</span><br>
-  <span class="key">subsample</span>       = <span class="num">0.8</span><br>
-  <span class="key">colsample_bytree</span>= <span class="num">0.8</span><br>
+  <span class="key">subsample</span>       = <span class="num">0.85</span><br>
+  <span class="key">colsample_bytree</span>= <span class="num">0.85</span><br>
   <span class="key">tree_method</span>     = hist<br>
   <span class="comment"># 最終模型用全部訓練資料 fit，cross-val 結果只用於診斷</span>
 </div>
 
 <p>訓練結束後，模型用全部訓練資料做最終 fit，並輸出 feature importance、per-fold 指標，以及可解釋性相關產物。</p>
 
-<div class="sources">來源：ml/model.py（train_model）</div>
+<div class="sources">來源：ml_sidecar/model.py（train_model, build_amenity_feature_map）</div>
 </section>
 
 <section id="s31">

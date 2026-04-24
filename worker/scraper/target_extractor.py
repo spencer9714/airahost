@@ -101,7 +101,9 @@ AMENITY_HINTS = {
     "gym": ["gym", "fitness"],
     "bbq": ["bbq", "barbecue", "grill"],
     "fire_pit": ["fire pit"],
-    "pets_allowed": ["pets allowed", "pet-friendly", "pet friendly"],
+    "pets_allowed": ["pets allowed", "allows pets", "pet-friendly", "pet friendly"],
+    "waterfront": ["waterfront", "water front", "beachfront", "lakefront"],
+    "guest_favorite": ["guest favorite", "top guest favorite"],
 }
 
 
@@ -306,9 +308,196 @@ def map_pdp_to_listing_spec(parsed: Dict[str, Any], listing_url: str) -> Listing
     )
 
 
+class _AsyncLocatorSyncAdapter:
+    """Minimal sync-style wrapper around an async Playwright locator."""
+
+    def __init__(self, scraper: Any, locator: Any) -> None:
+        self._scraper = scraper
+        self._locator = locator
+
+    @property
+    def first(self) -> "_AsyncLocatorSyncAdapter":
+        return _AsyncLocatorSyncAdapter(self._scraper, self._locator.first)
+
+    def inner_text(self, timeout: Optional[int] = None) -> str:
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        return self._scraper._run_async(
+            self._locator.inner_text(**kwargs),
+            op_name="target_extractor.locator.inner_text",
+        )
+
+
+class _AsyncPageSyncAdapter:
+    """Minimal sync-style wrapper around an async Playwright page."""
+
+    def __init__(self, scraper: Any, page: Any) -> None:
+        self._scraper = scraper
+        self._page = page
+
+    def goto(self, url: str, **kwargs: Any) -> Any:
+        return self._scraper._run_async(
+            self._page.goto(url, **kwargs),
+            op_name="target_extractor.page.goto",
+        )
+
+    def wait_for_timeout(self, timeout: int) -> Any:
+        return self._scraper._run_async(
+            self._page.wait_for_timeout(timeout),
+            op_name="target_extractor.page.wait_for_timeout",
+        )
+
+    def evaluate(self, expression: str) -> Any:
+        return self._scraper._run_async(
+            self._page.evaluate(expression),
+            op_name="target_extractor.page.evaluate",
+        )
+
+    def inner_text(self, selector: str, timeout: Optional[int] = None) -> str:
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        return self._scraper._run_async(
+            self._page.inner_text(selector, **kwargs),
+            op_name="target_extractor.page.inner_text",
+        )
+
+    def locator(self, selector: str) -> _AsyncLocatorSyncAdapter:
+        return _AsyncLocatorSyncAdapter(self._scraper, self._page.locator(selector))
+
+
+def _extract_target_spec_via_playwright_bridge(client: Any, listing_url: str) -> Tuple[Optional[ListingSpec], List[str]]:
+    """
+    Open the listing page through the async Playwright scraper, then expose a
+    tiny sync-style adapter so the legacy DOM extractor can still run.
+    """
+    if not hasattr(client, "_get_playwright_scraper"):
+        return None, ["Browser HTML extraction failed: missing Playwright scraper bridge on client"]
+
+    warnings: List[str] = []
+    scraper = client._get_playwright_scraper()
+    context = None
+    page = None
+
+    try:
+        context = scraper._run_async(
+            scraper._get_thread_context(),
+            op_name="target_extractor.get_thread_context",
+        )
+        scraper._sync_session_cookies_into_context(context)
+        page = scraper._run_async(
+            scraper._open_capped_page(context),
+            op_name="target_extractor.open_capped_page",
+        )
+        return extract_target_spec(_AsyncPageSyncAdapter(scraper, page), listing_url)
+    except Exception as exc:
+        return None, [f"Browser HTML extraction failed: {exc}"]
+    finally:
+        if context is not None:
+            try:
+                scraper._run_async(
+                    scraper._sync_context_cookies_into_session(context),
+                    op_name="target_extractor.sync_context_cookies",
+                )
+                scraper._save_cached_state()
+            except Exception:
+                pass
+        if page is not None:
+            try:
+                scraper._run_async(
+                    scraper._close_capped_page(page),
+                    op_name="target_extractor.close_capped_page",
+                )
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------------------
 # Page-level extraction
 # ---------------------------------------------------------------------------
+
+
+def _listing_spec_has_usable_fields(spec: ListingSpec) -> bool:
+    return any(
+        [
+            spec.title,
+            spec.location,
+            spec.property_type,
+            spec.accommodates is not None,
+            spec.bedrooms is not None,
+            spec.baths is not None,
+            bool(spec.amenities),
+        ]
+    )
+
+
+def _map_client_pdp_payload_to_spec(
+    payload: Dict[str, Any],
+    listing_id: str,
+    listing_url: str,
+) -> ListingSpec:
+    parsed = parse_pdp_response(
+        payload,
+        str(listing_id),
+        safe_domain_base(listing_url),
+    )
+    return map_pdp_to_listing_spec(parsed, listing_url)
+
+
+def _extract_target_spec_via_client_payloads(
+    client: Any,
+    listing_url: str,
+    listing_id: str,
+) -> Tuple[Optional[ListingSpec], List[str]]:
+    payload_warnings: List[str] = []
+    config = getattr(client, "config", {}) or {}
+    effective_checkin = clean(str(config.get("CHECKIN") or ""))
+    effective_checkout = clean(str(config.get("CHECKOUT") or ""))
+    try:
+        effective_adults = max(1, int(config.get("ADULTS", 1) or 1))
+    except Exception:
+        effective_adults = 1
+
+    deepbnb_scraper = getattr(client, "deepbnb_scraper", None)
+    if deepbnb_scraper is not None and effective_checkin and effective_checkout:
+        try:
+            spec = _map_client_pdp_payload_to_spec(
+                deepbnb_scraper.get_listing_details(
+                    str(listing_id),
+                    checkin=effective_checkin,
+                    checkout=effective_checkout,
+                    adults=effective_adults,
+                ),
+                listing_id,
+                listing_url,
+            )
+            if _listing_spec_has_usable_fields(spec):
+                return spec, payload_warnings
+            payload_warnings.append(
+                "Deepbnb PDP payload extraction returned no usable fields; trying browser PDP payload"
+            )
+        except Exception as exc:
+            payload_warnings.append(f"Deepbnb PDP payload extraction failed: {exc}")
+
+    client_payload_kwargs: Dict[str, Any] = {}
+    if effective_checkin:
+        client_payload_kwargs["checkin"] = effective_checkin
+    if effective_checkout:
+        client_payload_kwargs["checkout"] = effective_checkout
+    client_payload_kwargs["adults"] = effective_adults
+
+    try:
+        spec = _map_client_pdp_payload_to_spec(
+            client.get_listing_details(str(listing_id), **client_payload_kwargs),
+            listing_id,
+            listing_url,
+        )
+        if _listing_spec_has_usable_fields(spec):
+            return spec, payload_warnings
+        payload_warnings.append(
+            "PDP payload extraction returned no usable fields; falling back to browser HTML extraction"
+        )
+    except Exception as exc:
+        payload_warnings.append(f"PDP payload extraction failed: {exc}")
+
+    return None, payload_warnings
 
 
 def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str]]:

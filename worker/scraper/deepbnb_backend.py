@@ -18,6 +18,17 @@ from worker.scraper.stayspdp_template import HARDCODED_STAYS_PDP_TEMPLATE
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_STAYS_PDP_SECTION_IDS = [
+    "BOOK_IT_FLOATING_FOOTER",
+    "BOOK_IT_SIDEBAR",
+    "BOOK_IT_NAV",
+    "OVERVIEW_DEFAULT_V2",
+    "GUEST_FAVORITE_BANNER",
+    "HIGHLIGHTS_DEFAULT",
+    "AMENITIES_DEFAULT",
+    "POLICIES_DEFAULT",
+]
+
 
 class DeepBnbBackend:
     """
@@ -241,11 +252,7 @@ class DeepBnbBackend:
                     "pdpSectionsRequest": {
                         "adults": "1",
                         "layouts": ["SIDEBAR", "SINGLE_COLUMN"],
-                        "sectionIds": [
-                            "BOOK_IT_FLOATING_FOOTER",
-                            "BOOK_IT_SIDEBAR",
-                            "BOOK_IT_NAV",
-                        ],
+                        "sectionIds": list(_DEFAULT_STAYS_PDP_SECTION_IDS),
                         "checkIn": "",
                         "checkOut": "",
                     },
@@ -270,6 +277,7 @@ class DeepBnbBackend:
             pdp_req["adults"] = str(adults)
             pdp_req["checkIn"] = checkin
             pdp_req["checkOut"] = checkout
+            pdp_req["sectionIds"] = list(_DEFAULT_STAYS_PDP_SECTION_IDS)
 
         date_range = vars_obj.setdefault("dateRange", {})
         if isinstance(date_range, dict):

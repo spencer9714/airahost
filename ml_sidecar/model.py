@@ -22,9 +22,48 @@ AMENITIES_LIST = [
     "pool",
     "hot_tub",
     "free_parking",
+    "pets_allowed",
+    "waterfront",
+    "guest_favorite",
     "ev_charger",
     "gym",
     "bbq",
+]
+
+# These weights let us give extra ML signal to the amenities the product cares
+# about most when forecasting price. The strongest emphasis is on A/C,
+# kitchen, and in-unit laundry coverage.
+AMENITY_FEATURE_WEIGHTS: Dict[str, float] = {
+    "wifi": 1.0,
+    "kitchen": 1.35,
+    "washer": 1.25,
+    "dryer": 1.25,
+    "ac": 1.45,
+    "heating": 1.0,
+    "pool": 1.0,
+    "hot_tub": 1.0,
+    "free_parking": 1.0,
+    "pets_allowed": 1.0,
+    "waterfront": 1.0,
+    "guest_favorite": 1.0,
+    "ev_charger": 1.0,
+    "gym": 1.0,
+    "bbq": 1.0,
+}
+AMENITY_SIGNAL_ALIASES: Dict[str, Tuple[str, ...]] = {
+    # Airbnb exposes several water-adjacent badges. Group them into one
+    # waterfront signal so older saved attrs still activate the model feature.
+    "waterfront": ("waterfront", "lake_access", "beach_access"),
+}
+PRIORITY_AMENITY_FEATURES = ("ac", "kitchen", "washer", "dryer")
+PRIORITY_AMENITY_SCORE_MAX = float(
+    sum(AMENITY_FEATURE_WEIGHTS[name] for name in PRIORITY_AMENITY_FEATURES)
+)
+AMENITY_DERIVED_FEATURES = [
+    "amenity_weighted_score",
+    "priority_amenity_score",
+    "priority_amenity_ratio",
+    "laundry_amenity_count",
 ]
 
 NUMERIC_FEATURES = [
@@ -45,7 +84,7 @@ NUMERIC_FEATURES = [
     "doy_sin",
     "doy_cos",
     "month",
-] + [f"has_{amenity}" for amenity in AMENITIES_LIST]
+] + [f"has_{amenity}" for amenity in AMENITIES_LIST] + AMENITY_DERIVED_FEATURES
 
 CATEGORICAL_FEATURE = "property_type"
 
@@ -67,6 +106,16 @@ FEATURE_DESCRIPTIONS: Dict[str, str] = {
     "doy_sin": "Cyclical sine encoding of the day of year.",
     "doy_cos": "Cyclical cosine encoding of the day of year.",
     "month": "Stay-date month index.",
+    "amenity_weighted_score": (
+        "Hand-weighted amenity score that emphasizes kitchen, A/C, washer, and dryer."
+    ),
+    "priority_amenity_score": (
+        "Focused weighted score for the priority amenities: A/C, kitchen, washer, and dryer."
+    ),
+    "priority_amenity_ratio": (
+        "Normalized 0-1 coverage ratio for the priority amenities: A/C, kitchen, washer, and dryer."
+    ),
+    "laundry_amenity_count": "Count of laundry amenities present (washer + dryer).",
     "property_type": "Saved listing property type, one-hot encoded.",
 }
 
@@ -75,6 +124,62 @@ def _safe_quantile(values: list[float], q: float) -> float:
     if not values:
         return 0.0
     return float(np.quantile(np.array(values, dtype=float), q))
+
+
+def _normalize_amenity_names(value: Any) -> set[str]:
+    if not isinstance(value, (list, tuple, set)):
+        return set()
+
+    normalized: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = item.strip().casefold()
+        if text:
+            normalized.add(text)
+    return normalized
+
+
+def _has_amenity_signal(amenity_names: set[str], amenity: str) -> bool:
+    return any(
+        alias in amenity_names
+        for alias in AMENITY_SIGNAL_ALIASES.get(amenity, (amenity,))
+    )
+
+
+def build_amenity_feature_map(value: Any) -> Dict[str, float]:
+    amenity_names = _normalize_amenity_names(value)
+    feature_map: Dict[str, float] = {
+        f"has_{amenity}": 1.0 if _has_amenity_signal(amenity_names, amenity) else 0.0
+        for amenity in AMENITIES_LIST
+    }
+
+    amenity_weighted_score = sum(
+        AMENITY_FEATURE_WEIGHTS[amenity]
+        for amenity in AMENITIES_LIST
+        if _has_amenity_signal(amenity_names, amenity)
+    )
+    priority_amenity_score = sum(
+        AMENITY_FEATURE_WEIGHTS[amenity]
+        for amenity in PRIORITY_AMENITY_FEATURES
+        if amenity in amenity_names
+    )
+
+    feature_map.update(
+        {
+            "amenity_weighted_score": float(amenity_weighted_score),
+            "priority_amenity_score": float(priority_amenity_score),
+            "priority_amenity_ratio": (
+                float(priority_amenity_score / PRIORITY_AMENITY_SCORE_MAX)
+                if PRIORITY_AMENITY_SCORE_MAX > 0
+                else 0.0
+            ),
+            "laundry_amenity_count": float(
+                int("washer" in amenity_names) + int("dryer" in amenity_names)
+            ),
+        }
+    )
+    return feature_map
 
 
 def _clean_training_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -97,13 +202,11 @@ def _clean_training_frame(df: pd.DataFrame) -> pd.DataFrame:
         ].copy()
 
     if "amenities" in cleaned.columns:
-        for amenity in AMENITIES_LIST:
-            feature_name = f"has_{amenity}"
-            cleaned[feature_name] = cleaned["amenities"].apply(
-                lambda value: 1.0
-                if isinstance(value, list) and amenity in value
-                else 0.0
-            )
+        amenity_features = pd.DataFrame(
+            cleaned["amenities"].apply(build_amenity_feature_map).tolist(),
+            index=cleaned.index,
+        )
+        cleaned = pd.concat([cleaned, amenity_features], axis=1)
 
     for column in NUMERIC_FEATURES:
         if column not in cleaned.columns:
@@ -156,6 +259,10 @@ def build_feature_description_df(feature_columns: List[str]) -> pd.DataFrame:
             description = "Observed market target price used for supervised training."
         elif column in FEATURE_DESCRIPTIONS:
             description = FEATURE_DESCRIPTIONS[column]
+        elif column.startswith("has_"):
+            description = (
+                f"Binary amenity flag for '{column.removeprefix('has_').replace('_', ' ')}'."
+            )
         elif column.startswith(prefix):
             description = f"One-hot encoded property type for '{column[len(prefix):]}'."
         else:
@@ -201,7 +308,17 @@ def train_model(df: pd.DataFrame) -> Tuple[XGBRegressor, List[str], pd.Series, D
 
     comp_signal = cleaned.get("comps_used", pd.Series(0.0, index=cleaned.index))
     comp_weights = 1.0 + np.clip(comp_signal.to_numpy(dtype=float), 0.0, 20.0) / 20.0
-    weights = recency_weights * comp_weights
+    priority_signal = cleaned.get(
+        "priority_amenity_ratio",
+        pd.Series(0.0, index=cleaned.index),
+    )
+    priority_weights = 1.0 + (
+        np.clip(priority_signal.to_numpy(dtype=float), 0.0, 1.0) * 0.20
+    )
+
+    weights = recency_weights * comp_weights * priority_weights
+    if weights.size > 0:
+        weights = np.clip(weights, 0.0, np.mean(weights) * 5.0)
     weights = weights / weights.mean()
 
     base_params = {
