@@ -296,6 +296,7 @@
     <a href="#s33">33. 回測與評估</a>
     <a href="#s34">34. 觀察資料與 ML 的關係</a>
     <a href="#s35">35. 現有限制與未來勾點</a>
+    <a href="#s36">36. ML Runtime 與前端整合</a>
   </nav>
 </aside>
 
@@ -305,7 +306,7 @@
 <main class="main-content">
 
 <h1>AiraHost — 系統設計與定價架構</h1>
-<p style="color:var(--muted);font-size:.9rem;margin-bottom:0">內部工程參考文件 · 反映目前程式碼庫狀態 · 2025 年 4 月</p>
+<p style="color:var(--muted);font-size:.9rem;margin-bottom:0">內部工程參考文件 · 反映目前程式碼庫狀態 · 2026-04-21 更新</p>
 
 <!-- Summary card -->
 <div class="summary-card">
@@ -2090,13 +2091,13 @@ CREATE INDEX idx_reports_lane_env_status_created
 <h2>26. ML 總覽</h2>
 
 <div class="callout callout-infer">
-  <strong>Inference — 這是什麼？</strong>
-  <code>ml/</code> 是 repo 內獨立的 Python ML pipeline，負責從 Supabase 拉取歷史觀察資料、訓練 XGBoost 定價模型，並輸出未來 30 天的預測建議價格。它是一個<em>批次 / 研究</em>子系統，與主線上產品流程平行運作。
+  <strong>Inference — 目前 ML 已有兩層角色</strong>
+  <code>ml/</code> 仍然保留本地 batch / research pipeline，但現在也被 Worker runtime 直接 import。也就是說，同一套模型同時服務兩個場景：本地 full pipeline 產出驗證 artifact；正式 <code>live_analysis</code> report 在 ready 前可選擇套用 ML overlay，覆寫 <code>recommendedDailyPrice</code>。
 </div>
 
-<div class="callout callout-risk">
-  <strong>Risk — ML 目前不是主線定價</strong>
-  主線上線定價路徑仍是 Worker 的 <code>live_analysis</code> pipeline（<code>worker/main.py</code>）。ML 子系統的預測結果目前寫入本地 <code>ml/reports/</code> 檔案，<strong>不會自動覆蓋</strong> <code>pricing_reports</code> 的建議價格。儀表板顯示的建議價格來自 Worker，而非 ML。
+<div class="callout callout-current">
+  <strong>Current Behavior — ML 已能進入正式 report</strong>
+  主線上線價格欄位仍是 <code>CalendarDay.recommendedDailyPrice</code>，但 Worker 會在 fresh path 與 cache-hit path 嘗試套用 ML overlay。成功時會同步寫入 <code>summary.mlPricing</code>，並把 <code>coreVersion</code> 補上 <code>+ml</code>；失敗時則保留 market-engine 價格。
 </div>
 
 <div class="diagram-box">
@@ -2457,9 +2458,9 @@ CREATE INDEX idx_reports_lane_env_status_created
   <code>prediction_explanations.csv</code> 的 contribution 值在 <strong>log1p(price) 空間</strong>，正值表示推高價格、負值表示壓低價格。<code>contribution_multiplier = exp(contribution_log)</code> 可作為相對乘數閱讀。
 </div>
 
-<div class="callout callout-infer">
-  <strong>Inference — 前端整合方式</strong>
-  前端不可直接 import Python module。推薦做法：Next.js API route 用 subprocess 觸發 <code>python -m ml.batch_pipeline</code>，完成後讀取 <code>batch_pipeline_result.json</code> manifest 再回傳給前端。
+<div class="callout callout-current">
+  <strong>Current Behavior — 前端整合已分成兩層</strong>
+  Worker 正式 report 只會把當次 runtime metadata 寫進 <code>summary.mlPricing</code>；較完整的 batch / backtest 驗證則仍寫在 <code>full_pipeline_result.json</code>、<code>backtest_*.csv</code> 等本地 artifact，並透過 API route 讀進 share report page 的 <code>MlInsightsCard</code>。
 </div>
 
 <div class="sources">來源：ml/README.md（第 6、10 節）, ml/batch_pipeline.py</div>
@@ -2604,8 +2605,8 @@ CREATE INDEX idx_reports_lane_env_status_created
 </div>
 
 <div class="callout callout-risk">
-  <strong>Risk — ML 不驅動儀表板</strong>
-  ML 的 30 天預測目前寫至本地 <code>ml/reports/</code>，未整合至 <code>pricing_reports</code> 或任何 UI 路徑。<strong>使用者在儀表板看到的建議價格來自 Worker live_analysis，不是 ML 預測。</strong>這一點需在未來整合前明確溝通，避免預期錯位。
+  <strong>Risk — runtime metadata 與本地 validation 仍是兩層</strong>
+  正式 report 目前只會帶當次執行的 <code>summary.mlPricing</code>；較完整的 batch / holdout / time-split 驗證仍是本地 <code>ml/reports/</code> artifact。也就是說，badge 顯示的是這次 report 有沒有套到 ML，<strong>不等於</strong> 所有畫面都能共享同一份完整驗證 manifest。
 </div>
 
 <div class="callout callout-risk">
@@ -2626,12 +2627,8 @@ CREATE INDEX idx_reports_lane_env_status_created
 </div>
 
 <div class="callout callout-reserved">
-  <strong>Reserved / Future — ML 預測整合至定價合約</strong>
-  當 ML 品質達到上線標準後，可以透過以下路徑整合：<br>
-  ① Worker 讀取 <code>batch_pipeline_result.json</code> 作為輔助訊號<br>
-  ② API route 觸發 ML batch 並將結果寫入新的 <code>ml_pricing_suggestions</code> 表<br>
-  ③ UI 在儀表板增加「ML 預測」對比欄，與現有 Worker 建議並排<br>
-  整合前必須確保 <code>report-contract.md</code> 的定義先更新，避免與 <code>recommendedDailyPrice</code> 混淆。
+  <strong>Reserved / Future — validation manifest 資料庫化</strong>
+  較合理的下一步不是再做一套新的 pricing contract，而是把 <code>full_pipeline_result.json</code> 類型的 validation manifest 寫入資料庫或共享 artifact storage。這樣 <code>MlInsightsCard</code> 就不需要只依賴本地工作目錄，也能讓所有 report 讀到一致的驗證快照。
 </div>
 
 <div class="callout callout-reserved">
@@ -2642,6 +2639,67 @@ CREATE INDEX idx_reports_lane_env_status_created
 <div class="sources">來源：ml/data.py, ml/model.py, worker/core/nightly_strategy.py, worker/core/report_policy.py, docs/report-contract.md</div>
 </section>
 
+
+<section id="s36">
+<h2>36. ML Runtime 與前端整合</h2>
+
+<p>這一輪改動不是單純把模型訓練起來，而是把「可重訓的本地 pipeline」、「Worker runtime 套用」、「API payload 補強」與「前端來源提示」接成同一條可驗證路徑。核心原則有兩個：正式 UI 合約不改，仍然只讀 <code>recommendedDailyPrice</code>；ML 是否真的生效，則由 <code>summary.mlPricing</code> 與 <code>coreVersion += "+ml"</code> 額外標記。</p>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>階段</th><th>本次主要改動</th><th>目的</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>訓練資料重整</td><td><code>ml/data.py</code> 先走 normalized observation tables，預設改成 <code>global</code> scope，gate 不過才退回 <code>pool_snapshot</code> / <code>report_calendar</code></td><td>讓模型先學市場共識，同時保留冷啟動 fallback</td></tr>
+      <tr><td>本地驗證 pipeline</td><td><code>ml/batch_pipeline.py</code> 與 <code>ml/full_pipeline.py</code> 統一輸出 <code>saved_model.json</code>、<code>metrics_latest.csv</code>、<code>prediction_explanations.csv</code>、<code>full_pipeline_result.json</code></td><td>把訓練、batch forecast、holdout backtest、time-split backtest 收斂成可重現 artifact</td></tr>
+      <tr><td>Worker runtime overlay</td><td><code>worker/main.py</code> 新增 <code>_should_apply_ml_pricing()</code>、<code>_run_ml_pricing_forecast()</code>、<code>_apply_ml_pricing_overlay()</code>，fresh path 與 cache-hit path 都會在寫回前嘗試覆寫價格</td><td>讓正式 report 的價格可以直接來自 ML，而不是只停留在離線驗證</td></tr>
+      <tr><td>API 橋接</td><td><code>/api/reports/[id]</code> 與 <code>/api/r/[shareId]</code> 在原 report payload 上附加 <code>listingId</code> 與 <code>mlInsights</code></td><td>讓前端同時拿到 runtime 來源 metadata 與本地 validation snapshot</td></tr>
+      <tr><td>前端呈現</td><td><code>MlPricingStatus</code>、<code>MlInsightsCard</code>、dashboard banner、listing history page、share report page 都接上 <code>mlPricing</code> / <code>mlInsights</code></td><td>把「模型有沒有套上」與「本地驗證分數」變成使用者可見資訊</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h3>入口到畫面的實際串接</h3>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>入口 / 畫面</th><th>實際行為</th><th>這次整合意義</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>POST /api/reports</code></td><td>full create flow 會先依 <code>listingUrl</code> 或地址嘗試 match 既有 <code>saved_listing</code>；成功時新 report 直接帶 <code>listing_id</code></td><td>custom report 更容易接到同一份本地 ML validation snapshot</td></tr>
+      <tr><td><code>POST /api/listings/[id]/rerun</code></td><td>即使 cache 已存在也照樣排進 Worker，因為 rerun 需要 live-price capture 與 ML overlay</td><td>避免使用者按 rerun 卻只拿到舊 cache、沒有新的 ML metadata</td></tr>
+      <tr><td><code>POST /api/internal/nightly/schedule</code></td><td>每天為有 Airbnb URL 的 saved listing 建 30 天 scheduled report，交給同一個 Worker pipeline</td><td>nightly report 與 manual / rerun report 走同一套 ML overlay 規則</td></tr>
+      <tr><td><code>/dashboard</code> / listing history</td><td>board 優先選 nightly ready；若沒有才 fallback 到最新 ready manual / rerun，並標示 <code>Nightly</code> / <code>Custom</code> / <code>Rerun</code></td><td>使用者即使剛跑完 custom analysis，也能立刻看到完整價格板與 ML badge</td></tr>
+      <tr><td><code>/r/[shareId]</code></td><td>顯示完整 <code>MlPricingStatus</code>；若 <code>report.listingId</code> 與本地 manifest 的 <code>saved_listing_id</code> 相符，再顯示 <code>MlInsightsCard</code></td><td>把正式 report 與本地驗證結果放在同一頁對照</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<pre><code>1. 本地先跑 ml.full_pipeline 更新 saved_model.json 與 full_pipeline_result.json
+2. 使用者從 /dashboard、/dashboard/listings/[listingId] 或 nightly scheduler 建立新 report
+3. Worker 先產出 market-engine summary + calendar，再視條件套用 ML overlay
+4. 成功時覆寫 recommendedDailyPrice，並寫入 summary.mlPricing 與 coreVersion +ml
+5. Report API 把 report + mlInsights 一起回傳給前端
+6. 前端用 MlPricingStatus 告訴使用者「這次價格是不是 ML」，用 MlInsightsCard 顯示本地驗證快照</code></pre>
+
+<div class="callout callout-current">
+  <strong>Current Behavior — 正式欄位合約刻意不變</strong>
+  不論價格最後來自 market-engine 還是 ML，前端正式價格一律仍讀 <code>recommendedDailyPrice</code>。這樣 dashboard、share report 與 listing history 不需要分叉成兩套 pricing contract。
+</div>
+
+<div class="callout callout-infer">
+  <strong>Inference — 未綁 saved listing 的 custom report 也能套 ML</strong>
+  若 report row 還沒有 <code>listing_id</code>，Worker 仍會用 <code>input_attributes</code> + <code>input_address</code> 建 pseudo target 跑全域模型。這種 report 仍可能出現 ML badge；只是 <code>MlInsightsCard</code> 仍取決於 <code>saved_listing_id</code> 是否能對上本地 manifest。
+</div>
+
+<div class="callout callout-risk">
+  <strong>Risk — 正式 runtime 仍採 fail-open</strong>
+  只要 overlay 任一段失敗，Worker 就會保留原本的 market-engine 價格並把 <code>mlPricing.applied</code> 寫成 <code>false</code>。這是為了避免 ML 失敗把整份 report 一起打壞。
+</div>
+
+<div class="sources">來源：ml/data.py、ml/batch_pipeline.py、ml/full_pipeline.py、worker/main.py、src/app/api/reports/route.ts、src/app/api/listings/[id]/rerun/route.ts、src/app/api/internal/nightly/schedule/route.ts、src/app/api/reports/[id]/route.ts、src/app/api/r/[shareId]/route.ts、src/lib/mlInsights.ts、src/components/MlPricingStatus.tsx、src/components/report/MlInsightsCard.tsx、src/components/dashboard/RecommendationBanner.tsx</div>
+</section>
 </main>
 </div>
 
