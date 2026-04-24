@@ -609,18 +609,20 @@ class PlaywrightScraper:
         text = raw_text.replace("\xa0", " ").strip()
         if not text:
             return None
-        # Keep this broad for multi-currency formats:
-        # "$363 CAD", "C$363", "€363", "363 EUR"
-        money_re = re.compile(
-            r"(?:[A-Z]{1,3}\$|[$€£¥₹₩₪₫₽₴₱฿₦₺]|[A-Z]{3}\s+)?\s*"
-            r"\d[\d,]*(?:\.\d{1,2})?"
-            r"(?:\s*[A-Z]{3})?"
+        # Require currency marker to avoid false positives like "4 guests".
+        currency_first = re.search(
+            r"(?:[A-Z]{1,3}\$|\$|\u20AC|\u00A3|\u00A5|\u20B9|\u20A9|\u20AA|\u20AB|\u20BD|\u20B4|\u20B1|\u0E3F|\u20A6|\u20BA)\s*\d[\d,]*(?:\.\d{1,2})?(?:\s*[A-Z]{3})?",
+            text,
         )
-        m = money_re.search(text)
-        if not m:
-            return None
-        candidate = m.group(0).strip()
-        return candidate or None
+        if currency_first:
+            return currency_first.group(0).strip() or None
+        currency_last = re.search(
+            r"\d[\d,]*(?:\.\d{1,2})?\s*[A-Z]{3}",
+            text,
+        )
+        if currency_last:
+            return currency_last.group(0).strip() or None
+        return None
 
     @staticmethod
     async def _read_dom_price_text(page, timeout_ms: int = 5000) -> Optional[str]:
@@ -628,23 +630,30 @@ class PlaywrightScraper:
         poll_ms = 150
         js = """
 () => {
-  const roots = [
-    ...document.querySelectorAll('[data-section-id*="BOOK_IT"], [data-plugin-in-point-id*="BOOK_IT"], [id*="book-it"], [class*="book-it"]'),
-    document.querySelector('main'),
-    document.body,
-  ].filter(Boolean);
+  const selectors = [
+    '[data-section-id="BOOK_IT_FLOATING_FOOTER"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
+    '[data-section-id="BOOK_IT_SIDEBAR"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
+    '[data-plugin-in-point-id="BOOK_IT_FLOATING_FOOTER"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
+    '[data-plugin-in-point-id="BOOK_IT_SIDEBAR"] span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
+    'span[style*="pricing-guest-primary-line-unit-price-text-decoration"]',
+    'span.u174bpcy',
+    '[data-section-id*="BOOK_IT"] span',
+    '[data-plugin-in-point-id*="BOOK_IT"] span',
+  ];
+  const out = [];
   const seen = new Set();
-  const texts = [];
-  for (const root of roots) {
-    const nodes = root.querySelectorAll ? root.querySelectorAll('span,div') : [];
+  for (const sel of selectors) {
+    const nodes = document.querySelectorAll(sel);
     for (const n of nodes) {
       const t = (n.textContent || '').replace(/\\u00a0/g, ' ').trim();
-      if (!t || seen.has(t)) continue;
-      seen.add(t);
-      texts.push(t);
+      if (!t) continue;
+      const key = `${sel}::${t}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ selector: sel, text: t });
     }
   }
-  return texts;
+  return out;
 }
 """
         while time.monotonic() < deadline:
@@ -652,10 +661,28 @@ class PlaywrightScraper:
                 values = await page.evaluate(js)
             except Exception:
                 values = []
-            if isinstance(values, list):
-                for raw in values:
-                    candidate = PlaywrightScraper._extract_dom_price_text(str(raw or ""))
+            if isinstance(values, list) and values:
+                sample = [
+                    str((row or {}).get("text") or "")
+                    for row in values[:8]
+                    if isinstance(row, dict)
+                ]
+                logger.info(
+                    "Playwright PDP DOM candidates count=%s sample=%s",
+                    len(values),
+                    sample,
+                )
+                for row in values:
+                    if not isinstance(row, dict):
+                        continue
+                    candidate = PlaywrightScraper._extract_dom_price_text(str(row.get("text") or ""))
                     if candidate:
+                        logger.info(
+                            "Playwright PDP DOM price match selector=%s text=%s extracted=%s",
+                            str(row.get("selector") or ""),
+                            str(row.get("text") or ""),
+                            candidate,
+                        )
                         return candidate
             await page.wait_for_timeout(poll_ms)
         return None
@@ -1262,4 +1289,3 @@ class PlaywrightScraper:
                 if attempt < 2:
                     time.sleep(1.0)
         raise RuntimeError(f"Playwright browser PDP failed after 2 attempts for listing={listing_id}: {last_exc}")
-
