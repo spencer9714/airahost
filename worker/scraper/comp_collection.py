@@ -7,6 +7,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 from worker.core.similarity import comp_urls_match
 from worker.core.concurrent_runner import MAX_SCRAPER_WORKERS
@@ -19,6 +20,40 @@ from worker.scraper.target_extractor import ListingSpec, normalize_property_type
 
 logger = logging.getLogger("worker.scraper.comp_collection")
 _ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+
+
+def _build_debug_search_url(base_origin: str, overrides: Dict[str, Any]) -> str:
+    """
+    Build a human-readable Airbnb search URL for logging/diagnostics.
+    """
+    base = str(base_origin or "https://www.airbnb.ca").rstrip("/")
+    params: Dict[str, Any] = {}
+    query = (
+        overrides.get("query")
+        or overrides.get("locationSearch")
+        or overrides.get("location")
+        or ""
+    )
+    if query:
+        params["query"] = str(query)
+    for key in (
+        "checkin",
+        "checkout",
+        "adults",
+        "guests",
+        "itemsOffset",
+        "itemsPerGrid",
+        "searchByMap",
+        "neLat",
+        "neLng",
+        "swLat",
+        "swLng",
+    ):
+        val = overrides.get(key)
+        if val is not None and str(val) != "":
+            params[key] = val
+    qs = urlencode(params, doseq=True)
+    return f"{base}/s?{qs}" if qs else f"{base}/s"
 
 
 def _compute_bbox_from_radius_km(
@@ -274,12 +309,13 @@ def collect_search_comps(
                     "checkin": checkin_str,
                     "checkout": checkout_str,
                     "adults": adults,
-                    "query": search_location,
-                    "locationSearch": search_location,
-                    "location": search_location,
                     "dailySearch": True,
                     "itemsPerGrid": max_cards,
                 }
+                if str(search_location or "").strip():
+                    overrides["query"] = search_location
+                    overrides["locationSearch"] = search_location
+                    overrides["location"] = search_location
                 if center_lat is not None:
                     overrides["centerLat"] = center_lat
                 if center_lng is not None:
@@ -297,12 +333,19 @@ def collect_search_comps(
                     overrides["guests"] = int(target_accommodates)
                 if offset > 0:
                     overrides["itemsOffset"] = offset
+                debug_search_url = _build_debug_search_url(base_origin, overrides)
                 logger.info(
                     "[%s] %s: query_nights=%s offset=%s",
                     log_prefix,
                     checkin_str,
                     query_nights,
                     offset,
+                )
+                logger.info(
+                    "[%s] %s: search_url=%s",
+                    log_prefix,
+                    checkin_str,
+                    debug_search_url,
                 )
                 status, search_data = client.search_listings_with_overrides(overrides)
                 if status < 200 or status >= 300:

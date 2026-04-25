@@ -21,7 +21,9 @@ from ml_sidecar.data import (
 )
 from ml_sidecar.model import (
     AMENITIES_LIST,
+    AMENITY_FEATURE_WEIGHTS,
     build_default_numeric_features,
+    build_amenity_feature_map,
     build_feature_description_df,
     build_feature_matrix_df,
     forecast_prices,
@@ -111,8 +113,7 @@ def _build_target_features(saved_listing: Dict[str, Any], training_df: pd.DataFr
     }
 
     amenities = base.get("amenities") or []
-    for amenity in AMENITIES_LIST:
-        target_features[f"has_{amenity}"] = 1.0 if amenity in amenities else 0.0
+    target_features.update(build_amenity_feature_map(amenities))
 
     for key, value in defaults.items():
         target_features.setdefault(key, value)
@@ -455,11 +456,22 @@ def _build_explanation_payload(
     bedrooms = int(round(float(target_features.get("bedrooms") or 0.0)))
     baths = round(float(target_features.get("baths") or 0.0), 1)
     accommodates = int(round(float(target_features.get("accommodates") or 0.0)))
+    amenity_rank = {name: index for index, name in enumerate(AMENITIES_LIST)}
     active_amenities = [
-        feature_name.removeprefix("has_").replace("_", " ")
-        for feature_name, value in target_features.items()
-        if feature_name.startswith("has_") and float(value or 0.0) > 0.5
-    ][:3]
+        amenity.replace("_", " ")
+        for amenity in sorted(
+            (
+                feature_name.removeprefix("has_")
+                for feature_name, value in target_features.items()
+                if feature_name.startswith("has_") and float(value or 0.0) > 0.5
+            ),
+            key=lambda amenity: (
+                -float(AMENITY_FEATURE_WEIGHTS.get(amenity, 1.0)),
+                amenity_rank.get(amenity, len(AMENITIES_LIST)),
+                amenity,
+            ),
+        )
+    ][:4]
 
     summary_parts: list[str] = []
     if top_driver_labels:

@@ -109,6 +109,41 @@ def _title_looks_suspicious(title: str) -> bool:
     return False
 
 
+def _looks_non_location_placeholder(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    lower = text.casefold()
+    if "airbnb listing #" in lower or "popular in airbnb listing" in lower:
+        return True
+    if re.search(r"(?i)\bentire home\b", text):
+        return True
+    if re.search(r"(?i)\bprivate room\b", text):
+        return True
+    if re.search(r"(?i)\bshared room\b", text):
+        return True
+    return False
+
+
+def _coords_search_query(lat: Optional[float], lng: Optional[float]) -> str:
+    if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+        return f"{float(lat):.5f},{float(lng):.5f}"
+    return ""
+
+
+def _resolve_target_search_location(target: ListingSpec) -> str:
+    coords_query = _coords_search_query(target.lat, target.lng)
+    if coords_query:
+        return coords_query
+    city = str(target.city or "").strip()
+    state = str(target.state or "").strip()
+    if city and state:
+        return f"{city}, {state}"
+    if city:
+        return city
+    return str(target.location or "").strip()
+
+
 def _repair_suspicious_comparable_titles(
     client,
     transparent_result: Dict[str, Any],
@@ -557,11 +592,7 @@ def _build_fixed_comp_pool(
     """
     Build a fixed comparable pool once, then reuse across all sampled dates.
     """
-    search_location = (
-        f"{str(target.city).strip()}, {str(target.state).strip()}"
-        if str(target.city or "").strip() and str(target.state or "").strip()
-        else (str(target.city or "").strip() or target.location)
-    )
+    search_location = _resolve_target_search_location(target)
     _pages = max(1, int(page_count))
     _page_offsets = [i * max(1, int(max_cards)) for i in range(_pages)]
     query_center_lat = float(target.lat) if isinstance(target.lat, (int, float)) else None
@@ -984,6 +1015,56 @@ def _backfill_target_spec(
             target.beds = v
             fields_filled.append("beds")
 
+    # Fill missing location/city/state from saved attributes when available.
+    if not (target.location and target.location.strip()):
+        city = str(attrs.get("city") or "").strip()
+        state = str(attrs.get("state") or attrs.get("province") or "").strip()
+        location_candidates = [
+            attrs.get("location"),
+            attrs.get("listingLocation"),
+            attrs.get("address"),
+            attrs.get("inputAddress"),
+            f"{city}, {state}" if city and state else "",
+            city or "",
+        ]
+        for candidate in location_candidates:
+            raw = str(candidate or "").strip()
+            if not raw or _looks_non_location_placeholder(raw):
+                continue
+            target.location = raw
+            if city and not target.city:
+                target.city = city
+            if state and not target.state:
+                target.state = state
+            fields_filled.append("location")
+            break
+
+    # Fill missing target coordinates from saved attributes when available.
+    if target.lat is None or target.lng is None:
+        coord_pairs = [
+            ("lat", "lng"),
+            ("target_lat", "target_lng"),
+            ("latitude", "longitude"),
+            ("centerLat", "centerLng"),
+        ]
+        for lat_key, lng_key in coord_pairs:
+            lat_raw = attrs.get(lat_key)
+            lng_raw = attrs.get(lng_key)
+            try:
+                lat_val = float(lat_raw) if lat_raw is not None else None
+                lng_val = float(lng_raw) if lng_raw is not None else None
+            except Exception:
+                lat_val = None
+                lng_val = None
+            if lat_val is None or lng_val is None:
+                continue
+            if target.lat is None:
+                target.lat = lat_val
+            if target.lng is None:
+                target.lng = lng_val
+            fields_filled.append("lat_lng")
+            break
+
     fields_still_missing: list = []
     if not target.property_type:
         fields_still_missing.append("property_type")
@@ -993,6 +1074,8 @@ def _backfill_target_spec(
         fields_still_missing.append("bedrooms")
     if target.baths is None:
         fields_still_missing.append("baths")
+    if not (target.location and target.location.strip()) and _coords_search_query(target.lat, target.lng) == "":
+        fields_still_missing.append("location_or_coords")
 
     return target, {
         "fields_filled": fields_filled,
@@ -1029,6 +1112,7 @@ def run_scrape(
     fallback_address: Optional[str] = None,
     target_spec_override: Optional[ListingSpec] = None,
     query_criteria_override: Optional[Dict[str, Any]] = None,
+    force_playwright_daily_search: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Full scrape pipeline using day-by-day 1-night queries.
@@ -1104,6 +1188,8 @@ def run_scrape(
             "ADULTS": adults,
             "CDP_URL": cdp_url,
             "LOG_RAW_PAYLOADS": None,
+            # When forced, bypass Deepbnb daily search and run browser location-search path.
+            "USE_DEEPBNB_BACKEND": (not force_playwright_daily_search),
         }
     )
     page = client
@@ -1279,26 +1365,23 @@ def run_scrape(
             # Map bounds disabled for now.
             _effective_radius: Optional[float] = None
 
-            if not target.location:
-                # Try "... in City, State" pattern first
-                loc_m = re.search(
-                    r"\bin\s+([A-Z][a-zA-Z\s,]+(?:,\s*[A-Z][a-zA-Z\s]+)?)",
-                    target.title,
-                )
-                if loc_m:
-                    target.location = loc_m.group(1).strip().rstrip(",.")
-                    _spec_location_source = "title"
+            if not target.location and target.title:
+                if _title_looks_suspicious(target.title):
+                    logger.warning(
+                        "[run_scrape] Skip title-based location fallback due to suspicious title: %r",
+                        target.title,
+                    )
                 else:
-                    # Fallback: last meaningful token from title delimiters
-                    tokens = [
-                        t.strip()
-                        for t in re.split(r"[-|•·]", target.title)
-                        if t.strip() and len(t.strip()) >= 3
-                    ]
-                    target.location = tokens[-1] if tokens else ""
-                    if target.location:
+                    loc_m = re.search(
+                        r"\bin\s+([A-Z][a-zA-Z\s,]+(?:,\s*[A-Z][a-zA-Z\s]+)?)",
+                        target.title,
+                    )
+                    if loc_m:
+                        target.location = loc_m.group(1).strip().rstrip(",.")
                         _spec_location_source = "title"
-                extraction_warnings.append(f"Location fallback from title: '{target.location}'")
+                        extraction_warnings.append(
+                            f"Location fallback from title: '{target.location}'"
+                        )
 
             # Last-resort: use the saved property address when title fallback also failed.
             if not target.location and fallback_address:
@@ -1337,7 +1420,7 @@ def run_scrape(
                 or target.bedrooms is None or target.baths is None
             )
 
-            if not target.location:
+            if not target.location and _coords_search_query(target.lat, target.lng) == "":
                 return [], {
                     "targetSpec": {
                         "title": target.title,
@@ -1377,8 +1460,11 @@ def run_scrape(
             if target.accommodates and target.accommodates > 0:
                 effective_adults = min(int(target.accommodates), 16)
 
+            _location_basis = str(target.location or "").strip() or _coords_search_query(
+                target.lat, target.lng
+            )
             query_criteria = {
-                "locationBasis": target.location,
+                "locationBasis": _location_basis,
                 "searchAdults": effective_adults,
                 "checkin": checkin,
                 "checkout": checkout,
@@ -1589,9 +1675,12 @@ def run_scrape(
                     "lng": target.lng,
                     "source": _coord_source,
                 }
-            if target_spec_override is None:
+            # Keep forced Playwright daily fallback strictly on location-search flow.
+            # Skip comp PDP repair passes in this mode to avoid opening unrelated
+            # listing PDP tabs after the daily-search fallback.
+            if (not force_playwright_daily_search) and target_spec_override is None:
                 _repair_incomplete_comparable_specs(client, transparent, extraction_warnings)
-            _repair_suspicious_comparable_titles(client, transparent, extraction_warnings)
+                _repair_suspicious_comparable_titles(client, transparent, extraction_warnings)
 
             logger.info(
                 f"Day-by-day pipeline complete: {len(sample_indices)} queries, "
@@ -1792,26 +1881,23 @@ def run_benchmark_scrape(
 
                 # Location fallback (mirrors run_scrape)
                 _bm_location_source = "page"
-                if not target.location:
-                    loc_m = re.search(
-                        r"\bin\s+([A-Z][a-zA-Z\s,]+(?:,\s*[A-Z][a-zA-Z\s]+)?)",
-                        target.title,
-                    )
-                    if loc_m:
-                        target.location = loc_m.group(1).strip().rstrip(",.")
-                        _bm_location_source = "title"
+                if not target.location and target.title:
+                    if _title_looks_suspicious(target.title):
+                        logger.warning(
+                            "[benchmark] Skip title-based location fallback due to suspicious title: %r",
+                            target.title,
+                        )
                     else:
-                        tokens = [
-                            t.strip()
-                            for t in re.split(r"[-|•·]", target.title)
-                            if t.strip() and len(t.strip()) >= 3
-                        ]
-                        target.location = tokens[-1] if tokens else ""
-                        if target.location:
+                        loc_m = re.search(
+                            r"\bin\s+([A-Z][a-zA-Z\s,]+(?:,\s*[A-Z][a-zA-Z\s]+)?)",
+                            target.title,
+                        )
+                        if loc_m:
+                            target.location = loc_m.group(1).strip().rstrip(",.")
                             _bm_location_source = "title"
-                    extraction_warnings.append(
-                        f"[benchmark] Location fallback from title: '{target.location}'"
-                    )
+                            extraction_warnings.append(
+                                f"[benchmark] Location fallback from title: '{target.location}'"
+                            )
 
                 # Last-resort: saved property address (mirrors run_scrape).
                 if not target.location and fallback_address:
@@ -1853,7 +1939,7 @@ def run_benchmark_scrape(
                     ),
                 }
 
-                if not target.location:
+                if not target.location and _coords_search_query(target.lat, target.lng) == "":
                     return [], _empty_transparent(
                         "benchmark", "Cannot determine location from benchmark listing page."
                     )
@@ -1914,8 +2000,11 @@ def run_benchmark_scrape(
             if target.accommodates and target.accommodates > 0:
                 effective_adults = min(int(target.accommodates), 16)
 
+            _bm_location_basis = str(target.location or "").strip() or _coords_search_query(
+                target.lat, target.lng
+            )
             query_criteria = {
-                "locationBasis": target.location,
+                "locationBasis": _bm_location_basis,
                 "searchAdults": effective_adults,
                 "checkin": checkin,
                 "checkout": checkout,
@@ -2298,6 +2387,8 @@ def _extract_search_location(address: str) -> tuple:
         (search_location: str, confidence: str)  — "high" | "medium" | "low"
     """
     addr = address.strip()
+    if not addr:
+        return "", "low"
 
     # 1. Bare ZIP / postal code
     if re.match(r"^\d{3,6}$", addr):

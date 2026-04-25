@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 import os
+import re
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -10,6 +11,68 @@ from supabase import Client
 
 TARGET_COLUMN_NAME = "observed_market_price"
 VALID_TRAINING_SCOPES = {"global", "listing_local"}
+_RAW_CANONICAL_AMENITY_ALIASES = {
+    "wifi": "wifi",
+    "wi-fi": "wifi",
+    "wireless internet": "wifi",
+    "kitchen": "kitchen",
+    "washer": "washer",
+    "washing machine": "washer",
+    "laundry": "washer",
+    "dryer": "dryer",
+    "ac": "ac",
+    "a/c": "ac",
+    "air conditioning": "ac",
+    "air conditioner": "ac",
+    "heating": "heating",
+    "heater": "heating",
+    "pool": "pool",
+    "hot tub": "hot_tub",
+    "jacuzzi": "hot_tub",
+    "free parking": "free_parking",
+    "parking on premises": "free_parking",
+    "free parking on premises": "free_parking",
+    "allows pets": "pets_allowed",
+    "pets allowed": "pets_allowed",
+    "pet-friendly": "pets_allowed",
+    "pet friendly": "pets_allowed",
+    "waterfront": "waterfront",
+    "water front": "waterfront",
+    "beachfront": "waterfront",
+    "lakefront": "waterfront",
+    "guest favorite": "guest_favorite",
+    "top guest favorite": "guest_favorite",
+    "ev charger": "ev_charger",
+    "electric vehicle charger": "ev_charger",
+    "gym": "gym",
+    "fitness": "gym",
+    "bbq": "bbq",
+    "barbecue": "bbq",
+    "grill": "bbq",
+    "fire pit": "fire_pit",
+    "lake access": "lake_access",
+    "ski-in/out": "ski_in_out",
+    "ski in/out": "ski_in_out",
+    "beach access": "beach_access",
+}
+
+
+def _normalize_amenity_lookup_key(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+_CANONICAL_AMENITY_ALIASES = {
+    _normalize_amenity_lookup_key(key): value
+    for key, value in _RAW_CANONICAL_AMENITY_ALIASES.items()
+}
+_CANONICAL_AMENITY_TOKEN_PATTERNS = sorted(
+    [
+        (tuple(key.split()), canonical)
+        for key, canonical in _CANONICAL_AMENITY_ALIASES.items()
+        if key
+    ],
+    key=lambda item: (-len(item[0]), item[0]),
+)
 
 try:
     import holidays as _holidays_pkg
@@ -62,7 +125,33 @@ def _has_valid_coordinates(lat: Optional[float], lng: Optional[float]) -> bool:
 def _normalize_amenities(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, str) and item.strip()]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        raw = item.strip()
+        if not raw:
+            continue
+
+        key = _normalize_amenity_lookup_key(raw)
+        canonical = _CANONICAL_AMENITY_ALIASES.get(key)
+        if canonical is None:
+            item_tokens = set(key.split())
+            for alias_tokens, alias_canonical in _CANONICAL_AMENITY_TOKEN_PATTERNS:
+                if set(alias_tokens).issubset(item_tokens):
+                    canonical = alias_canonical
+                    break
+        if canonical is None:
+            canonical = key.replace(" ", "_") if key else raw.casefold().replace(" ", "_")
+
+        if canonical not in seen:
+            seen.add(canonical)
+            normalized.append(canonical)
+
+    return normalized
 
 
 def _get_holiday_flag(stay_date: dt.date) -> float:

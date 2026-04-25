@@ -61,13 +61,13 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
 
     Weights (priority order requested):
       - property_type: 3.0  (categorical; mismatch → 0.0, unknown → partial)
-      - beds:          2.8  (tolerance 3)
-      - accommodates:  2.8  (tolerance 3)
+      - beds:          2.5  (tolerance 3)
+      - accommodates:  2.5  (tolerance 3)
       - bedrooms:      2.5  (tolerance 2)
-      - baths:         2.5  (tolerance 1.5)
+      - baths:         2.0  (tolerance 1.5)
       - rating:        2.0  (tolerance 1.0)
       - reviews:       2.0  (log-scaled count similarity)
-      - amenities:     1.0  (Jaccard overlap; auxiliary role)
+      - amenities:     1.5  (Jaccard overlap; auxiliary role)
 
     Property-type mismatch scores 0.0 (not 0.15) because the hard gate in
     filter_similar_candidates already blocks clear type conflicts; this
@@ -107,10 +107,10 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
         s = 1.0 if hi <= 0 else (lo / hi)
         score += max(0.0, min(1.0, s)) * w
 
-    add_num(target.beds, cand.beds, w=2.8, tol=3.0)
-    add_num(target.accommodates, cand.accommodates, w=2.8, tol=3.0)
+    add_num(target.beds, cand.beds, w=2.5, tol=3.0)
+    add_num(target.accommodates, cand.accommodates, w=2.5, tol=3.0)
     add_num(target.bedrooms, cand.bedrooms, w=2.5, tol=2.0)
-    add_num(target.baths, cand.baths, w=2.5, tol=1.5)
+    add_num(target.baths, cand.baths, w=2.0, tol=1.5)
     add_num(target.rating, cand.rating, w=2.0, tol=1.0)
     add_reviews(target.reviews, cand.reviews, w=2.0)
 
@@ -123,16 +123,16 @@ def similarity_score(target: ListingSpec, cand: ListingSpec) -> float:
     else:
         score += 0.35 * 3.0
 
-    # Amenity overlap: auxiliary signal (weight 1.0).
+    # Amenity overlap: auxiliary signal (weight 1.5).
     # If either side has no amenities, give partial credit rather than zero.
-    weight_sum += 1.0
+    weight_sum += 1.5
     t_set = set(target.amenities or [])
     c_set = set(cand.amenities or [])
     if t_set and c_set:
         overlap = len(t_set & c_set) / max(1, len(t_set | c_set))
-        score += overlap * 1.0
+        score += overlap * 1.5
     else:
-        score += 0.35 * 1.0
+        score += 0.35 * 1.5
 
     if weight_sum <= 0:
         return 0.0

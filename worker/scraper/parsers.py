@@ -1310,6 +1310,11 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
                         else:
                             amenity_names.add(item.strip())
 
+    for candidate in _find_keys(data, "brandAccessibilityLabel") + _find_keys(data, "textAccessibilityLabel"):
+        if isinstance(candidate, str) and re.search(r"guest favou?rite", candidate, re.I):
+            amenity_names.add("Guest favorite")
+            break
+
     result["amenities"] = sorted(a for a in amenity_names if a not in blocked_amenity_names)
 
     if not result["title"]:
