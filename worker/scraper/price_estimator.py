@@ -289,6 +289,7 @@ def _build_daily_transparent_result(
     target_price_confidence: Optional[str] = None,
     spec_backfill: Optional[Dict[str, Any]] = None,
     spec_extraction_meta: Optional[Dict[str, Any]] = None,
+    fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -355,11 +356,13 @@ def _build_daily_transparent_result(
             day_result.get("is_sampled", False)
             and isinstance(day_result.get("median_price"), (int, float))
         )
+        seen_top_comp_ids: set[str] = set()
 
         for comp in day_result.get("top_comps", []) or []:
             comp_id = str(comp.get("id") or comp.get("url") or "").strip()
             if not comp_id:
                 continue
+            seen_top_comp_ids.add(comp_id)
             score = float(comp.get("similarity") or 0.0)
             # Prefer comp_prices for the day's price; fall back to top_comps value.
             price = day_comp_prices.get(comp_id) or comp.get("nightlyPrice")
@@ -396,6 +399,34 @@ def _build_daily_transparent_result(
                 if isinstance(_day_total, (int, float)) and _day_total > 0:
                     day_detail["queryTotalPrice"] = round(float(_day_total), 2)
                 comparable_index[comp_id]["price_by_date_details"][day_date] = day_detail
+            if day_date:
+                comp_seen_dates.setdefault(comp_id, set()).add(day_date)
+
+        for comp_id_raw, price in day_comp_prices.items():
+            comp_id = str(comp_id_raw or "").strip()
+            if not comp_id or comp_id in seen_top_comp_ids:
+                continue
+            pool_comp = (fixed_comp_pool or {}).get(comp_id) or {}
+            if comp_id not in comparable_index:
+                comparable_index[comp_id] = {
+                    "item": {
+                        "id": comp_id,
+                        "title": pool_comp.get("title"),
+                        "propertyType": pool_comp.get("propertyType") or pool_comp.get("property_type"),
+                        "nightlyPrice": price,
+                        "similarity": pool_comp.get("similarity") or 0.0,
+                        "url": pool_comp.get("url"),
+                    },
+                    "score_sum": float(pool_comp.get("similarity") or 0.0),
+                    "count": 1 if pool_comp.get("similarity") is not None else 0,
+                    "price_by_date": {},
+                    "price_by_date_details": {},
+                    "max_query_nights": int(pool_comp.get("queryNights") or 1),
+                }
+            if day_has_valid_sample and day_date and isinstance(price, (int, float)) and price > 0:
+                _price_rounded = round(float(price), 2)
+                comparable_index[comp_id]["price_by_date"][day_date] = _price_rounded
+                comparable_index[comp_id]["price_by_date_details"][day_date] = {"price": _price_rounded}
             if day_date:
                 comp_seen_dates.setdefault(comp_id, set()).add(day_date)
 
@@ -481,6 +512,10 @@ def _build_daily_transparent_result(
     summary_collected = len(unique_collected_comp_ids)
     summary_after_filtering = unique_filtered_comp_count
     summary_used_for_pricing = unique_used_for_pricing_count
+    if fixed_comp_pool is not None:
+        summary_collected = int(query_criteria.get("fixedCompPoolCollectedTotal") or summary_collected)
+        summary_after_filtering = int(query_criteria.get("fixedCompPoolFilteredTotal") or summary_after_filtering)
+        summary_used_for_pricing = int(query_criteria.get("fixedCompPoolSize") or summary_used_for_pricing)
 
     return {
         "targetSpec": {
