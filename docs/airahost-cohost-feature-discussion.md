@@ -161,6 +161,122 @@ Not recommended for this product flow:
 - Cross-origin scripting from the main web app
 - Heavy local automation flows for normal users
 
+## Verification Test Script Usage
+
+For engineering validation, the repo also includes:
+
+```text
+worker/cohost_full_access_verification_testing.py
+```
+
+This script verifies whether the Airahost co-host account has `Full access` on a target Airbnb listing by opening the Airbnb hosting co-host detail page through a locally running Chrome session attached over CDP.
+
+Recommended invocation:
+
+```bash
+python -m worker.cohost_full_access_verification_testing \
+  --listing-id 1596737613274892756
+```
+
+Runtime requirements:
+
+- Chrome must be started with a remote debugging port.
+- Default CDP endpoint is `http://127.0.0.1:9222`.
+- The script expects a live Airbnb Hosting session inside that CDP Chrome profile.
+- The worker environment must still provide `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
+
+Example macOS launch command:
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/chrome-cdp-profile"
+```
+
+Login requirement:
+
+- Log into Airbnb in that Chrome profile before running the script.
+- Log in as the co-host account being verified.
+- For the current default test configuration, that means the Airbnb account matching `cohost_user_id = 584480104`.
+
+Why this matters:
+
+- The script builds a URL in the form:
+  `https://www.airbnb.com/hosting/listings/editor/{listing_id}/details/co-hosts/{cohost_user_id}`
+- Airbnb permission checks are evaluated in the context of the logged-in browser session.
+- If the CDP browser is not logged in, the script should return an auth-required verification failure instead of a valid permission result.
+
+Port guidance:
+
+- Port `9222` is only the default, not a hard requirement.
+- If another port is used, pass `--cdp-url http://127.0.0.1:{port}` or set `CDP_URL` accordingly.
+
+## Co-Host Verification Data Model
+
+The co-host verification flow uses both `saved_listings` and the newer `listing_cohost_verifications` cache table, with migrations `020` and `022` playing different roles.
+
+### `saved_listings`
+
+`saved_listings` remains the lightweight summary table used by the dashboard and by Auto-Apply gating logic.
+
+Its co-host fields represent the current mirrored state for a listing, such as:
+
+- `auto_apply_cohost_status`
+- `auto_apply_cohost_verified_at`
+- `auto_apply_cohost_last_checked_at`
+- `auto_apply_cohost_verification_method`
+- `auto_apply_cohost_verification_error`
+
+This table is not intended to store the full detailed verification snapshot history.
+
+### Migration `020_cohost_verification_model.sql`
+
+Migration `020` introduces the co-host verification state model on `saved_listings`.
+
+Its main job is to replace the old single boolean approach with a clearer state machine and supporting summary fields. It adds fields such as:
+
+- `auto_apply_cohost_status`
+- `auto_apply_cohost_confirmed_at`
+- `auto_apply_cohost_verified_at`
+- `auto_apply_cohost_verification_error`
+- `auto_apply_cohost_verification_method`
+
+It also migrates older `auto_apply_cohost_ready = true` rows into `auto_apply_cohost_status = 'user_confirmed'`.
+
+### Migration `022_listing_cohost_verifications.sql`
+
+Migration `022` adds the dedicated `listing_cohost_verifications` table and one additional summary mirror timestamp on `saved_listings`.
+
+Its main job is to establish the durable source-of-truth verification cache for one listing plus one co-host account pair, including fields such as:
+
+- `status`
+- `has_full_access`
+- `permissions_label`
+- `payouts_label`
+- `primary_host_label`
+- `verification_method`
+- `error_code`
+- `error_message`
+- `last_checked_at`
+- `verified_at`
+- `raw_details`
+
+It also adds `auto_apply_cohost_last_checked_at` to `saved_listings` so the latest verification attempt time is cheaply available for dashboard reads.
+
+### Relationship Between `saved_listings` and `listing_cohost_verifications`
+
+Recommended mental model:
+
+- `listing_cohost_verifications` is the detailed source-of-truth cache row for the verification result.
+- `saved_listings` is the lightweight mirrored summary used by the product UI and Auto-Apply gating.
+
+In other words:
+
+- `020` defines the summary state model on `saved_listings`.
+- `022` adds the detailed verification table and keeps `saved_listings` as the fast summary mirror.
+
+These migrations are complementary, not duplicates. Some `saved_listings` columns appear in both migrations with `IF NOT EXISTS`, but the overall responsibilities are different and both migrations are needed for the full co-host verification design.
+
 ## Strong Implementation Prompt
 
 ```text

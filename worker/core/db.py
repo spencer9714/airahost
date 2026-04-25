@@ -7,14 +7,50 @@ This key must NEVER be exposed to the frontend.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
-from supabase import create_client, Client
-
 logger = logging.getLogger("worker.core.db")
+
+
+def _load_supabase_client_symbols() -> tuple[Any, Any]:
+    """Avoid the repo's local /supabase folder shadowing the installed package."""
+    repo_root = Path(__file__).resolve().parents[2]
+    local_supabase_dir = repo_root / "supabase"
+
+    try:
+        supabase_module = importlib.import_module("supabase")
+    except ModuleNotFoundError:
+        raise
+
+    if hasattr(supabase_module, "create_client") and hasattr(supabase_module, "Client"):
+        return supabase_module.create_client, supabase_module.Client
+
+    if local_supabase_dir.is_dir():
+        original_sys_path = list(sys.path)
+        try:
+            sys.path = [
+                entry
+                for entry in sys.path
+                if Path(entry or ".").resolve() != repo_root
+            ]
+            sys.modules.pop("supabase", None)
+            supabase_module = importlib.import_module("supabase")
+            if hasattr(supabase_module, "create_client") and hasattr(supabase_module, "Client"):
+                return supabase_module.create_client, supabase_module.Client
+        finally:
+            sys.path = original_sys_path
+
+    raise ImportError("Installed Python package 'supabase' with Client/create_client was not found.")
+
+
+import sys
+
+create_client, Client = _load_supabase_client_symbols()
 
 
 def get_client() -> Client:
