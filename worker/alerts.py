@@ -1346,7 +1346,6 @@ def run_alert_evaluation(
         return
 
     if not listing_id:
-        logger.debug(f"[alerts/{report_id}] No listing_id — skipping alert evaluation")
         return
 
     if not start_date:
@@ -1379,7 +1378,6 @@ def run_alert_evaluation(
     # ALERT ELIGIBILITY INVARIANT: gate on pricing_alerts_enabled FIRST,
     # before any live price capture or processing occurs.
     if not saved_listing.get("pricing_alerts_enabled"):
-        logger.debug(f"[alerts/{report_id}] pricing_alerts_enabled=false — skipping")
         _log_evaluation(
             client,
             saved_listing_id=listing_id,
@@ -1531,7 +1529,6 @@ def run_alert_evaluation(
                 "reason": "unavailable_or_booked",
                 "live_price": None,
             })
-            logger.debug(f"[alerts/{report_id}] {date_str}: excluded (unavailable/booked)")
             continue
 
         if live_status == "scrape_failed" or live_price is None:
@@ -1542,7 +1539,6 @@ def run_alert_evaluation(
                 "reason": "scrape_failed",
                 "live_price": None,
             })
-            logger.debug(f"[alerts/{report_id}] {date_str}: skipped (scrape_failed)")
             continue
 
         if rec_price is None:
@@ -1552,7 +1548,6 @@ def run_alert_evaluation(
                 "reason": "no_recommended_price",
                 "live_price": live_price,
             })
-            logger.debug(f"[alerts/{report_id}] {date_str}: skipped (no recommended price)")
             continue
 
         # mkt_price falls back to rec_price when market data is absent.
@@ -1580,10 +1575,6 @@ def run_alert_evaluation(
             debug_entry["outcome"] = "below_threshold"
             debug_entry["reason"] = "threshold_not_met_or_dollar_floor"
             window_debug.append(debug_entry)
-            logger.debug(
-                f"[alerts/{report_id}] {date_str}: below threshold "
-                f"vs_rec={vs_rec:.1f}% vs_mkt={vs_mkt:.1f}%"
-            )
             continue
 
         debug_entry["outcome"] = "actionable"
@@ -1615,8 +1606,6 @@ def run_alert_evaluation(
         f"available={available_count} booked/unavailable={booked_count} "
         f"scrape_failed={failed_count} actionable={len(alertable_nights)}"
     )
-    logger.debug(f"[alerts/{report_id}] Window debug: {window_debug}")
-
     # ── Local dev force-send intercept ────────────────────────────────────
     # Fires after live price capture + threshold evaluation so real alertable
     # nights (if any) can be used.  Passes them to _run_force_send; empty list

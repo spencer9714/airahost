@@ -63,7 +63,6 @@ def geocode_address(
         return None
 
     if not data:
-        logger.debug(f"[geocoding] No results for: {address!r}")
         return None
 
     try:

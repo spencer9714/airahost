@@ -115,12 +115,11 @@ def assign_price_request(listing_id: str, date: str, price: int, *, locale="en-C
         with urllib.request.urlopen(req) as response:
             raw_body = response.read().decode('utf-8', errors='replace')
             logger.info(
-                "[price_assign_raw_response] listing=%s date=%s price=%s status=%s body=%s",
+                "[price_assign] listing=%s date=%s price=%s status=%s",
                 listing_id,
                 date,
                 price,
                 response.status,
-                raw_body,
             )
             if response.status != 200:
                 return {"ok": False, "error": f"HTTP {response.status}: {response.reason}"}
@@ -135,12 +134,11 @@ def assign_price_request(listing_id: str, date: str, price: int, *, locale="en-C
     except urllib.error.HTTPError as e:
         raw_err = e.read().decode('utf-8', errors='replace')
         logger.warning(
-            "[price_assign_raw_response] listing=%s date=%s price=%s status=%s body=%s",
+            "[price_assign] listing=%s date=%s price=%s status=%s",
             listing_id,
             date,
             price,
             getattr(e, "code", "HTTPError"),
-            raw_err,
         )
         try:
             error_resp = json.loads(raw_err) if raw_err else {}

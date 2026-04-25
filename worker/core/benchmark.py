@@ -406,9 +406,6 @@ def estimate_benchmark_price_for_date(
                 if isinstance(sec_price, (int, float)) and sec_price > 0:
                     sec_price = round(float(sec_price), 2)
             except Exception as _sec_exc:
-                logger.debug(
-                    f"[benchmark] {checkin_str}: secondary PDP fetch failed for {sec_url}: {_sec_exc}"
-                )
                 sec_price = None
 
             if sec_price is None:
@@ -505,12 +502,6 @@ def estimate_benchmark_price_for_date(
         market_scored_priced = [
             (r.comp, r.sim_score) for r in _sanity_results if r.weight > 0
         ]
-        if _ps_excl or _ps_down:
-            logger.debug(
-                f"[benchmark] {checkin_str}: market price sanity — "
-                f"excluded={_ps_excl} downweighted={_ps_down}"
-            )
-
         market_prices = [c.nightly_price for c, _ in market_scored_priced if c.nightly_price]
         market_median = (
             round(statistics.median(market_prices), 2) if market_prices else None
@@ -566,11 +557,6 @@ def estimate_benchmark_price_for_date(
         secondary_multiplier = _SECONDARY_SIGNAL_MULTIPLIERS.get(secondary_signal, 1.0)
         if secondary_multiplier != 1.0:
             effective_weight = round(effective_weight * secondary_multiplier, 3)
-            logger.debug(
-                f"[benchmark] {checkin_str}: secondary consensus={secondary_signal} "
-                f"(n={len(found_sec_prices)}), multiplier={secondary_multiplier}, "
-                f"effective_weight after nudge={effective_weight}"
-            )
 
         # Step 2.7 — benchmark-to-target structural similarity guardrail.
         # When the benchmark listing differs significantly from the user's

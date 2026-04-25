@@ -55,7 +55,6 @@ def seed_pool_from_report(
             Each entry is a dict produced by _build_daily_transparent_result().
     """
     if not comparable_listings:
-        logger.debug("[pool_seeding] No comparableListings — skipping")
         return
 
     # Filter out entries with no URL (synthetic injections may lack IDs)
@@ -66,7 +65,6 @@ def seed_pool_from_report(
     candidates = candidates[:_POOL_MAX_SIZE]
 
     if not candidates:
-        logger.debug("[pool_seeding] No valid candidates after filtering — skipping")
         return
 
     try:

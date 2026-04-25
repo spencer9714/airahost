@@ -273,10 +273,6 @@ def assess_observation_coverage(
         obs_age_hours[date_str] = round(age_hours, 2)
 
         if age_hours > max_age_h:
-            logger.debug(
-                "[obs_reuse] date=%s tier=%s age=%.1fh > max=%dh → stale",
-                date_str, tier, age_hours, max_age_h,
-            )
             dates_stale.append(date_str)
             continue
 

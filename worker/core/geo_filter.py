@@ -88,10 +88,6 @@ def apply_geo_filter(
             retained.append(comp)
         else:
             excluded += 1
-            logger.debug(
-                f"[geo_filter] Excluded comp {getattr(comp, 'url', '?')!r}: "
-                f"{dist:.1f} km > {max_radius_km} km"
-            )
 
     if excluded:
         logger.info(

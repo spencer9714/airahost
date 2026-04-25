@@ -70,14 +70,6 @@ from worker.scraper.target_extractor import (
 logger = logging.getLogger("worker.scraper")
 ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
 
-_LOG_CRITERIA_RAW_JSON = str(os.getenv("AIRBNB_LOG_CRITERIA_RAW_JSON", "0")).strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-
-
 def _bounded_workers(env_name: str, default: int = 2) -> int:
     """Read worker count from env with defensive bounds."""
     raw = os.getenv(env_name)
@@ -3126,11 +3118,6 @@ def run_criteria_search(
     if target_lng is not None:
         _p1_overrides["centerLng"] = target_lng
     _, search_data = client.search_listings_with_overrides(_p1_overrides)
-    if _LOG_CRITERIA_RAW_JSON:
-        try:
-            logger.info("[criteria] Raw pass-1 search response: %s", json.dumps(search_data, ensure_ascii=False))
-        except Exception:
-            logger.info("[criteria] Raw pass-1 search response: <unserializable>")
     timings["scroll_ms"] = round((time.time() - search_start) * 1000)
     listing_ids = parse_search_response(search_data)
     listing_context = parse_search_listing_context(search_data)
@@ -3144,11 +3131,6 @@ def run_criteria_search(
     if not listing_ids and client.guest_favorite_only:
         logger.info("[criteria] 0 results with guestFavorite=true; retrying without filter")
         _, search_data = client.search_listings_with_overrides({**_p1_overrides, "guestFavorite": False})
-        if _LOG_CRITERIA_RAW_JSON:
-            try:
-                logger.info("[criteria] Raw retry search response: %s", json.dumps(search_data, ensure_ascii=False))
-            except Exception:
-                logger.info("[criteria] Raw retry search response: <unserializable>")
         listing_ids = parse_search_response(search_data)
         listing_context = parse_search_listing_context(search_data)
         logger.info(

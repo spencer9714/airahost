@@ -2132,10 +2132,6 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                 client.table("saved_listings").update({
                     "comp_pool_target_radius_km": _job_radius_km,
                 }).eq("id", _listing_id_for_geocode).execute()
-                logger.debug(
-                    f"[{report_id}] Saved comp_pool_target_radius_km={_job_radius_km} "
-                    f"to listing {_listing_id_for_geocode}"
-                )
             except Exception as exc:
                 logger.warning(
                     f"[{report_id}] Failed to write target radius (non-fatal): {exc}"
@@ -2249,9 +2245,6 @@ def main():
                 )
                 if auto_job is None:
                     # No work — wait with current backoff
-                    logger.debug(
-                        f"[poll] idle (env={WORKER_ENV}, lane={WORKER_LANE}, backoff={backoff:.0f}s)"
-                    )
                     _shutdown_event.wait(backoff)
                     backoff = min(backoff * 1.5, max_backoff)
                     continue

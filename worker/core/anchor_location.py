@@ -712,11 +712,9 @@ def infer_canonical_target_from_candidates(
         parseable.append((city, state, dist))
 
     if not raw_locs_seen:
-        logger.debug("[anchor_location] infer_canonical_target: no location strings on candidates")
         return fallback_city, fallback_state, "no_candidates"
 
     if not parseable:
-        logger.debug("[anchor_location] infer_canonical_target: locations present but none parsed to city+state")
         return fallback_city, fallback_state, "no_parseable_candidates"
 
     # ── Stage 1: distance-based ───────────────────────────────────────────────
@@ -740,18 +738,6 @@ def infer_canonical_target_from_candidates(
                     f"({fraction:.0%}), closest={nearest[0][2]:.1f} km"
                 )
                 return winner_city, winner_state, "airbnb_first_page_nearest"
-            logger.debug(
-                f"[anchor_location] infer_canonical_target: distance stage "
-                f"inconclusive ({fraction:.0%} < {min_vote_fraction:.0%}); "
-                "trying vote"
-            )
-        else:
-            logger.debug(
-                f"[anchor_location] infer_canonical_target: only {len(with_dist)} "
-                f"coord-bearing candidate(s) < min_nearest_candidates="
-                f"{min_nearest_candidates}; skipping distance stage"
-            )
-
     # ── Stage 2: vote-based (all parseable candidates) ───────────────────────
     vote = Counter((c, s) for c, s, _ in parseable)
     total = len(parseable)
@@ -766,10 +752,6 @@ def infer_canonical_target_from_candidates(
         )
         return winner_city, winner_state, "airbnb_first_page_vote"
 
-    logger.debug(
-        f"[anchor_location] infer_canonical_target: vote inconclusive "
-        f"({fraction:.0%} < {min_vote_fraction:.0%}); fallback"
-    )
     return fallback_city, fallback_state, "fallback"
 
 
@@ -891,7 +873,6 @@ def geocode_candidate_cities(
                 location_cache[loc] = None  # queued, not yet geocoded
 
     if not location_cache:
-        logger.debug("[anchor_location] No candidates need city-proxy geocoding")
         return 0
 
     logger.info(
@@ -904,12 +885,6 @@ def geocode_candidate_cities(
         result = geocode_address_details(loc, timeout=timeout_per_city)
         if result and result.get("lat") is not None and result.get("lng") is not None:
             location_cache[loc] = (float(result["lat"]), float(result["lng"]))
-            logger.debug(
-                f"[anchor_location] Geocoded {loc!r} → "
-                f"({result['lat']:.4f}, {result['lng']:.4f})"
-            )
-        else:
-            logger.debug(f"[anchor_location] Geocode failed for {loc!r}")
 
     # Assign proxy coords to candidates (use same normalised key as collection)
     assigned = 0

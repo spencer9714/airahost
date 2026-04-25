@@ -142,7 +142,6 @@ def _write_target_observations(
         })
 
     if not rows:
-        logger.debug("[observations] target: no calendar rows to write")
         return 0
 
     client.table("target_price_observations").upsert(
@@ -258,7 +257,6 @@ def _write_comp_observations(
             })
 
     if not rows:
-        logger.debug("[observations] comp: no priceByDate rows to write")
         return 0
 
     _batch_insert(client, "market_comp_observations", rows)
