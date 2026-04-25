@@ -190,6 +190,8 @@ function normalizeMetrics(raw: unknown): MlForecastMetrics | null {
 
 function normalizePrediction(raw: unknown): MlForecastPrediction | null {
   const prediction = asObject(raw);
+  if (!prediction) return null;
+
   const date = readString(prediction, "date");
   if (!date) return null;
 
