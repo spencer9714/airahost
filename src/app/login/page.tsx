@@ -102,8 +102,11 @@ function LoginContent() {
         <form onSubmit={handleSubmit} className="space-y-4">
           {mode === "signup" ? (
             <div>
-              <label className="mb-1.5 block text-sm font-medium">Name</label>
+              <label htmlFor="login-name" className="mb-1.5 block text-sm font-medium">
+                Name
+              </label>
               <input
+                id="login-name"
                 type="text"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
@@ -115,8 +118,11 @@ function LoginContent() {
           ) : null}
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium">Email</label>
+            <label htmlFor="login-email" className="mb-1.5 block text-sm font-medium">
+              Email
+            </label>
             <input
+              id="login-email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -127,10 +133,11 @@ function LoginContent() {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium">
+            <label htmlFor="login-password" className="mb-1.5 block text-sm font-medium">
               Password
             </label>
             <input
+              id="login-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
