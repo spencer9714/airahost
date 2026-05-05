@@ -11,7 +11,7 @@
  * Retry / Refresh action button. No npm dependency.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 interface ToastOptions {
@@ -62,12 +62,23 @@ export function dismissToast(id: number) {
   if (toasts.length !== before) notify();
 }
 
+// `useSyncExternalStore`-based mount detection.  Returns false during SSR
+// (so we don't try to render `createPortal(..., document.body)` server-side
+// where document is undefined) and true after hydration — without calling
+// `setState` inside an effect body, which the React 19 lint rule forbids.
+const noopSubscribe = () => () => {};
+const isClientSnapshot = () => true;
+const isServerSnapshot = () => false;
+
 export function Toaster() {
+  const mounted = useSyncExternalStore(
+    noopSubscribe,
+    isClientSnapshot,
+    isServerSnapshot
+  );
   const [items, setItems] = useState<ToastEntry[]>([]);
-  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
     const listener: Listener = (next) => setItems(next);
     listeners.add(listener);
     listener([...toasts]);

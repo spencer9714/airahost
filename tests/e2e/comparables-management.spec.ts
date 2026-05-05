@@ -213,7 +213,7 @@ test.describe("Comparables management — exclude/undo/restore/promote/conflict"
   });
 
   // ── Group 11: Pagehide flush (delayed PATCH must not be lost) ─
-  test("page hide within 6s sends sendBeacon flush", async ({ page, context }) => {
+  test("page hide within 6s sends sendBeacon flush", async ({ page }) => {
     const card = page.locator('[data-testid="comparable-card"]').first();
     let beaconHits = 0;
     await page.route("**/flush-exclusions", (route) => {

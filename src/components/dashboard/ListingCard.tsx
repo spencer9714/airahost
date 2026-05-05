@@ -324,9 +324,6 @@ export function ListingCard({
     setExpandedBenchmarkIdx(null);
     setOpenMenuIdx(null);
     setFetchingDraftId(null);
-    // mintDraftId is stable (just bumps a ref), excluded from deps to avoid
-    // re-syncing on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listing.input_attributes.preferredComps]);
 
   // Sync excluded drafts.
