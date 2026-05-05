@@ -230,7 +230,7 @@ function normalizePrediction(raw: unknown): MlForecastPrediction | null {
     interval95Low: readNumber(prediction, "interval95Low", "interval95_low"),
     interval95High: readNumber(prediction, "interval95High", "interval95_high"),
     confidenceReasons: asStringArray(
-      prediction.confidenceReasons ?? prediction.confidence_reasons
+      prediction?.confidenceReasons ?? prediction?.confidence_reasons
     ),
   };
 }

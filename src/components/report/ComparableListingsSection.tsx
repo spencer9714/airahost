@@ -1,29 +1,41 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import type { BenchmarkInfo, ComparableListing, CompsSummary } from "@/lib/schemas";
+import { useEffect, useMemo, useState } from "react";
+import type {
+  BenchmarkInfo,
+  ComparableListing,
+  CompsSummary,
+  ExcludedComp,
+} from "@/lib/schemas";
 
-// Match Airbnb room IDs extracted from URLs for pinned-comp detection.
-function extractRoomId(url: string): string | null {
+// ── Stable identifier helpers ────────────────────────────────────
+// roomId is the canonical key for all comp-level decisions (pinned,
+// excluded, conflict).  URLs are display-only / fallback.
+
+function extractRoomId(url: string | null | undefined): string | null {
+  if (!url) return null;
   const m = url.match(/\/rooms\/(\d+)/);
   return m ? m[1] : null;
 }
 
-function urlsMatchPinned(compUrl: string | null, pinnedUrls: string[]): boolean {
-  if (!compUrl) return false;
-  const compId = extractRoomId(compUrl);
-  for (const pUrl of pinnedUrls) {
-    if (compId && extractRoomId(pUrl) === compId) return true;
-    if (compUrl.split("?")[0].toLowerCase() === pUrl.split("?")[0].toLowerCase()) return true;
-  }
-  return false;
+function listingRoomId(listing: ComparableListing): string | null {
+  // Worker fills `id` with build_comp_id() — usually room ID, falls back to URL.
+  // Prefer `id` first; if it's not numeric, derive from `url`.
+  if (listing.id && /^\d+$/.test(listing.id)) return listing.id;
+  return extractRoomId(listing.url);
 }
 
-function isPinnedListing(listing: ComparableListing, pinnedUrls: string[]): boolean {
+function isPinnedListing(
+  listing: ComparableListing,
+  pinnedRoomIds: string[]
+): boolean {
   const flaggedPinned =
-    (listing as ComparableListing & { isPinnedBenchmark?: boolean }).isPinnedBenchmark === true;
+    (listing as ComparableListing & { isPinnedBenchmark?: boolean })
+      .isPinnedBenchmark === true;
   if (flaggedPinned) return true;
-  return urlsMatchPinned(listing.url ?? null, pinnedUrls);
+  const rid = listingRoomId(listing);
+  if (rid && pinnedRoomIds.includes(rid)) return true;
+  return false;
 }
 
 // ── Date helpers ────────────────────────────────────────────────
@@ -134,17 +146,128 @@ function SkeletonCard() {
   );
 }
 
+// ── Mobile overflow menu (••• kebab) ─────────────────────────────
+
+function MobileCompActionMenu({
+  listing,
+  alreadyBenchmark,
+  onExclude,
+  onPromote,
+}: {
+  listing: ComparableListing;
+  alreadyBenchmark?: boolean;
+  onExclude?: (listing: ComparableListing) => void;
+  onPromote?: (listing: ComparableListing) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement | null;
+      if (!target || !target.closest?.("[data-mobile-comp-menu]")) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  return (
+    <div className="absolute right-2 top-2 md:hidden" data-mobile-comp-menu>
+      <button
+        type="button"
+        data-testid="comp-action-overflow"
+        aria-label="More actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((v) => !v);
+        }}
+        className="rounded-md bg-white/95 p-1.5 text-gray-500 ring-1 ring-gray-200 shadow-sm transition hover:bg-gray-50"
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <circle cx="3" cy="8" r="1.5" />
+          <circle cx="8" cy="8" r="1.5" />
+          <circle cx="13" cy="8" r="1.5" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-9 z-10 w-48 overflow-hidden rounded-md bg-white text-sm shadow-lg ring-1 ring-gray-200"
+        >
+          <button
+            type="button"
+            data-testid="comp-action-promote"
+            role="menuitem"
+            disabled={alreadyBenchmark}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+              onPromote?.(listing);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:text-gray-400"
+          >
+            <span aria-hidden="true">⭐</span>
+            {alreadyBenchmark ? "Already a benchmark" : "Use as benchmark"}
+          </button>
+          <button
+            type="button"
+            data-testid="comp-action-exclude"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+              onExclude?.(listing);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-rose-700 hover:bg-rose-50"
+          >
+            <span aria-hidden="true">⊘</span>
+            Hide from future reports
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Listing Card ────────────────────────────────────────────────
+
+interface ComparableCardProps {
+  listing: ComparableListing;
+  isPinned?: boolean;
+  selectedDate?: string | null;
+  /** True when the user can act on this card (dashboard view, not share view). */
+  canManage?: boolean;
+  /** True if this card is in the process of being hidden (animation hint). */
+  isExiting?: boolean;
+  /** True if the comp is already a benchmark — disable the Promote button. */
+  alreadyBenchmark?: boolean;
+  /** True if pressing Promote should open a "Replace which?" picker (≥10). */
+  promoteAtCap?: boolean;
+  onExclude?: (listing: ComparableListing) => void;
+  onPromote?: (listing: ComparableListing) => void;
+}
 
 function ComparableCard({
   listing,
   isPinned = false,
   selectedDate,
-}: {
-  listing: ComparableListing;
-  isPinned?: boolean;
-  selectedDate?: string | null;
-}) {
+  canManage = false,
+  isExiting = false,
+  alreadyBenchmark = false,
+  promoteAtCap = false,
+  onExclude,
+  onPromote,
+}: ComparableCardProps) {
+  // Action icons require a stable numeric roomId — without one we can't write
+  // a guaranteed-stable excludedComps entry, so the action would 400 at the
+  // schema level.  Hide rather than letting the user hit a wall.
+  const hasStableRoomId = !!listingRoomId(listing);
+  const showActions = canManage && hasStableRoomId && !isExiting;
   const matchPct = Math.round(listing.similarity * 100);
   const badgeClasses = similarityBadgeClasses(listing.similarity);
 
@@ -191,10 +314,79 @@ function ComparableCard({
 
   return (
     <div
-      className={`rounded-xl border p-4 transition hover:shadow-sm ${
+      data-testid="comparable-card"
+      data-state={isExiting ? "exiting" : "idle"}
+      data-room-id={listingRoomId(listing) ?? ""}
+      style={
+        isExiting
+          ? {
+              opacity: 0,
+              transform: "scale(0.98)",
+              transition: "opacity 200ms ease-out, transform 200ms ease-out",
+            }
+          : undefined
+      }
+      className={`group relative rounded-xl border p-4 transition hover:shadow-sm ${
         isPinned ? "border-amber-300 bg-amber-50/70 shadow-sm ring-1 ring-amber-100" : "border-gray-100 bg-white"
       }`}
     >
+      {/* Hover-reveal action icons (desktop only — md+) */}
+      {showActions && (
+        <div
+          className="pointer-events-none absolute right-3 top-3 hidden gap-1 opacity-0 transition-opacity duration-150 ease-out md:flex md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+          aria-hidden="true"
+        >
+          <button
+            type="button"
+            data-testid="comp-action-promote"
+            disabled={alreadyBenchmark}
+            onClick={(e) => {
+              e.stopPropagation();
+              onPromote?.(listing);
+            }}
+            title={
+              alreadyBenchmark
+                ? "Already a benchmark"
+                : promoteAtCap
+                ? "Replace a benchmark"
+                : "Use as benchmark"
+            }
+            aria-label="Use as benchmark"
+            className="pointer-events-auto rounded-md bg-white/95 p-1.5 text-amber-600 ring-1 ring-amber-200 shadow-sm transition hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M8 1.5l1.95 3.95 4.36.63-3.16 3.08.74 4.34L8 11.46l-3.9 2.04.74-4.34L1.7 6.08l4.36-.63L8 1.5z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            data-testid="comp-action-exclude"
+            onClick={(e) => {
+              e.stopPropagation();
+              onExclude?.(listing);
+            }}
+            title="Hide from future reports"
+            aria-label="Hide from future reports"
+            className="pointer-events-auto rounded-md bg-white/95 p-1.5 text-rose-500 ring-1 ring-rose-200 shadow-sm transition hover:bg-rose-50"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <circle cx="8" cy="8" r="6" />
+              <path d="M3.5 12.5 L12.5 3.5" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {/* Mobile overflow menu (••• kebab — replaces hover on touch devices) */}
+      {showActions && (
+        <MobileCompActionMenu
+          listing={listing}
+          alreadyBenchmark={alreadyBenchmark}
+          onExclude={onExclude}
+          onPromote={onPromote}
+        />
+      )}
+
       {/* Top row: title+specs LEFT, price+badge RIGHT */}
       <div className="flex items-start justify-between gap-4">
         {/* Left zone */}
@@ -286,11 +478,45 @@ interface ComparableListingsSectionProps {
   benchmarkInfo?: BenchmarkInfo | null;
   loading?: boolean;
   embedded?: boolean;
+  /**
+   * @deprecated use pinnedRoomIds (roomId-first) instead.
+   * Kept for backward-compat — derived to roomIds internally.
+   */
   pinnedUrls?: string[];
+  /** Stable room IDs of comps that are user benchmarks. */
+  pinnedRoomIds?: string[];
   /** Effective price date for exact day-level comp filtering. */
   selectedDate?: string | null;
   /** The date the user clicked. */
   clickedDate?: string | null;
+  // ── Per-listing manage controls (dashboard view only) ──────────
+  /** Room IDs the user has excluded — filtered out at render time. */
+  excludedRoomIds?: string[];
+  /** Full ExcludedComp objects for the Manage popover (title + restore). */
+  excludedDetails?: ExcludedComp[];
+  /** Snapshot from report.excludedRoomIdsAtRun — controls banner wording. */
+  reportExcludedRoomIdsAtRun?: string[] | null;
+  /**
+   * True only when the viewer owns the listing.  Public share view passes
+   * false → action icons / banner / Manage all hidden.
+   */
+  canManageComps?: boolean;
+  onExcludeComp?: (listing: ComparableListing) => void;
+  onPromoteComp?: (
+    listing: ComparableListing,
+    opts?: { unexcludeRoomId?: string }
+  ) => void;
+  onRestoreExcluded?: (roomId: string) => void;
+  onRerun?: () => Promise<void> | void;
+  /**
+   * Called when the user tries to Exclude a comp that is currently a benchmark.
+   * Should open an inline confirm dialog and, on confirm, atomically remove
+   * from preferredComps + add to excludedComps.
+   */
+  onExcludeBenchmarkConflict?: (
+    listing: ComparableListing,
+    benchmarkRoomId: string
+  ) => void;
 }
 
 export function ComparableListingsSection({
@@ -299,10 +525,62 @@ export function ComparableListingsSection({
   loading = false,
   embedded = false,
   pinnedUrls = [],
+  pinnedRoomIds: pinnedRoomIdsProp,
   selectedDate = null,
+  excludedRoomIds = [],
+  excludedDetails = [],
+  reportExcludedRoomIdsAtRun = null,
+  canManageComps = false,
+  onExcludeComp,
+  onPromoteComp,
+  onRestoreExcluded,
+  onRerun,
+  onExcludeBenchmarkConflict,
 }: ComparableListingsSectionProps) {
   const [sortBy, setSortBy] = useState<SortMode>("similarity");
   const [expanded, setExpanded] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
+  const [rerunStarting, setRerunStarting] = useState(false);
+  const [conflictDialog, setConflictDialog] = useState<{
+    type: "exclude-benchmark" | "promote-excluded";
+    listing: ComparableListing;
+    targetRoomId: string;
+  } | null>(null);
+  // Cards currently animating out.  Exit window: 200 ms.
+  // While a card's roomId is in this set, it stays rendered with
+  // data-state="exiting" even after the parent's optimistic excludedRoomIds
+  // would otherwise filter it away.
+  const [exitingRoomIds, setExitingRoomIds] = useState<Set<string>>(
+    () => new Set()
+  );
+
+  // Derive canonical pinnedRoomIds from new prop or legacy pinnedUrls.
+  const pinnedRoomIds = useMemo<string[]>(() => {
+    if (pinnedRoomIdsProp && pinnedRoomIdsProp.length > 0) return pinnedRoomIdsProp;
+    return pinnedUrls
+      .map((u) => extractRoomId(u))
+      .filter((rid): rid is string => Boolean(rid));
+  }, [pinnedRoomIdsProp, pinnedUrls]);
+
+  const excludedSet = useMemo(
+    () => new Set(excludedRoomIds),
+    [excludedRoomIds]
+  );
+
+  const reportSnapshotSet = useMemo(
+    () => new Set(reportExcludedRoomIdsAtRun ?? []),
+    [reportExcludedRoomIdsAtRun]
+  );
+
+  // Banner two-state logic:
+  //   - hasPendingHide: there are excluded comps not yet reflected in this report
+  //   - alreadyApplied: every current excluded id is already in the report snapshot
+  //                     → "Pricing excludes X hidden comparables" (no Re-run button)
+  //   - mixed/pending → "X comparables hidden locally. Re-run to update pricing."
+  const allExcludedAlreadyAtRun = excludedRoomIds.every((rid) =>
+    reportSnapshotSet.has(rid)
+  );
+  const hiddenCount = excludedRoomIds.length;
 
   const matchQuality = comps
     ? matchQualityLabel(comps.filterStage)
@@ -310,17 +588,32 @@ export function ComparableListingsSection({
 
   const sorted = useMemo(() => {
     if (!listings || listings.length === 0) return [];
-    const filtered = selectedDate
+    let filtered = selectedDate
       ? listings.filter((listing) => listing.priceByDate?.[selectedDate] != null)
       : listings;
+    // Render-time filter: drop user-excluded comps so the card list reflects
+    // the (eventually) post-rerun report.  canManageComps=false on share view
+    // → snapshot semantics, don't filter.
+    //
+    // Exception: cards in `exitingRoomIds` stay rendered (with isExiting=true)
+    // even though they're already in the optimistic excludedSet — this lets
+    // the 200 ms exit animation actually play out before the DOM removal.
+    if (canManageComps && excludedSet.size > 0) {
+      filtered = filtered.filter((listing) => {
+        const rid = listingRoomId(listing);
+        if (!rid) return true;
+        if (!excludedSet.has(rid)) return true;
+        return exitingRoomIds.has(rid);
+      });
+    }
     const copy = [...filtered];
     // When a date is selected, use only the exact date price (may be undefined).
     // When no date is selected, fall back to the general nightlyPrice.
     const getPrice = (listing: ComparableListing): number | undefined =>
       selectedDate ? listing.priceByDate?.[selectedDate] : listing.nightlyPrice;
     const comparePinned = (a: ComparableListing, b: ComparableListing) => {
-      const aPinned = isPinnedListing(a, pinnedUrls);
-      const bPinned = isPinnedListing(b, pinnedUrls);
+      const aPinned = isPinnedListing(a, pinnedRoomIds);
+      const bPinned = isPinnedListing(b, pinnedRoomIds);
       if (aPinned === bPinned) return 0;
       return aPinned ? -1 : 1;
     };
@@ -340,7 +633,15 @@ export function ComparableListingsSection({
       });
     }
     return copy;
-  }, [listings, sortBy, pinnedUrls, selectedDate]);
+  }, [
+    listings,
+    sortBy,
+    pinnedRoomIds,
+    selectedDate,
+    canManageComps,
+    excludedSet,
+    exitingRoomIds,
+  ]);
 
   const initialVisibleCount = embedded ? 5 : 10;
   const visible = expanded ? sorted : sorted.slice(0, initialVisibleCount);
@@ -352,7 +653,7 @@ export function ComparableListingsSection({
   const locationBasis = "your area"; // fallback; caller can pass queryCriteria
   const showingCount = visible.length;
   const nonPinnedVisibleForDate = selectedDate
-    ? visible.filter((listing) => !isPinnedListing(listing, pinnedUrls))
+    ? visible.filter((listing) => !isPinnedListing(listing, pinnedRoomIds))
     : [];
   const hasAnyComparableDataForSelectedDate = !!(
     selectedDate &&
@@ -422,10 +723,155 @@ export function ComparableListingsSection({
           {matchQuality.description}
         </p>
       )}
-      {pinnedUrls.length > 0 && (
+      {pinnedRoomIds.length > 0 && (
         <p className="mb-3 text-xs font-medium text-amber-700">
           Your pinned benchmark listing appears first in this list whenever it is present in the collected comps.
         </p>
+      )}
+
+      {/* Hidden-comps banner — two states based on whether the report has been re-run */}
+      {canManageComps && hiddenCount > 0 && (
+        <div
+          data-testid="hidden-banner"
+          className={`mb-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
+            allExcludedAlreadyAtRun
+              ? "border-blue-100 bg-blue-50 text-blue-800"
+              : "border-amber-100 bg-amber-50 text-amber-800"
+          }`}
+        >
+          <span className="flex-1">
+            {allExcludedAlreadyAtRun
+              ? `Pricing excludes ${hiddenCount} hidden ${hiddenCount === 1 ? "comparable" : "comparables"}.`
+              : `${hiddenCount} ${hiddenCount === 1 ? "comparable" : "comparables"} hidden locally. Re-run to update pricing.`}
+          </span>
+          {!allExcludedAlreadyAtRun && onRerun && (
+            <button
+              type="button"
+              data-testid="rerun-report-button"
+              disabled={rerunStarting}
+              onClick={async () => {
+                if (rerunStarting) return;
+                setRerunStarting(true);
+                try {
+                  await onRerun();
+                } finally {
+                  setRerunStarting(false);
+                }
+              }}
+              className="rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-900 ring-1 ring-amber-200 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {rerunStarting ? "Starting…" : "Re-run"}
+            </button>
+          )}
+          <button
+            type="button"
+            data-testid="banner-manage"
+            onClick={() => setManageOpen((v) => !v)}
+            className="rounded-md px-2 py-1 text-xs font-medium underline-offset-2 hover:underline"
+          >
+            Manage
+          </button>
+        </div>
+      )}
+
+      {/* Manage popover (lives directly under the banner) */}
+      {canManageComps && manageOpen && (
+        <div
+          data-testid="manage-panel"
+          className="mb-3 rounded-lg border border-gray-200 bg-white p-3 text-xs shadow-sm"
+        >
+          {hiddenCount === 0 ? (
+            <p className="text-gray-500">No comps are currently hidden.</p>
+          ) : (
+            <ul className="divide-y divide-gray-100">
+              {excludedDetails.map((ec) => (
+                <li
+                  key={ec.roomId}
+                  data-testid={`manage-row-${ec.roomId}`}
+                  className="flex items-center gap-2 py-1.5"
+                >
+                  <span className="flex-1 truncate text-gray-700">
+                    {ec.title || `Room ${ec.roomId}`}
+                  </span>
+                  {onRestoreExcluded && (
+                    <button
+                      type="button"
+                      data-testid={`manage-restore-${ec.roomId}`}
+                      onClick={() => onRestoreExcluded(ec.roomId)}
+                      className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200 transition hover:bg-emerald-100"
+                    >
+                      Restore
+                    </button>
+                  )}
+                </li>
+              ))}
+              {/* When excludedDetails is empty but excludedRoomIds has values
+                  (caller didn't pass full details), surface IDs alone. */}
+              {excludedDetails.length === 0 &&
+                excludedRoomIds.map((rid) => (
+                  <li key={rid} className="flex items-center gap-2 py-1.5">
+                    <span className="flex-1 truncate text-gray-700">Room {rid}</span>
+                    {onRestoreExcluded && (
+                      <button
+                        type="button"
+                        data-testid={`manage-restore-${rid}`}
+                        onClick={() => onRestoreExcluded(rid)}
+                        className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200 transition hover:bg-emerald-100"
+                      >
+                        Restore
+                      </button>
+                    )}
+                  </li>
+                ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {/* Inline confirm dialog (conflict cases — single feedback channel, no toast error) */}
+      {conflictDialog && (
+        <div
+          role="alertdialog"
+          aria-modal="true"
+          data-testid="conflict-dialog"
+          className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
+        >
+          <p className="mb-2 font-medium">
+            {conflictDialog.type === "exclude-benchmark"
+              ? "This is a benchmark. Remove it and exclude?"
+              : "This comp is currently excluded. Promote and restore it?"}
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              data-testid="conflict-dialog-cancel"
+              onClick={() => setConflictDialog(null)}
+              className="rounded-md px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              data-testid="conflict-dialog-confirm"
+              onClick={() => {
+                if (conflictDialog.type === "exclude-benchmark") {
+                  onExcludeBenchmarkConflict?.(
+                    conflictDialog.listing,
+                    conflictDialog.targetRoomId
+                  );
+                } else {
+                  onPromoteComp?.(conflictDialog.listing, {
+                    unexcludeRoomId: conflictDialog.targetRoomId,
+                  });
+                }
+                setConflictDialog(null);
+              }}
+              className="rounded-md bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700"
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
       )}
       {/* Sort toggle */}
       <div className="mb-3 flex gap-1 self-start rounded-lg border border-gray-200 p-0.5 w-fit">
@@ -468,14 +914,75 @@ export function ComparableListingsSection({
 
       {/* Cards */}
       <div className="space-y-3">
-        {visible.map((listing) => (
-          <ComparableCard
-            key={listing.id}
-            listing={listing}
-            isPinned={isPinnedListing(listing, pinnedUrls)}
-            selectedDate={selectedDate}
-          />
-        ))}
+        {visible.map((listing) => {
+          const rid = listingRoomId(listing);
+          const alreadyBenchmark = !!(rid && pinnedRoomIds.includes(rid));
+          const promoteAtCap = pinnedRoomIds.length >= 10;
+          const isExcluded = !!(rid && excludedSet.has(rid));
+          const isExiting = !!(rid && exitingRoomIds.has(rid));
+          return (
+            <ComparableCard
+              key={listing.id}
+              listing={listing}
+              isPinned={isPinnedListing(listing, pinnedRoomIds)}
+              selectedDate={selectedDate}
+              canManage={canManageComps}
+              isExiting={isExiting}
+              alreadyBenchmark={alreadyBenchmark}
+              promoteAtCap={promoteAtCap}
+              onExclude={(l) => {
+                const r = listingRoomId(l);
+                // Conflict: comp is currently a benchmark → inline confirm.
+                if (r && pinnedRoomIds.includes(r)) {
+                  setConflictDialog({
+                    type: "exclude-benchmark",
+                    listing: l,
+                    targetRoomId: r,
+                  });
+                  return;
+                }
+                if (!r) return;
+                // Queue *immediately* so the manager owns the pending op.
+                // If the user navigates within 200 ms, pagehide / route /
+                // listing-switch flush paths now know about this click —
+                // delaying the queue would silently lose the operation.
+                onExcludeComp?.(l);
+                // Animation runs in parallel: keep the card mounted with
+                // data-state="exiting" for 200 ms.  The render filter
+                // respects exitingRoomIds so the optimistic excludedSet
+                // (from the parent) doesn't yank the card before the
+                // opacity/scale transition has time to play.
+                setExitingRoomIds((prev) => {
+                  const next = new Set(prev);
+                  next.add(r);
+                  return next;
+                });
+                setTimeout(() => {
+                  setExitingRoomIds((prev) => {
+                    if (!prev.has(r)) return prev;
+                    const next = new Set(prev);
+                    next.delete(r);
+                    return next;
+                  });
+                }, 200);
+              }}
+              onPromote={(l) => {
+                const r = listingRoomId(l);
+                // If comp is currently in excluded → inline confirm before atomic
+                // promote-and-unexclude.
+                if (r && isExcluded) {
+                  setConflictDialog({
+                    type: "promote-excluded",
+                    listing: l,
+                    targetRoomId: r,
+                  });
+                  return;
+                }
+                onPromoteComp?.(l);
+              }}
+            />
+          );
+        })}
       </div>
 
       {/* Show more / Show less */}

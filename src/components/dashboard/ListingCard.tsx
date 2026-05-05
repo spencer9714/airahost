@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { RecommendedPrice, CalendarDay } from "@/lib/schemas";
+import type {
+  CalendarDay,
+  ExcludedComp,
+  RecommendedPrice,
+} from "@/lib/schemas";
 import { computeFreshness, resolveMarketCapturedAt } from "@/lib/freshness";
+import { dismissToast, toast } from "@/components/ui/Toaster";
 import { AutoApplyFeature } from "./AutoApplyFeature";
 import { AlertSetupModal } from "./AlertSetupModal";
 
@@ -41,7 +46,8 @@ type ListingData = {
     maxGuests?: number;
     beds?: number;
     listingUrl?: string | null;
-    preferredComps?: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null;
+    preferredComps?: Array<{ listingUrl: string; name?: string; note?: string; enabled?: boolean }> | null;
+    excludedComps?: ExcludedComp[] | null;
   };
   latestReport: LatestReport;
   latestLinkedAt: string | null;
@@ -88,7 +94,12 @@ interface Props {
   onRename: (listingId: string, nextName: string) => Promise<void>;
   onSavePreferredComps: (
     listingId: string,
-    preferredComps: Array<{ listingUrl: string; note?: string; enabled?: boolean }> | null
+    preferredComps: Array<{ listingUrl: string; name?: string; note?: string; enabled?: boolean }> | null
+  ) => Promise<void>;
+  /** Optional: persist updated excludedComps from the Excluded panel. */
+  onSaveExcludedComps?: (
+    listingId: string,
+    excludedComps: ExcludedComp[] | null
   ) => Promise<void>;
   onSaveAlertSettings: (listingId: string, settings: AlertSettings) => Promise<void>;
   onSaveAutoApply: (
@@ -138,14 +149,43 @@ export function ListingCard({
   onSavePreferredComps,
   onSaveAlertSettings,
   onSaveAutoApply,
+  onSaveExcludedComps,
   onTriggerCohostVerification,
 }: Props) {
   const [editOpen, setEditOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
+  // Per-row benchmark draft.  `enabled` defaults to true; `name` is the
+  // og:title fetched on URL blur (or read from saved state on sync).
+  // `draftId` is a stable per-row key — async title fetches resolve by
+  // draftId, not by array index, so reorder/remove during the await won't
+  // write the title into the wrong row.
   const [benchmarkDrafts, setBenchmarkDrafts] = useState<
-    Array<{ listingUrl: string; note: string }>
+    Array<{
+      draftId: string;
+      listingUrl: string;
+      note: string;
+      enabled: boolean;
+      name: string;
+    }>
   >([]);
   const [expandedBenchmarkIdx, setExpandedBenchmarkIdx] = useState<number | null>(null);
+  // Stable draftId of the row currently fetching its og:title — drives a
+  // tiny spinner in the row header.  Null when no fetch is in flight.
+  const [fetchingDraftId, setFetchingDraftId] = useState<string | null>(null);
+  // Index of the row whose ••• overflow menu is open.  Single open menu.
+  const [openMenuIdx, setOpenMenuIdx] = useState<number | null>(null);
+  // Counter ref for minting draftIds.  Restarts on remount; that's fine
+  // because draftIds are local-only (never sent to server).
+  const draftIdCounterRef = useRef(0);
+  const mintDraftId = () => {
+    draftIdCounterRef.current += 1;
+    return `draft-${draftIdCounterRef.current}`;
+  };
+  // Excluded comps accordion open/closed state.
+  const [excludedOpen, setExcludedOpen] = useState(false);
+  // Draft excluded comps mirroring the staged-save model.  Persisted via
+  // `handleSaveAll` together with benchmarks.
+  const [excludedDrafts, setExcludedDrafts] = useState<ExcludedComp[]>([]);
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -255,14 +295,45 @@ export function ListingCard({
     setDraftAlertsEnabled(listing.pricing_alerts_enabled ?? false);
   }, [listing.pricing_alerts_enabled]);
 
-  // Sync benchmark drafts.
+  // Sync benchmark drafts.  Keep disabled rows so the toggle UI surfaces
+  // them; only filter blanks.  Carry `enabled` and `name` through so the
+  // edit panel reflects the saved state truthfully.
   useEffect(() => {
     const next = (listing.input_attributes.preferredComps ?? [])
-      .filter((c) => c.enabled !== false && c.listingUrl)
-      .map((c) => ({ listingUrl: c.listingUrl, note: c.note ?? "" }));
-    setBenchmarkDrafts(next.length > 0 ? next : [{ listingUrl: "", note: "" }]);
+      .filter((c) => c.listingUrl)
+      .map((c) => ({
+        draftId: mintDraftId(),
+        listingUrl: c.listingUrl,
+        note: c.note ?? "",
+        enabled: c.enabled !== false,
+        name: c.name ?? "",
+      }));
+    setBenchmarkDrafts(
+      next.length > 0
+        ? next
+        : [
+            {
+              draftId: mintDraftId(),
+              listingUrl: "",
+              note: "",
+              enabled: true,
+              name: "",
+            },
+          ]
+    );
     setExpandedBenchmarkIdx(null);
+    setOpenMenuIdx(null);
+    setFetchingDraftId(null);
+    // mintDraftId is stable (just bumps a ref), excluded from deps to avoid
+    // re-syncing on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listing.input_attributes.preferredComps]);
+
+  // Sync excluded drafts.
+  useEffect(() => {
+    const next = listing.input_attributes.excludedComps ?? [];
+    setExcludedDrafts(Array.isArray(next) ? next : []);
+  }, [listing.input_attributes.excludedComps]);
 
   // ── Card-level alert toggle ───────────────────────────────────────
   // Turning OFF: always direct.
@@ -311,26 +382,53 @@ export function ListingCard({
     if (isSaving) return;
     setIsSaving(true);
     setSaveMessage(null);
+    // Dismiss any outstanding Remove undo toasts so a click after Save
+    // can't resurrect a deleted row into local state.  The toast onClick
+    // also re-checks pendingRemoveToastIdsRef and bails if not present —
+    // belt-and-suspenders against the toast already being mid-animation.
+    for (const tid of pendingRemoveToastIdsRef.current) {
+      dismissToast(tid);
+    }
+    pendingRemoveToastIdsRef.current.clear();
     try {
       // 1. Rename if changed.
       const nextName = draftName.trim();
       if (nextName && nextName !== displayTitle) {
         await onRename(listing.id, nextName);
       }
-      // 2. Benchmarks.
+      // 2. Benchmarks.  Preserve `enabled: false` rows so the user can pause
+      // a benchmark without losing its note.  Filter only invalid blanks.
       const valid = benchmarkDrafts
-        .map((item) => ({ listingUrl: item.listingUrl.trim(), note: item.note.trim() }))
+        .map((item) => ({
+          listingUrl: item.listingUrl.trim(),
+          note: item.note.trim(),
+          name: item.name.trim(),
+          enabled: item.enabled,
+        }))
         .filter((item) => item.listingUrl.includes("airbnb.com/rooms/"));
       await onSavePreferredComps(
         listing.id,
         valid.length > 0
           ? valid.map((item) => ({
               listingUrl: item.listingUrl,
+              name: item.name || undefined,
               note: item.note || undefined,
-              enabled: true,
+              enabled: item.enabled,
             }))
           : null
       );
+      // 2b. Excluded comps (only if a callback is wired).
+      if (
+        onSaveExcludedComps &&
+        // Compare against current saved state to avoid no-op PATCHes.
+        JSON.stringify(excludedDrafts) !==
+          JSON.stringify(listing.input_attributes.excludedComps ?? [])
+      ) {
+        await onSaveExcludedComps(
+          listing.id,
+          excludedDrafts.length > 0 ? excludedDrafts : null
+        );
+      }
       // 3. Alert settings — only send fields that changed.
       const alertPayload: AlertSettings = {};
       const savedUrl = listing.input_attributes.listingUrl ?? "";
@@ -362,6 +460,145 @@ export function ListingCard({
       !comp.listingUrl.includes("airbnb.com/rooms/")
   );
 
+  // ── Benchmark row helpers ─────────────────────────────────────────
+  // All operations stage to local draft only — outer Save persists.
+
+  // Async: normalize URL on blur, fetch og:title, fill name, auto-collapse.
+  // Resolves by *draftId* — if the user reorders or removes the row during
+  // the fetch, the title won't be written into the wrong row (or any row
+  // if the source row was removed).
+  async function commitBenchmarkUrlOnBlur(draftId: string) {
+    const row = benchmarkDrafts.find((c) => c.draftId === draftId);
+    if (!row) return;
+    const raw = row.listingUrl.trim();
+    if (!raw) return;
+    const normalized = normalizeAirbnbUrl(raw);
+    const isValid = normalized.includes("airbnb.com/rooms/");
+    if (!isValid) return;
+    // Persist normalized URL into the draft (functional setState reads
+    // freshest prev — handles concurrent edits in the same row).
+    setBenchmarkDrafts((prev) =>
+      prev.map((c) => (c.draftId === draftId ? { ...c, listingUrl: normalized } : c))
+    );
+    // Capture the row's current array index for auto-collapse target.  If
+    // the row moves during the await, we'll detect that below.
+    const startingIdx = benchmarkDrafts.findIndex((c) => c.draftId === draftId);
+    setFetchingDraftId(draftId);
+    try {
+      const res = await fetch(
+        `/api/benchmark-title?url=${encodeURIComponent(normalized)}`,
+        { signal: AbortSignal.timeout(5000) }
+      );
+      if (res.ok) {
+        const body = (await res.json().catch(() => null)) as { title?: string } | null;
+        const title = body?.title?.trim();
+        if (title) {
+          setBenchmarkDrafts((prev) =>
+            prev.map((c) => (c.draftId === draftId ? { ...c, name: title } : c))
+          );
+        }
+      }
+    } catch {
+      // Silent — title is decorative.
+    } finally {
+      setFetchingDraftId((cur) => (cur === draftId ? null : cur));
+    }
+    // Auto-collapse only if the user is still focused on this same row.
+    // If they moved/removed it mid-fetch, leave their current expanded
+    // state alone.
+    setExpandedBenchmarkIdx((cur) => (cur === startingIdx ? null : cur));
+  }
+
+  function moveBenchmark(idx: number, dir: "up" | "down") {
+    setBenchmarkDrafts((prev) => {
+      const next = [...prev];
+      const target = dir === "up" ? idx - 1 : idx + 1;
+      if (target < 0 || target >= next.length) return prev;
+      [next[idx], next[target]] = [next[target], next[idx]];
+      return next;
+    });
+    setOpenMenuIdx(null);
+  }
+
+  function toggleBenchmarkEnabled(idx: number) {
+    setBenchmarkDrafts((prev) =>
+      prev.map((c, i) => (i === idx ? { ...c, enabled: !c.enabled } : c))
+    );
+  }
+
+  // Track outstanding remove-undo toast IDs.  Cleared (and dismissed) on
+  // Save so an Undo click after Save can't resurrect already-committed
+  // deletes into the local draft, which would put UI and server out of sync.
+  const pendingRemoveToastIdsRef = useRef<Set<number>>(new Set());
+
+  // Remove with 6 s undo toast.  Pure local-draft op; no API call.  If the
+  // user hits Save before pressing Undo, `handleSaveAll` dismisses every
+  // outstanding remove toast — Undo becomes a no-op.
+  function removeBenchmarkWithUndo(idx: number) {
+    const removed = benchmarkDrafts[idx];
+    if (!removed) return;
+    const removedDraftId = removed.draftId;
+    // Optimistic remove.
+    setBenchmarkDrafts((prev) =>
+      prev.length > 1
+        ? prev.filter((c) => c.draftId !== removedDraftId)
+        : [
+            {
+              draftId: mintDraftId(),
+              listingUrl: "",
+              note: "",
+              enabled: true,
+              name: "",
+            },
+          ]
+    );
+    setOpenMenuIdx(null);
+    const label =
+      removed.name?.trim() ||
+      (removed.listingUrl.match(/\/rooms\/(\d+)/)?.[1]
+        ? `Room ${removed.listingUrl.match(/\/rooms\/(\d+)/)![1]}`
+        : "benchmark");
+    let tid = 0;
+    tid = toast({
+      title: `Removed ${label} · Undo`,
+      durationMs: 6000,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          // No-op if Save already cleared this toast — pendingRemoveToastIds
+          // would have been emptied and tid removed.  We re-check to make
+          // sure we don't resurrect post-Save state.
+          if (!pendingRemoveToastIdsRef.current.has(tid)) {
+            return;
+          }
+          pendingRemoveToastIdsRef.current.delete(tid);
+          setBenchmarkDrafts((prev) => {
+            // Re-insert at the original index, dropping the placeholder if any.
+            const cleaned = prev.filter(
+              (c) =>
+                !(c.listingUrl === "" && c.note === "" && c.name === "")
+            );
+            const next = [...cleaned];
+            next.splice(idx, 0, removed);
+            return next;
+          });
+          dismissToast(tid);
+        },
+        testId: "toast-undo",
+      },
+    });
+    pendingRemoveToastIdsRef.current.add(tid);
+    // Auto-clear from the tracking set when the toast naturally expires —
+    // dismissToast on a stale id is a no-op so this is purely cleanup.
+    setTimeout(() => {
+      pendingRemoveToastIdsRef.current.delete(tid);
+    }, 6500);
+  }
+
+  function restoreExcluded(roomId: string) {
+    setExcludedDrafts((prev) => prev.filter((ec) => ec.roomId !== roomId));
+  }
+
   return (
     <>
       {/* ── Setup modal (renders into document.body via portal) ── */}
@@ -391,6 +628,7 @@ export function ListingCard({
 
         {/* ── Selectable body ── */}
         <div
+          data-testid={`listing-nav-${listing.id}`}
           className={`cursor-pointer px-4 transition-all ${
             isActive || editOpen ? "pb-2.5 pt-4" : "py-3"
           }`}
@@ -619,7 +857,16 @@ export function ListingCard({
                       type="button"
                       onClick={() => {
                         const newIdx = benchmarkDrafts.length;
-                        setBenchmarkDrafts((prev) => [...prev, { listingUrl: "", note: "" }]);
+                        setBenchmarkDrafts((prev) => [
+                          ...prev,
+                          {
+                            draftId: mintDraftId(),
+                            listingUrl: "",
+                            note: "",
+                            enabled: true,
+                            name: "",
+                          },
+                        ]);
                         setExpandedBenchmarkIdx(newIdx);
                       }}
                       className="text-xs font-medium text-foreground/40 transition-colors hover:text-foreground/70"
@@ -632,84 +879,166 @@ export function ListingCard({
                 <div className="space-y-2">
                   {benchmarkDrafts.map((comp, idx) => {
                     const isExpanded = expandedBenchmarkIdx === idx;
+                    const isMenuOpen = openMenuIdx === idx;
                     const hasUrl = comp.listingUrl.trim().length > 0;
                     const isValid = comp.listingUrl.includes("airbnb.com/rooms/");
                     const roomMatch = comp.listingUrl.match(/\/rooms\/(\d+)/);
-                    const roomLabel = roomMatch
+                    const roomLabel = comp.name?.trim()
+                      ? comp.name
+                      : roomMatch
                       ? `Room ${roomMatch[1]}`
                       : hasUrl
                       ? "Airbnb listing"
                       : "New benchmark";
+                    const isFetchingTitle = fetchingDraftId === comp.draftId;
 
                     return (
                       <div
-                        key={idx}
+                        key={comp.draftId}
+                        data-testid="benchmark-row"
+                        data-row-idx={idx}
                         className={`rounded-xl border transition-colors ${
                           isExpanded
                             ? "border-gray-200 bg-white"
                             : "border-gray-200/60 bg-white/70"
-                        }`}
+                        } ${comp.enabled ? "" : "opacity-60"}`}
                       >
-                        <div className="flex items-center gap-2.5 px-3 py-2.5">
+                        {/* Collapsed header: toggle · primary dot · label · primary pill · ••• */}
+                        <div
+                          className="flex items-center gap-2.5 px-3 py-2.5"
+                          onClick={(e) => {
+                            // Click in the empty area expands the row, but
+                            // not when the user clicked any control.
+                            if ((e.target as HTMLElement).closest("button, input, [role='menu'], label")) return;
+                            setExpandedBenchmarkIdx(isExpanded ? null : idx);
+                          }}
+                        >
+                          {/* enable/disable toggle (always visible) */}
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={comp.enabled}
+                            aria-label={comp.enabled ? "Disable benchmark" : "Enable benchmark"}
+                            data-testid="benchmark-enabled-toggle"
+                            data-row-idx={idx}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleBenchmarkEnabled(idx);
+                            }}
+                            className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${
+                              comp.enabled ? "bg-blue-400" : "bg-gray-200"
+                            }`}
+                          >
+                            <span
+                              className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                                comp.enabled ? "translate-x-3.5" : "translate-x-0.5"
+                              }`}
+                            />
+                          </button>
+
+                          {/* Primary dot — amber when index 0 + enabled, otherwise gray */}
                           <span
                             className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                              idx === 0 ? "bg-blue-400" : "bg-gray-300"
+                              idx === 0 && comp.enabled ? "bg-amber-400" : "bg-gray-300"
                             }`}
-                            title={idx === 0 ? "Primary" : "Secondary"}
+                            aria-hidden="true"
                           />
+
+                          {/* Label + optional Primary pill + spinner */}
                           <span
                             className={`flex-1 truncate text-sm font-medium ${
                               hasUrl ? "text-foreground/70" : "text-foreground/30"
-                            }`}
+                            } ${comp.enabled ? "" : "line-through"}`}
                           >
                             {roomLabel}
                           </span>
-                          {!isExpanded && comp.note && (
-                            <span className="max-w-16 shrink-0 truncate text-xs italic text-foreground/30">
-                              {comp.note}
+                          {idx === 0 && hasUrl && (
+                            <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+                              Primary
                             </span>
                           )}
-                          <div className="flex shrink-0 items-center gap-3">
-                            {idx > 0 && !isExpanded && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const next = [...benchmarkDrafts];
-                                  const [picked] = next.splice(idx, 1);
-                                  next.unshift(picked);
-                                  setBenchmarkDrafts(next);
-                                }}
-                                className="text-xs text-foreground/30 transition-colors hover:text-foreground/60"
+                          {isFetchingTitle && (
+                            <svg
+                              className="h-3 w-3 shrink-0 animate-spin text-foreground/40"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              aria-label="Fetching title"
+                            >
+                              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" opacity="0.25" />
+                              <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                            </svg>
+                          )}
+
+                          {/* ••• overflow menu */}
+                          <div className="relative shrink-0">
+                            <button
+                              type="button"
+                              data-testid="benchmark-row-menu"
+                              data-row-idx={idx}
+                              aria-label="More actions"
+                              aria-haspopup="menu"
+                              aria-expanded={isMenuOpen}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenMenuIdx(isMenuOpen ? null : idx);
+                              }}
+                              className="rounded p-1 text-foreground/40 transition-colors hover:bg-gray-100 hover:text-foreground/70"
+                            >
+                              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <circle cx="3" cy="8" r="1.5" />
+                                <circle cx="8" cy="8" r="1.5" />
+                                <circle cx="13" cy="8" r="1.5" />
+                              </svg>
+                            </button>
+                            {isMenuOpen && (
+                              <div
+                                role="menu"
+                                className="absolute right-0 top-7 z-10 w-36 overflow-hidden rounded-md bg-white text-xs shadow-lg ring-1 ring-gray-200"
                               >
-                                Set primary
-                              </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  data-testid={`benchmark-move-up-${idx}`}
+                                  disabled={idx === 0}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    moveBenchmark(idx, "up");
+                                  }}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-foreground/70 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-foreground/25"
+                                >
+                                  <span aria-hidden="true">↑</span> Move up
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  data-testid={`benchmark-move-down-${idx}`}
+                                  disabled={idx === benchmarkDrafts.length - 1}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    moveBenchmark(idx, "down");
+                                  }}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-foreground/70 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-foreground/25"
+                                >
+                                  <span aria-hidden="true">↓</span> Move down
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  data-testid={`benchmark-remove-${idx}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    removeBenchmarkWithUndo(idx);
+                                  }}
+                                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-rose-600 hover:bg-rose-50"
+                                >
+                                  <span aria-hidden="true">✕</span> Remove
+                                </button>
+                              </div>
                             )}
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExpandedBenchmarkIdx(isExpanded ? null : idx)
-                              }
-                              className="text-xs font-medium text-foreground/40 transition-colors hover:text-foreground/70"
-                            >
-                              {isExpanded ? "Done" : "Edit"}
-                            </button>
-                            <button
-                              type="button"
-                              aria-label="Remove benchmark"
-                              onClick={() =>
-                                setBenchmarkDrafts((prev) =>
-                                  prev.length > 1
-                                    ? prev.filter((_, i) => i !== idx)
-                                    : [{ listingUrl: "", note: "" }]
-                                )
-                              }
-                              className="text-sm leading-none text-foreground/20 transition-colors hover:text-rose-400"
-                            >
-                              ×
-                            </button>
                           </div>
                         </div>
 
+                        {/* Expanded edit form: URL + note. Blur auto-commits to draft. */}
                         {isExpanded && (
                           <div className="space-y-3 border-t border-gray-100 px-3 pb-3.5 pt-3">
                             <div className="space-y-1.5">
@@ -720,10 +1049,21 @@ export function ListingCard({
                                 type="url"
                                 placeholder="https://airbnb.com/rooms/..."
                                 value={comp.listingUrl}
+                                data-testid="benchmark-url-input"
+                                data-row-idx={idx}
                                 onChange={(e) => {
                                   const next = [...benchmarkDrafts];
                                   next[idx] = { ...next[idx], listingUrl: e.target.value };
                                   setBenchmarkDrafts(next);
+                                }}
+                                onBlur={() => {
+                                  void commitBenchmarkUrlOnBlur(comp.draftId);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    (e.target as HTMLInputElement).blur();
+                                  }
                                 }}
                                 className="w-full rounded-lg border border-gray-200 bg-gray-50/60 px-2.5 py-2 font-mono text-xs outline-none focus:border-gray-300 focus:bg-white"
                               />
@@ -756,6 +1096,49 @@ export function ListingCard({
                     );
                   })}
                 </div>
+
+                {/* Excluded comps accordion (collapsed by default; only count visible) */}
+                {excludedDrafts.length > 0 && (
+                  <details
+                    data-testid="excluded-comps-panel"
+                    className="group rounded-xl border border-gray-200/60 bg-white/70"
+                    open={excludedOpen}
+                    onToggle={(e) => setExcludedOpen((e.target as HTMLDetailsElement).open)}
+                  >
+                    <summary
+                      data-testid="excluded-comps-summary"
+                      className="flex cursor-pointer items-center justify-between px-3 py-2 text-sm font-medium text-foreground/55"
+                    >
+                      <span>Excluded comps ({excludedDrafts.length})</span>
+                      <span aria-hidden="true" className="text-xs text-foreground/30 transition-transform group-open:rotate-180">
+                        ▾
+                      </span>
+                    </summary>
+                    <div className="space-y-1.5 border-t border-gray-100 px-3 py-2">
+                      {excludedDrafts.map((ec) => (
+                        <div
+                          key={ec.roomId}
+                          data-testid="excluded-row"
+                          data-room-id={ec.roomId}
+                          className="flex items-center gap-2 text-xs"
+                        >
+                          <span className="flex-1 truncate text-foreground/65">
+                            {ec.title?.trim() || `Room ${ec.roomId}`}
+                          </span>
+                          <button
+                            type="button"
+                            data-testid="excluded-restore-button"
+                            data-room-id={ec.roomId}
+                            onClick={() => restoreExcluded(ec.roomId)}
+                            className="shrink-0 rounded bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-emerald-200 transition hover:bg-emerald-100"
+                          >
+                            Restore
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
               </div>
 
               <div className="h-px bg-gray-200/60" />

@@ -290,6 +290,7 @@ def _build_daily_transparent_result(
     spec_backfill: Optional[Dict[str, Any]] = None,
     spec_extraction_meta: Optional[Dict[str, Any]] = None,
     fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
+    excluded_room_ids: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -362,6 +363,13 @@ def _build_daily_transparent_result(
             comp_id = str(comp.get("id") or comp.get("url") or "").strip()
             if not comp_id:
                 continue
+            # Safety net: defense in depth against any day-query path that
+            # forgot to filter excluded_room_ids upstream. Primary filter is
+            # in day_query.estimate_base_price_for_date before pricing math.
+            # Filter BEFORE seen_top_comp_ids so the dedup set in the second
+            # loop also rejects this comp via the per-loop filter below.
+            if excluded_room_ids and comp_id in excluded_room_ids:
+                continue
             seen_top_comp_ids.add(comp_id)
             score = float(comp.get("similarity") or 0.0)
             # Prefer comp_prices for the day's price; fall back to top_comps value.
@@ -405,6 +413,11 @@ def _build_daily_transparent_result(
         for comp_id_raw, price in day_comp_prices.items():
             comp_id = str(comp_id_raw or "").strip()
             if not comp_id or comp_id in seen_top_comp_ids:
+                continue
+            # Safety net mirror: this hydrate-from-pool path can reach
+            # comparable_index without going through top_comps, so the
+            # excluded filter must apply here too.
+            if excluded_room_ids and comp_id in excluded_room_ids:
                 continue
             pool_comp = (fixed_comp_pool or {}).get(comp_id) or {}
             if comp_id not in comparable_index:
@@ -1130,6 +1143,7 @@ def run_scrape(
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    excluded_room_ids: Optional[set[str]] = None,
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
@@ -1532,6 +1546,7 @@ def run_scrape(
                         rate_limit_seconds=rate_limit_seconds,
                         top_k=top_k,
                         preferred_comps=preferred_comps,
+                        excluded_room_ids=excluded_room_ids,
                         max_radius_km=_effective_radius,
                     )
                     if result.median_price is not None:
@@ -1689,6 +1704,7 @@ def run_scrape(
                 target_price_confidence=_target_price_confidence,
                 spec_backfill=_spec_backfill_meta,
                 spec_extraction_meta=_spec_extraction_meta,
+                excluded_room_ids=excluded_room_ids,
             )
             # Phase 3B: surface page-extracted coords so main.py can write them back to DB
             if target.lat is not None and target.lng is not None:
@@ -1745,6 +1761,7 @@ def run_benchmark_scrape(
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
+    excluded_room_ids: Optional[set[str]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     nightly_plan: Optional[Any] = None,
     fallback_address: Optional[str] = None,
@@ -2061,6 +2078,7 @@ def run_benchmark_scrape(
                     rate_limit_seconds=rate_limit_seconds,
                     top_k=BENCHMARK_TOP_K,
                     max_radius_km=_effective_radius,
+                    excluded_room_ids=excluded_room_ids,
                 )
 
             day_loop_start = time.time()
@@ -2259,6 +2277,7 @@ def run_benchmark_scrape(
                 benchmark_info=benchmark_info,
                 spec_backfill=_bm_backfill_meta,
                 spec_extraction_meta=_bm_spec_extraction_meta,
+                excluded_room_ids=excluded_room_ids,
             )
             _repair_incomplete_comparable_specs(client, transparent, extraction_warnings)
             _repair_suspicious_comparable_titles(client, transparent, extraction_warnings)
@@ -2867,6 +2886,7 @@ def run_criteria_search(
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    excluded_room_ids: Optional[set[str]] = None,
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
@@ -3199,6 +3219,25 @@ def run_criteria_search(
                 amenities=list(row.get("amenities") or []),
             )
         )
+
+    # ── Pass 1 anchor selection: drop user-blacklisted candidates ─────────
+    # Otherwise an excluded comp could be picked as the criteria anchor and
+    # then drag the entire pricing pipeline through it.  If the entire
+    # candidate pool is excluded, we let the existing "no candidates" path
+    # surface the error.
+    if excluded_room_ids:
+        pre = len(candidates)
+        candidates = [
+            c for c in candidates
+            if build_comp_id(c.url or "") not in excluded_room_ids
+        ]
+        dropped = pre - len(candidates)
+        if dropped > 0:
+            logger.info(
+                f"[criteria] anchor pool excluded_by_user={dropped} "
+                f"(remaining {len(candidates)})"
+            )
+
     priced_candidates = [c for c in candidates if c.url and isinstance(c.nightly_price, (int, float)) and c.nightly_price > 0]
     logger.info(
         "[criteria] candidates before price filter=%d after=%d",
@@ -3281,6 +3320,7 @@ def run_criteria_search(
         rate_limit_seconds=rate_limit_seconds,
         cdp_connect_timeout_ms=cdp_connect_timeout_ms,
         preferred_comps=preferred_comps,
+        excluded_room_ids=excluded_room_ids,
         target_lat=target_lat,
         target_lng=target_lng,
         max_radius_km=max_radius_km,

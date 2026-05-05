@@ -1127,7 +1127,25 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                 f"[{job.get('id', '?')}] Secondary benchmark URLs "
                 f"({len(secondary_benchmark_urls)}): {', '.join(secondary_benchmark_urls)}"
             )
-        
+
+        # Extract excluded comp roomIds (per-listing user blacklist).
+        # Used by day-query / benchmark / criteria-anchor pipelines to skip
+        # specific Airbnb listings the user has marked as bad comps.
+        excluded_comps_raw = attributes.get("excludedComps")
+        excluded_room_ids: set[str] = set()
+        if isinstance(excluded_comps_raw, list):
+            for ec in excluded_comps_raw:
+                if not isinstance(ec, dict):
+                    continue
+                rid = str(ec.get("roomId") or "").strip()
+                if rid:
+                    excluded_room_ids.add(rid)
+        if excluded_room_ids:
+            logger.info(
+                f"[{job.get('id', '?')}] Excluded comps ({len(excluded_room_ids)}): "
+                f"{', '.join(sorted(excluded_room_ids))}"
+            )
+
         finalized_input_attributes = dict(attributes)
         finalized_input_attributes["inputMode"] = input_mode
         finalized_input_attributes["listingUrl"] = listing_url or None
@@ -1159,6 +1177,10 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
             # Live price is time-sensitive — always re-capture fresh even on a cache hit.
             # Shallow-copy summary so we don't mutate the cached object.
             summary = dict(summary)
+            # Cache key already encodes excluded_room_ids, so the cached row
+            # was generated under the same exclusion set. Write the field
+            # explicitly to ensure backward compat with any pre-bump cached row.
+            summary["excludedRoomIdsAtRun"] = sorted(excluded_room_ids)
             if listing_url:
                 _cache_live_info = _capture_user_listing_prices_for_range(
                     report_id=report_id,
@@ -1508,6 +1530,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
+                    excluded_room_ids=excluded_room_ids or None,
                     progress_callback=_make_day_callback(15, 75, "searching_comps", "Searching comparable listings"),
                     nightly_plan=_nightly_plan_benchmark,
                 )
@@ -1560,6 +1583,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                     preferred_comps=preferred_comps,
+                    excluded_room_ids=excluded_room_ids or None,
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
@@ -1795,6 +1819,7 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
                     rate_limit_seconds=RATE_LIMIT_SECONDS,
                     cdp_connect_timeout_ms=CDP_CONNECT_TIMEOUT_MS,
                     preferred_comps=preferred_comps,
+                    excluded_room_ids=excluded_room_ids or None,
                     target_lat=_job_target_lat,
                     target_lng=_job_target_lng,
                     max_radius_km=_job_radius_km,
@@ -1883,6 +1908,13 @@ def _execute_analysis(job: Dict[str, Any], worker_token: uuid.UUID, *, is_nightl
             bm_info = transparent_result.get("benchmarkInfo") or _saved_benchmark_info
             if bm_info:
                 summary["benchmarkInfo"] = bm_info
+
+        # Snapshot of excluded comp roomIds active at run time. Frontend uses
+        # superset-check vs current excludedComps to decide banner wording:
+        # "X hidden locally" (subset / not yet rerun) vs "Pricing excludes X
+        # hidden" (superset / already rerun). Always write — even empty list —
+        # so older reports without this field can be detected (undefined).
+        summary["excludedRoomIdsAtRun"] = sorted(excluded_room_ids)
 
         # ── Canonical pricing contract: pin recommendedPrice.nightly ─────────
         # summary.recommendedPrice.nightly must equal the calendar's canonical

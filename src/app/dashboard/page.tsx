@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/Button";
 import { getSupabaseBrowser } from "@/lib/supabase";
@@ -16,6 +16,9 @@ import { ListingCard } from "@/components/dashboard/ListingCard";
 import { extractAirbnbListingId } from "@/lib/airbnb-utils";
 import { BenchmarkModal } from "@/components/dashboard/BenchmarkModal";
 import { ComparableListingsSection } from "@/components/report/ComparableListingsSection";
+import { ReplaceBenchmarkSheet } from "@/components/ui/ReplaceBenchmarkSheet";
+import { toast } from "@/components/ui/Toaster";
+import { usePendingExclusionsManager } from "@/lib/hooks/usePendingExclusionsManager";
 
 import type {
   PropertyType,
@@ -27,6 +30,8 @@ import type {
   DateMode,
   ComparableListing,
   BenchmarkInfo,
+  ExcludedComp,
+  PreferredComp,
 } from "@/lib/schemas";
 
 // latestReport is always status="ready" when non-null — the API now guarantees this.
@@ -100,6 +105,7 @@ type ListingRow = {
     listingUrl?: string | null;
     listing_url?: string | null;
     preferredComps?: Array<{ listingUrl: string; name?: string; note?: string; enabled?: boolean }> | null;
+    excludedComps?: ExcludedComp[] | null;
   };
   created_at: string;
   last_used_at: string | null;
@@ -488,6 +494,331 @@ export default function DashboardPage() {
     return urls;
   }, [activeListing, activeBenchmarkInfo]);
 
+  // ── Manage-comps state derived from activeListing ──────────────
+  const activePinnedRoomIds = useMemo<string[]>(() => {
+    return activePinnedUrls
+      .map((u) => {
+        const m = u.match(/\/rooms\/(\d+)/);
+        return m ? m[1] : null;
+      })
+      .filter((rid): rid is string => Boolean(rid));
+  }, [activePinnedUrls]);
+
+  const activeExcludedComps = useMemo<ExcludedComp[]>(() => {
+    const raw = activeListing?.input_attributes.excludedComps;
+    return Array.isArray(raw) ? (raw as ExcludedComp[]) : [];
+  }, [activeListing]);
+
+  const activeExcludedRoomIds = useMemo<string[]>(
+    () => activeExcludedComps.map((ec) => ec.roomId),
+    [activeExcludedComps]
+  );
+
+  const activeReportExcludedRoomIdsAtRun = useMemo<string[] | null>(() => {
+    const arr = (activeReport?.result_summary as { excludedRoomIdsAtRun?: unknown } | null)
+      ?.excludedRoomIdsAtRun;
+    return Array.isArray(arr) ? (arr.filter((x) => typeof x === "string") as string[]) : null;
+  }, [activeReport]);
+
+  // ── Pending exclusions manager (delayed PATCH + flush + rollback) ──
+  const exclusionsManager = usePendingExclusionsManager();
+
+  // Always-fresh ref for `listings` so the manager's batch-flush 6 s later
+  // can read state that may have changed since the click (other re-renders,
+  // optimistic updates from previous batches, etc.).  A stale closure here
+  // would cause PATCH bodies to drop the very exclusion the user just queued.
+  const listingsRef = useRef(listings);
+  useEffect(() => {
+    listingsRef.current = listings;
+  }, [listings]);
+
+  // Flush-before-switch:  wraps `setActiveListingId` so that pending
+  // exclusions on the previous listing are committed *before* we switch
+  // away, not after.  Without this, the user could click Exclude → switch
+  // listing → the 6 s timer fires under the new context and either reads
+  // stale state or applies to the wrong listing.
+  const switchActiveListing = useCallback(
+    async (newId: string | null) => {
+      const prev = activeListingId;
+      if (prev && prev !== newId) {
+        try {
+          await exclusionsManager.flushListing(prev);
+        } catch {
+          // flushListing handles errors via toast; don't block the switch.
+        }
+      }
+      setActiveListingId(newId);
+    },
+    [activeListingId, exclusionsManager]
+  );
+
+  // Belt-and-suspenders: if the listing changes by some other path (auto-
+  // select on mount, etc.), still flush the previous one.
+  const prevActiveListingIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevActiveListingIdRef.current;
+    if (prev && prev !== activeListingId) {
+      void exclusionsManager.flushListing(prev);
+    }
+    prevActiveListingIdRef.current = activeListingId;
+  }, [activeListingId, exclusionsManager]);
+
+  // Also flush when the dashboard route is about to navigate away — Next.js
+  // doesn't fire pagehide on internal route transitions, so we hook router.
+  useEffect(() => {
+    return () => {
+      exclusionsManager.flushAllSync();
+    };
+  }, [exclusionsManager]);
+
+  // Build a PendingBatchContext that reads/writes the listings cache.
+  // getSnapshot() reads via listingsRef so the timer callback 6 s later sees
+  // current state, not the closure captured at queue time.
+  const buildBatchContext = useCallback(
+    (listingId: string) => ({
+      getSnapshot: () => {
+        const l = listingsRef.current.find((x) => x.id === listingId);
+        return {
+          excludedComps: Array.isArray(l?.input_attributes.excludedComps)
+            ? (l!.input_attributes.excludedComps as ExcludedComp[])
+            : [],
+          preferredComps: Array.isArray(l?.input_attributes.preferredComps)
+            ? (l!.input_attributes.preferredComps as PreferredComp[])
+            : [],
+        };
+      },
+      applyOptimistic: (
+        transform: (current: {
+          excludedComps: ExcludedComp[];
+          preferredComps: PreferredComp[];
+        }) => {
+          excludedComps: ExcludedComp[];
+          preferredComps: PreferredComp[];
+        }
+      ) => {
+        // Functional setState so two synchronous applyOptimistic calls in the
+        // same tick both see fresh prev — required for rapid Exclude clicks.
+        setListings((prev) =>
+          prev.map((l) => {
+            if (l.id !== listingId) return l;
+            const cur = {
+              excludedComps: Array.isArray(l.input_attributes.excludedComps)
+                ? (l.input_attributes.excludedComps as ExcludedComp[])
+                : [],
+              preferredComps: Array.isArray(l.input_attributes.preferredComps)
+                ? (l.input_attributes.preferredComps as PreferredComp[])
+                : [],
+            };
+            const next = transform(cur);
+            return {
+              ...l,
+              input_attributes: {
+                ...l.input_attributes,
+                excludedComps: next.excludedComps.length > 0 ? next.excludedComps : undefined,
+                preferredComps: next.preferredComps.length > 0 ? next.preferredComps : undefined,
+              },
+            };
+          })
+        );
+      },
+      rollback: (original: { excludedComps: ExcludedComp[]; preferredComps: PreferredComp[] }) => {
+        setListings((prev) =>
+          prev.map((l) =>
+            l.id === listingId
+              ? {
+                  ...l,
+                  input_attributes: {
+                    ...l.input_attributes,
+                    excludedComps:
+                      original.excludedComps.length > 0 ? original.excludedComps : undefined,
+                    preferredComps:
+                      original.preferredComps.length > 0 ? original.preferredComps : undefined,
+                  },
+                }
+              : l
+          )
+        );
+      },
+    }),
+    []
+  );
+
+  const handleExcludeComp = useCallback(
+    (comp: ComparableListing) => {
+      if (!activeListingId) return;
+      exclusionsManager.queueExclude(activeListingId, comp, buildBatchContext(activeListingId));
+    },
+    [activeListingId, exclusionsManager, buildBatchContext]
+  );
+
+  // ── Replace-benchmark sheet (opens when promote hits the 10-cap) ──
+  const [replaceCandidate, setReplaceCandidate] = useState<ComparableListing | null>(null);
+
+  const handlePromoteComp = useCallback(
+    (comp: ComparableListing, opts?: { unexcludeRoomId?: string }) => {
+      if (!activeListingId) return;
+      // Cap detection — at exactly 10 enabled+filled benchmarks → open the
+      // Replace sheet instead of silently failing the schema cap.
+      const list = listingsRef.current.find((l) => l.id === activeListingId);
+      const currentPreferred = Array.isArray(list?.input_attributes.preferredComps)
+        ? (list!.input_attributes.preferredComps as PreferredComp[])
+        : [];
+      if (currentPreferred.length >= 10) {
+        setReplaceCandidate(comp);
+        return;
+      }
+      exclusionsManager.queuePromote(
+        activeListingId,
+        comp,
+        buildBatchContext(activeListingId),
+        opts
+      );
+    },
+    [activeListingId, exclusionsManager, buildBatchContext]
+  );
+
+  // User picked which existing benchmark to swap out for the new candidate.
+  // Composes the next preferredComps array and PATCHes immediately —
+  // no delayed timer (the user explicitly confirmed).  Surfaces failures
+  // via toast so the user knows the swap didn't take.
+  const handleReplaceBenchmark = useCallback(
+    async (replaceIndex: number) => {
+      if (!activeListingId || !replaceCandidate) return;
+      const list = listingsRef.current.find((l) => l.id === activeListingId);
+      const currentPreferred = Array.isArray(list?.input_attributes.preferredComps)
+        ? (list!.input_attributes.preferredComps as PreferredComp[])
+        : [];
+      const candidateUrl = replaceCandidate.url ?? "";
+      if (!candidateUrl) {
+        setReplaceCandidate(null);
+        return;
+      }
+      const nextPreferred: PreferredComp[] = currentPreferred.map((pc, i) =>
+        i === replaceIndex
+          ? {
+              listingUrl: candidateUrl,
+              name: replaceCandidate.title?.trim() || undefined,
+              enabled: true,
+            }
+          : pc
+      );
+      setReplaceCandidate(null);
+      try {
+        const res = await fetch(`/api/listings/${activeListingId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ preferredComps: nextPreferred }),
+        });
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as
+            | { error?: string }
+            | null;
+          toast({
+            title:
+              errBody?.error?.trim() ||
+              "Could not replace benchmark.  Please try again.",
+            variant: "error",
+            durationMs: 5000,
+          });
+          // Refresh state so the UI reflects what's actually on the server.
+          await loadDashboardData();
+          return;
+        }
+        await loadDashboardData();
+      } catch {
+        toast({
+          title: "Could not replace benchmark.  Please try again.",
+          variant: "error",
+          durationMs: 5000,
+        });
+        await loadDashboardData();
+      }
+    },
+    [activeListingId, replaceCandidate, loadDashboardData]
+  );
+
+  // Atomic remove-from-benchmarks + add-to-excluded.  Bypasses the manager's
+  // delayed PATCH because conflict resolution should commit immediately.
+  const handleExcludeBenchmarkConflict = useCallback(
+    async (comp: ComparableListing, benchmarkRoomId: string) => {
+      if (!activeListingId) return;
+      const list = listingsRef.current.find((l) => l.id === activeListingId);
+      const currentPreferred = Array.isArray(list?.input_attributes.preferredComps)
+        ? (list!.input_attributes.preferredComps as PreferredComp[])
+        : [];
+      const currentExcluded = Array.isArray(list?.input_attributes.excludedComps)
+        ? (list!.input_attributes.excludedComps as ExcludedComp[])
+        : [];
+      const nextPreferred = currentPreferred.filter((pc) => {
+        const m = (pc.listingUrl ?? "").match(/\/rooms\/(\d+)/);
+        return !(m && m[1] === benchmarkRoomId);
+      });
+      const newEntry: ExcludedComp = {
+        roomId: benchmarkRoomId,
+        listingUrl: comp.url ?? undefined,
+        title: comp.title ?? undefined,
+        excludedAt: new Date().toISOString(),
+      };
+      const nextExcluded = [...currentExcluded, newEntry];
+      const res = await fetch(`/api/listings/${activeListingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preferredComps: nextPreferred,
+          excludedComps: nextExcluded,
+        }),
+      });
+      if (res.ok) await loadDashboardData();
+    },
+    [activeListingId, loadDashboardData]
+  );
+
+  const handleRestoreExcluded = useCallback(
+    async (roomId: string) => {
+      if (!activeListingId) return;
+      const list = listingsRef.current.find((l) => l.id === activeListingId);
+      const current = Array.isArray(list?.input_attributes.excludedComps)
+        ? (list!.input_attributes.excludedComps as ExcludedComp[])
+        : [];
+      const next = current.filter((ec) => ec.roomId !== roomId);
+      // Optimistic update first (functional setState reads freshest prev).
+      setListings((prev) =>
+        prev.map((l) =>
+          l.id === activeListingId
+            ? {
+                ...l,
+                input_attributes: {
+                  ...l.input_attributes,
+                  excludedComps: next.length > 0 ? next : undefined,
+                },
+              }
+            : l
+        )
+      );
+      const res = await fetch(`/api/listings/${activeListingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ excludedComps: next.length > 0 ? next : null }),
+      });
+      if (!res.ok) {
+        // Revert
+        await loadDashboardData();
+      }
+    },
+    [activeListingId, loadDashboardData]
+  );
+
+  const handleRerunForExclusions = useCallback(async () => {
+    if (!activeListingId) return;
+    // Flush any pending exclusions before kicking the rerun so the next
+    // report includes them.
+    await exclusionsManager.flushListing(activeListingId);
+    const res = await fetch(`/api/listings/${activeListingId}/rerun`, {
+      method: "POST",
+    });
+    if (res.ok) await loadDashboardData();
+  }, [activeListingId, exclusionsManager, loadDashboardData]);
+
   // Auto-apply settings for the active listing — used to compute the preview
   // passed to ManualApplyPanel when the user applies from PricingHeatmap.
   const activeAutoApplySettings = useMemo((): AutoApplySettings | null => {
@@ -607,13 +938,21 @@ export default function DashboardPage() {
                     key={listing.id}
                     listing={listing}
                     isActive={listing.id === activeListingId}
-                    onSelect={() => setActiveListingId(listing.id)}
+                    onSelect={() => void switchActiveListing(listing.id)}
                     onDelete={() => handleDelete(listing.id)}
                     onViewHistory={() =>
                       router.push(`/dashboard/listings/${listing.id}`)
                     }
                     onRename={handleRenameListing}
                     onSavePreferredComps={handleSavePreferredComps}
+                    onSaveExcludedComps={async (lid, excludedComps) => {
+                      await fetch(`/api/listings/${lid}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ excludedComps }),
+                      });
+                      await loadDashboardData();
+                    }}
                     onSaveAlertSettings={handleSaveAlertSettings}
                     onSaveAutoApply={handleSaveAutoApplySettings}
                     onTriggerCohostVerification={handleTriggerCohostVerification}
@@ -820,7 +1159,16 @@ export default function DashboardPage() {
                         comps={activeSummary?.compsSummary ?? null}
                         benchmarkInfo={activeBenchmarkInfo}
                         embedded={true}
-                        pinnedUrls={activePinnedUrls}
+                        pinnedRoomIds={activePinnedRoomIds}
+                        excludedRoomIds={activeExcludedRoomIds}
+                        excludedDetails={activeExcludedComps}
+                        reportExcludedRoomIdsAtRun={activeReportExcludedRoomIdsAtRun}
+                        canManageComps={true}
+                        onExcludeComp={handleExcludeComp}
+                        onPromoteComp={handlePromoteComp}
+                        onRestoreExcluded={handleRestoreExcluded}
+                        onRerun={handleRerunForExclusions}
+                        onExcludeBenchmarkConflict={handleExcludeBenchmarkConflict}
                         selectedDate={focusedDate}
                         clickedDate={focusedDate}
                       />
@@ -990,6 +1338,19 @@ export default function DashboardPage() {
             )}
           </section>
         </div>
+
+        {/* ── Replace-benchmark picker (opens when promote hits 10-cap) ── */}
+        <ReplaceBenchmarkSheet
+          open={replaceCandidate !== null}
+          benchmarks={
+            (activeListing?.input_attributes.preferredComps ?? []) as PreferredComp[]
+          }
+          candidate={replaceCandidate}
+          onReplace={(idx) => {
+            void handleReplaceBenchmark(idx);
+          }}
+          onClose={() => setReplaceCandidate(null)}
+        />
 
         {/* ── Benchmark management modal ── */}
         {benchmarkModalListingId !== null && (() => {

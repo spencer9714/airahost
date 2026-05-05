@@ -3,7 +3,12 @@
  * Run with: npx tsx src/lib/schemas.test.ts
  * No test framework dependency required.
  */
-import { createReportRequestSchema } from "./schemas";
+import {
+  createReportRequestSchema,
+  excludedCompSchema,
+  excludedCompsSchema,
+  updateListingSchema,
+} from "./schemas";
 
 let passed = 0;
 let failed = 0;
@@ -167,6 +172,111 @@ console.log("\ncriteria-by-zip — city + state still required:");
     discountPolicy: basePolicy(),
   });
   assert("criteria-by-zip without city/state → invalid", r.success, false);
+}
+
+// ── excludedCompSchema ────────────────────────────────────────────────────────
+
+console.log("\nexcludedCompSchema:");
+
+{
+  const r = excludedCompSchema.safeParse({
+    roomId: "12345678",
+    listingUrl: "https://www.airbnb.com/rooms/12345678",
+    title: "Sunset Loft",
+    excludedAt: "2026-04-24T10:00:00Z",
+  });
+  assert("numeric roomId + url + title → valid", r.success, true);
+}
+
+{
+  const r = excludedCompSchema.safeParse({
+    roomId: "abc123",
+    excludedAt: "2026-04-24T10:00:00Z",
+  });
+  assert("non-numeric roomId → invalid", r.success, false);
+}
+
+{
+  const r = excludedCompSchema.safeParse({
+    roomId: "12345",
+    excludedAt: "not-an-iso-date",
+  });
+  assert("non-ISO excludedAt → invalid", r.success, false);
+}
+
+{
+  const r = excludedCompSchema.safeParse({
+    roomId: "12345",
+    listingUrl: "not-a-url",
+    excludedAt: "2026-04-24T10:00:00Z",
+  });
+  assert("malformed listingUrl → invalid", r.success, false);
+}
+
+{
+  // Reason cap = 300 chars
+  const r = excludedCompSchema.safeParse({
+    roomId: "12345",
+    excludedAt: "2026-04-24T10:00:00Z",
+    reason: "x".repeat(301),
+  });
+  assert("reason >300 chars → invalid", r.success, false);
+}
+
+// ── excludedCompsSchema (array cap) ──────────────────────────────────────────
+
+console.log("\nexcludedCompsSchema:");
+
+{
+  const arr = Array.from({ length: 200 }, (_, i) => ({
+    roomId: String(i + 1),
+    excludedAt: "2026-04-24T10:00:00Z",
+  }));
+  const r = excludedCompsSchema.safeParse(arr);
+  assert("200 entries → valid", r.success, true);
+}
+
+{
+  const arr = Array.from({ length: 201 }, (_, i) => ({
+    roomId: String(i + 1),
+    excludedAt: "2026-04-24T10:00:00Z",
+  }));
+  const r = excludedCompsSchema.safeParse(arr);
+  assert("201 entries → invalid (cap 200)", r.success, false);
+}
+
+// ── updateListingSchema.excludedComps ────────────────────────────────────────
+
+console.log("\nupdateListingSchema — excludedComps:");
+
+{
+  const r = updateListingSchema.safeParse({ excludedComps: null });
+  assert("excludedComps: null → valid (clears)", r.success, true);
+}
+
+{
+  const r = updateListingSchema.safeParse({ excludedComps: [] });
+  assert("excludedComps: [] → valid", r.success, true);
+}
+
+{
+  const r = updateListingSchema.safeParse({
+    excludedComps: [
+      {
+        roomId: "12345",
+        listingUrl: "https://www.airbnb.com/rooms/12345",
+        excludedAt: "2026-04-24T10:00:00Z",
+      },
+    ],
+  });
+  assert("excludedComps: [{...}] → valid", r.success, true);
+}
+
+{
+  const r = updateListingSchema.safeParse({
+    excludedComps: [{ roomId: "abc", excludedAt: "2026-04-24T10:00:00Z" }],
+  });
+  assert("excludedComps with bad roomId → invalid", r.success, false);
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────────
