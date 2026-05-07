@@ -118,6 +118,29 @@ export const preferredCompsSchema = z.array(preferredCompSchema).max(10);
 export type PreferredComp = z.infer<typeof preferredCompSchema>;
 export type PreferredComps = z.infer<typeof preferredCompsSchema>;
 
+// ── Excluded Comparables (per-listing permanent hide) ────────────
+// Stored alongside preferredComps in saved_listings.input_attributes.
+// roomId (Airbnb room ID) is the stable key — URL is for display + recovery.
+
+export const excludedCompSchema = z.object({
+  /** Stable Airbnb room ID extracted from listingUrl (numeric). Canonical key. */
+  roomId: z.string().regex(/^\d+$/, "Airbnb room ID must be numeric"),
+  /** Original listing URL at moment of exclusion (display + recovery fallback). */
+  listingUrl: z.string().url().optional(),
+  /** Title snapshot shown in the Excluded panel. */
+  title: z.string().max(200).optional(),
+  /** Optional user note (Phase 3 — UI not in MVP toast flow). */
+  reason: z.string().max(300).optional(),
+  /** ISO-8601 timestamp of the exclusion. */
+  excludedAt: z.string().datetime(),
+});
+
+/** Per-listing list of excluded comparables (cap 200 — power users may accumulate). */
+export const excludedCompsSchema = z.array(excludedCompSchema).max(200);
+
+export type ExcludedComp = z.infer<typeof excludedCompSchema>;
+export type ExcludedComps = z.infer<typeof excludedCompsSchema>;
+
 // ── Full Report Request ─────────────────────────────────────────
 
 export const createReportRequestSchema = z
@@ -591,6 +614,14 @@ export interface ReportSummary extends LivePriceIntelligence {
   priceDistribution?: PriceDistribution;
   comparableListings?: ComparableListing[];
   benchmarkInfo?: BenchmarkInfo;
+
+  /**
+   * Snapshot of excluded comp roomIds at the moment this report was generated.
+   * Frontend uses superset-check vs current `input_attributes.excludedComps`
+   * to decide banner wording: "X hidden locally" vs "Pricing excludes X hidden".
+   * Empty array when no exclusions were active during the run.
+   */
+  excludedRoomIdsAtRun?: string[];
 }
 
 export interface PricingReport {
@@ -648,6 +679,7 @@ export const updateListingSchema = z.object({
   defaultStartDate: z.string().nullable().optional(),
   defaultEndDate: z.string().nullable().optional(),
   preferredComps: preferredCompsSchema.nullable().optional(),
+  excludedComps: excludedCompsSchema.nullable().optional(),
   pricingAlertsEnabled: z.boolean().optional(),
   minimumBookingNights: z.number().int().min(1).max(30).optional(),
   /** Update the Airbnb listing URL stored in input_attributes.listingUrl */
@@ -675,6 +707,7 @@ export interface SavedListing {
   inputAddress: string;
   inputAttributes: ListingInput & {
     preferredComps?: PreferredComps | null;
+    excludedComps?: ExcludedComps | null;
     postalCodePrefix?: string;
     locationSource?: string;
   };

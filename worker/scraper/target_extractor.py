@@ -548,24 +548,15 @@ def extract_target_spec(client, listing_url: str) -> Tuple[ListingSpec, List[str
             except Exception as exc:
                 return None, [f"Browser DOM fallback failed: {exc}"]
 
-        # Apr-20 behavior: use PDP payload parsing as primary extraction source.
         try:
-            config = getattr(client, "config", {}) or {}
-            _checkin = clean(str(config.get("CHECKIN") or ""))
-            _checkout = clean(str(config.get("CHECKOUT") or ""))
-            try:
-                _adults = max(1, int(config.get("ADULTS", 1) or 1))
-            except Exception:
-                _adults = 1
-            _payload_kwargs: Dict[str, Any] = {"adults": _adults}
-            if _checkin:
-                _payload_kwargs["checkin"] = _checkin
-            if _checkout:
-                _payload_kwargs["checkout"] = _checkout
-
-            pdp_data = client.get_listing_details(str(listing_id), **_payload_kwargs)
-            parsed = parse_pdp_response(pdp_data, str(listing_id), safe_domain_base(listing_url))
-            spec = map_pdp_to_listing_spec(parsed, listing_url)
+            spec, payload_warnings = _extract_target_spec_via_client_payloads(
+                client,
+                listing_url,
+                str(listing_id),
+            )
+            warnings.extend(payload_warnings)
+            if spec is None:
+                raise ValueError("PDP extraction returned no usable spec")
             if spec.accommodates is None:
                 warnings.append("Missing accommodates from PDP response")
             if spec.bedrooms is None:

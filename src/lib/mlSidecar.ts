@@ -190,6 +190,8 @@ function normalizeMetrics(raw: unknown): MlForecastMetrics | null {
 
 function normalizePrediction(raw: unknown): MlForecastPrediction | null {
   const prediction = asObject(raw);
+  if (!prediction) return null;
+
   const date = readString(prediction, "date");
   if (!date) return null;
 
@@ -228,7 +230,7 @@ function normalizePrediction(raw: unknown): MlForecastPrediction | null {
     interval95Low: readNumber(prediction, "interval95Low", "interval95_low"),
     interval95High: readNumber(prediction, "interval95High", "interval95_high"),
     confidenceReasons: asStringArray(
-      prediction.confidenceReasons ?? prediction.confidence_reasons
+      prediction?.confidenceReasons ?? prediction?.confidence_reasons
     ),
   };
 }
@@ -297,7 +299,10 @@ export async function executeMlSidecarForecast(params: {
   runId: string;
 }): Promise<MlForecastManifest> {
   const { savedListingId, trainingScope, runId } = params;
-  const pythonBin = process.env.ML_SIDECAR_PYTHON_BIN?.trim() || "python";
+  const configuredPythonBin = process.env.ML_SIDECAR_PYTHON_BIN?.trim();
+  const pythonCandidates = configuredPythonBin
+    ? [configuredPythonBin]
+    : ["python", "python3"];
   const manifestPath = path.join(
     process.cwd(),
     "ml_sidecar",
@@ -332,39 +337,63 @@ export async function executeMlSidecarForecast(params: {
 
   await new Promise<{ stdout: string; stderr: string }>(
     (resolve, reject) => {
-      const child = spawn(pythonBin, args, {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          PYTHONIOENCODING: "utf-8",
-        },
-      });
+      const attempt = (candidateIndex: number) => {
+        const pythonBin = pythonCandidates[candidateIndex];
+        const child = spawn(pythonBin, args, {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            PYTHONIOENCODING: "utf-8",
+          },
+        });
 
-      let stdout = "";
-      let stderr = "";
+        let stdout = "";
+        let stderr = "";
 
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk.toString();
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString();
-      });
-      child.on("error", (error) => {
-        reject(error);
-      });
-      child.on("close", async (code) => {
-        if (code === 0) {
-          resolve({ stdout, stderr });
-          return;
-        }
-        reject(
-          new Error(
-            stderr.trim() ||
-              stdout.trim() ||
-              `ml_sidecar.batch_pipeline exited with code ${code}`
-          )
-        );
-      });
+        child.stdout.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        child.stderr.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        child.on("error", (error) => {
+          if (
+            !configuredPythonBin &&
+            (error as NodeJS.ErrnoException).code === "ENOENT" &&
+            candidateIndex < pythonCandidates.length - 1
+          ) {
+            attempt(candidateIndex + 1);
+            return;
+          }
+
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            reject(
+              new Error(
+                `Unable to start ML sidecar Python executable "${pythonBin}". ` +
+                  "Install Python in the deployment environment or set ML_SIDECAR_PYTHON_BIN to the full python/python3 path."
+              )
+            );
+            return;
+          }
+
+          reject(error);
+        });
+        child.on("close", async (code) => {
+          if (code === 0) {
+            resolve({ stdout, stderr });
+            return;
+          }
+          reject(
+            new Error(
+              stderr.trim() ||
+                stdout.trim() ||
+                `ml_sidecar.batch_pipeline exited with code ${code}`
+            )
+          );
+        });
+      };
+
+      attempt(0);
     }
   );
 

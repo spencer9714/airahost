@@ -268,6 +268,52 @@ export async function PATCH(
       inputAttributesDirty = true;
     }
 
+    if (parsed.data.excludedComps !== undefined) {
+      if (parsed.data.excludedComps === null || parsed.data.excludedComps.length === 0) {
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { excludedComps: _removed, ...rest } = nextInputAttributes;
+        nextInputAttributes = rest;
+      } else {
+        nextInputAttributes = {
+          ...nextInputAttributes,
+          excludedComps: parsed.data.excludedComps,
+        };
+      }
+      inputAttributesDirty = true;
+    }
+
+    // Cross-field guard: excludedComps and preferredComps must not contain
+    // the same Airbnb roomId in the merged final state. This is the single
+    // source of truth that worker / frontend rely on.
+    {
+      const merged = nextInputAttributes as {
+        preferredComps?: Array<{ listingUrl?: string }>;
+        excludedComps?: Array<{ roomId?: string }>;
+      };
+      const excludedRoomIds = new Set(
+        (merged.excludedComps ?? [])
+          .map((ec) => (typeof ec?.roomId === "string" ? ec.roomId.trim() : ""))
+          .filter(Boolean)
+      );
+      if (excludedRoomIds.size > 0 && Array.isArray(merged.preferredComps)) {
+        const conflictingIds: string[] = [];
+        for (const pc of merged.preferredComps) {
+          const url = typeof pc?.listingUrl === "string" ? pc.listingUrl : "";
+          const m = url.match(/\/rooms\/(\d+)/);
+          if (m && excludedRoomIds.has(m[1])) conflictingIds.push(m[1]);
+        }
+        if (conflictingIds.length > 0) {
+          return NextResponse.json(
+            {
+              error: "Cannot exclude a comp that is currently a benchmark",
+              conflictingIds: Array.from(new Set(conflictingIds)),
+            },
+            { status: 400 }
+          );
+        }
+      }
+    }
+
     if (urlForceDisableAlerts) {
       // URL was cleared or set to an invalid format — alerts must be disabled.
       // This takes precedence over any pricingAlertsEnabled value in the payload.

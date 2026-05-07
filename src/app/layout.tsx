@@ -3,6 +3,7 @@ import { Geist } from "next/font/google";
 import "./globals.css";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
+import { Toaster } from "@/components/ui/Toaster";
 import { GoogleAnalytics } from '@next/third-parties/google'
 
 const geistSans = Geist({
@@ -28,6 +29,7 @@ export default function RootLayout({
         <GoogleAnalytics gaId="G-BQDLEE3VSF" />
         <main className="min-h-[calc(100vh-140px)]">{children}</main>
         <Footer />
+        <Toaster />
       </body>
     </html>
   );

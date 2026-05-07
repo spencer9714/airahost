@@ -18,6 +18,8 @@ def test_playwright_navigate_room_url_not_about_blank():
       RUN_PLAYWRIGHT_LIVE_NAV_TEST=1
       CDP_URL=http://127.0.0.1:9222
     """
+    if os.getenv("RUN_PLAYWRIGHT_LIVE_NAV_TEST") != "1":
+        pytest.skip("Set RUN_PLAYWRIGHT_LIVE_NAV_TEST=1 to run the live CDP navigation test.")
 
     cdp_url = str(os.getenv("CDP_URL", "http://127.0.0.1:9222")).strip()
     created_context = None
@@ -56,5 +58,3 @@ def test_playwright_navigate_room_url_not_about_blank():
                     created_context.close()
                 except Exception:
                     pass
-
-test_playwright_navigate_room_url_not_about_blank()

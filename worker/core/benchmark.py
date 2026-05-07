@@ -267,6 +267,7 @@ def estimate_benchmark_price_for_date(
     rate_limit_seconds: float = 1.0,
     top_k: int = BENCHMARK_TOP_K,
     max_radius_km: float = DEFAULT_MAX_RADIUS_KM,
+    excluded_room_ids: Optional[set[str]] = None,
 ) -> BenchmarkDayResult:
     """
     Execute a 2-night-primary benchmark-first query for *date_i*.
@@ -319,6 +320,24 @@ def estimate_benchmark_price_for_date(
             except Exception as _bm_geo_exc:
                 logger.warning(
                     f"[benchmark] {checkin_str}: geo filter failed (non-fatal): {_bm_geo_exc}"
+                )
+
+        # ── User blacklist filter (per-listing excludedComps) ─────────────
+        # Drop user-excluded comps before all_comp_prices and market_comps so
+        # transparent priceByDate, market_median, and final_price all stay
+        # consistent. Primary benchmark is guarded by the API cross-field check
+        # — it cannot also appear in excluded_room_ids.
+        if excluded_room_ids:
+            pre = len(comps)
+            comps = [
+                c for c in comps
+                if build_comp_id(c.url or "") not in excluded_room_ids
+            ]
+            dropped = pre - len(comps)
+            if dropped > 0:
+                logger.info(
+                    f"[benchmark] {checkin_str}: excluded_by_user={dropped} "
+                    f"(remaining {len(comps)})"
                 )
 
         comps_collected = len(comps)

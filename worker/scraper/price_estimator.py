@@ -289,6 +289,8 @@ def _build_daily_transparent_result(
     target_price_confidence: Optional[str] = None,
     spec_backfill: Optional[Dict[str, Any]] = None,
     spec_extraction_meta: Optional[Dict[str, Any]] = None,
+    fixed_comp_pool: Optional[Dict[str, Dict[str, Any]]] = None,
+    excluded_room_ids: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """
     Assemble the unified transparent result dict from day-by-day results.
@@ -355,11 +357,20 @@ def _build_daily_transparent_result(
             day_result.get("is_sampled", False)
             and isinstance(day_result.get("median_price"), (int, float))
         )
+        seen_top_comp_ids: set[str] = set()
 
         for comp in day_result.get("top_comps", []) or []:
             comp_id = str(comp.get("id") or comp.get("url") or "").strip()
             if not comp_id:
                 continue
+            # Safety net: defense in depth against any day-query path that
+            # forgot to filter excluded_room_ids upstream. Primary filter is
+            # in day_query.estimate_base_price_for_date before pricing math.
+            # Filter BEFORE seen_top_comp_ids so the dedup set in the second
+            # loop also rejects this comp via the per-loop filter below.
+            if excluded_room_ids and comp_id in excluded_room_ids:
+                continue
+            seen_top_comp_ids.add(comp_id)
             score = float(comp.get("similarity") or 0.0)
             # Prefer comp_prices for the day's price; fall back to top_comps value.
             price = day_comp_prices.get(comp_id) or comp.get("nightlyPrice")
@@ -396,6 +407,39 @@ def _build_daily_transparent_result(
                 if isinstance(_day_total, (int, float)) and _day_total > 0:
                     day_detail["queryTotalPrice"] = round(float(_day_total), 2)
                 comparable_index[comp_id]["price_by_date_details"][day_date] = day_detail
+            if day_date:
+                comp_seen_dates.setdefault(comp_id, set()).add(day_date)
+
+        for comp_id_raw, price in day_comp_prices.items():
+            comp_id = str(comp_id_raw or "").strip()
+            if not comp_id or comp_id in seen_top_comp_ids:
+                continue
+            # Safety net mirror: this hydrate-from-pool path can reach
+            # comparable_index without going through top_comps, so the
+            # excluded filter must apply here too.
+            if excluded_room_ids and comp_id in excluded_room_ids:
+                continue
+            pool_comp = (fixed_comp_pool or {}).get(comp_id) or {}
+            if comp_id not in comparable_index:
+                comparable_index[comp_id] = {
+                    "item": {
+                        "id": comp_id,
+                        "title": pool_comp.get("title"),
+                        "propertyType": pool_comp.get("propertyType") or pool_comp.get("property_type"),
+                        "nightlyPrice": price,
+                        "similarity": pool_comp.get("similarity") or 0.0,
+                        "url": pool_comp.get("url"),
+                    },
+                    "score_sum": float(pool_comp.get("similarity") or 0.0),
+                    "count": 1 if pool_comp.get("similarity") is not None else 0,
+                    "price_by_date": {},
+                    "price_by_date_details": {},
+                    "max_query_nights": int(pool_comp.get("queryNights") or 1),
+                }
+            if day_has_valid_sample and day_date and isinstance(price, (int, float)) and price > 0:
+                _price_rounded = round(float(price), 2)
+                comparable_index[comp_id]["price_by_date"][day_date] = _price_rounded
+                comparable_index[comp_id]["price_by_date_details"][day_date] = {"price": _price_rounded}
             if day_date:
                 comp_seen_dates.setdefault(comp_id, set()).add(day_date)
 
@@ -481,6 +525,10 @@ def _build_daily_transparent_result(
     summary_collected = len(unique_collected_comp_ids)
     summary_after_filtering = unique_filtered_comp_count
     summary_used_for_pricing = unique_used_for_pricing_count
+    if fixed_comp_pool is not None:
+        summary_collected = int(query_criteria.get("fixedCompPoolCollectedTotal") or summary_collected)
+        summary_after_filtering = int(query_criteria.get("fixedCompPoolFilteredTotal") or summary_after_filtering)
+        summary_used_for_pricing = int(query_criteria.get("fixedCompPoolSize") or summary_used_for_pricing)
 
     return {
         "targetSpec": {
@@ -1095,6 +1143,7 @@ def run_scrape(
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    excluded_room_ids: Optional[set[str]] = None,
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
@@ -1497,6 +1546,7 @@ def run_scrape(
                         rate_limit_seconds=rate_limit_seconds,
                         top_k=top_k,
                         preferred_comps=preferred_comps,
+                        excluded_room_ids=excluded_room_ids,
                         max_radius_km=_effective_radius,
                     )
                     if result.median_price is not None:
@@ -1654,6 +1704,7 @@ def run_scrape(
                 target_price_confidence=_target_price_confidence,
                 spec_backfill=_spec_backfill_meta,
                 spec_extraction_meta=_spec_extraction_meta,
+                excluded_room_ids=excluded_room_ids,
             )
             # Phase 3B: surface page-extracted coords so main.py can write them back to DB
             if target.lat is not None and target.lng is not None:
@@ -1710,6 +1761,7 @@ def run_benchmark_scrape(
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
+    excluded_room_ids: Optional[set[str]] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     nightly_plan: Optional[Any] = None,
     fallback_address: Optional[str] = None,
@@ -2026,6 +2078,7 @@ def run_benchmark_scrape(
                     rate_limit_seconds=rate_limit_seconds,
                     top_k=BENCHMARK_TOP_K,
                     max_radius_km=_effective_radius,
+                    excluded_room_ids=excluded_room_ids,
                 )
 
             day_loop_start = time.time()
@@ -2224,6 +2277,7 @@ def run_benchmark_scrape(
                 benchmark_info=benchmark_info,
                 spec_backfill=_bm_backfill_meta,
                 spec_extraction_meta=_bm_spec_extraction_meta,
+                excluded_room_ids=excluded_room_ids,
             )
             _repair_incomplete_comparable_specs(client, transparent, extraction_warnings)
             _repair_suspicious_comparable_titles(client, transparent, extraction_warnings)
@@ -2832,6 +2886,7 @@ def run_criteria_search(
     rate_limit_seconds: float = 1.0,
     cdp_connect_timeout_ms: int = 15000,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    excluded_room_ids: Optional[set[str]] = None,
     target_lat: Optional[float] = None,
     target_lng: Optional[float] = None,
     max_radius_km: Optional[float] = None,
@@ -3164,6 +3219,25 @@ def run_criteria_search(
                 amenities=list(row.get("amenities") or []),
             )
         )
+
+    # ── Pass 1 anchor selection: drop user-blacklisted candidates ─────────
+    # Otherwise an excluded comp could be picked as the criteria anchor and
+    # then drag the entire pricing pipeline through it.  If the entire
+    # candidate pool is excluded, we let the existing "no candidates" path
+    # surface the error.
+    if excluded_room_ids:
+        pre = len(candidates)
+        candidates = [
+            c for c in candidates
+            if build_comp_id(c.url or "") not in excluded_room_ids
+        ]
+        dropped = pre - len(candidates)
+        if dropped > 0:
+            logger.info(
+                f"[criteria] anchor pool excluded_by_user={dropped} "
+                f"(remaining {len(candidates)})"
+            )
+
     priced_candidates = [c for c in candidates if c.url and isinstance(c.nightly_price, (int, float)) and c.nightly_price > 0]
     logger.info(
         "[criteria] candidates before price filter=%d after=%d",
@@ -3246,6 +3320,7 @@ def run_criteria_search(
         rate_limit_seconds=rate_limit_seconds,
         cdp_connect_timeout_ms=cdp_connect_timeout_ms,
         preferred_comps=preferred_comps,
+        excluded_room_ids=excluded_room_ids,
         target_lat=target_lat,
         target_lng=target_lng,
         max_radius_km=max_radius_km,

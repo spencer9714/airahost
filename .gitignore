@@ -49,3 +49,10 @@ next-env.d.ts
 
 # sidecar ML artifacts
 ml_sidecar/reports/
+
+# Playwright E2E
+/tests/e2e/.auth/
+/tests/e2e/test-results/
+/tests/e2e/playwright-report/
+/playwright-report/
+/test-results/

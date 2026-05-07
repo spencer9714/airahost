@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import Client
 
@@ -19,7 +20,15 @@ CACHE_TTL_HOURS = 24
 
 # Increment this when the pricing algorithm or cache payload structure changes.
 # Must match CACHE_SCHEMA_VERSION in src/lib/cacheKey.ts.
-CACHE_SCHEMA_VERSION = "v1"
+CACHE_SCHEMA_VERSION = "v2"
+
+_ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
+
+
+def _extract_room_id_or_fallback(url: str) -> str:
+    """Extract Airbnb room ID from URL; fall back to URL itself if regex misses."""
+    m = _ROOM_ID_RE.search(url)
+    return m.group(1) if m else url
 
 
 def compute_cache_key(
@@ -35,16 +44,34 @@ def compute_cache_key(
     Compute a stable cache key from report inputs.
     Canonical JSON ensures deterministic ordering.
     """
-    # Use the first enabled comp in preferredComps as the benchmark URL for cache keying.
-    preferred_comp_listing_url = ""
+    # Preferred comps in cache key:
+    #   - Include ALL enabled preferred comps (not just the first).
+    #   - Preserve order — primary is index 0; reordering changes pricing semantics.
+    #   - Use roomId (canonical) so URL query-param variants collapse.
+    preferred_comp_room_ids: List[str] = []
     preferred_comps_raw = attributes.get("preferredComps")
     if isinstance(preferred_comps_raw, list):
         for pc in preferred_comps_raw:
-            if isinstance(pc, dict) and pc.get("enabled", True):
-                url = str(pc.get("listingUrl") or "").strip()
-                if url:
-                    preferred_comp_listing_url = url
-                    break
+            if not isinstance(pc, dict) or not pc.get("enabled", True):
+                continue
+            url = str(pc.get("listingUrl") or "").strip()
+            if not url:
+                continue
+            preferred_comp_room_ids.append(_extract_room_id_or_fallback(url))
+
+    # Excluded comps in cache key:
+    #   - Sorted (order doesn't matter — set semantics).
+    #   - CSV-joined for compact representation.
+    excluded_room_ids_set: set[str] = set()
+    excluded_raw = attributes.get("excludedComps")
+    if isinstance(excluded_raw, list):
+        for ec in excluded_raw:
+            if not isinstance(ec, dict):
+                continue
+            rid = str(ec.get("roomId") or "").strip()
+            if rid:
+                excluded_room_ids_set.add(rid)
+    excluded_room_ids_csv = ",".join(sorted(excluded_room_ids_set))
 
     payload = {
         "address": address,
@@ -52,13 +79,14 @@ def compute_cache_key(
         "bedrooms": attributes.get("bedrooms", 0),
         "cacheSchemaVersion": CACHE_SCHEMA_VERSION,
         "endDate": end_date,
+        "excluded_room_ids": excluded_room_ids_csv,
         "inputMode": input_mode,
         "listing_url": listing_url or "",
         "maxGuests": attributes.get("maxGuests", 0),
         "maxTotalDiscountPct": discount_policy.get("maxTotalDiscountPct", 40),
         "monthlyDiscountPct": discount_policy.get("monthlyDiscountPct", 0),
         "nonRefundableDiscountPct": discount_policy.get("nonRefundableDiscountPct", 0),
-        "preferred_comp_listing_url": preferred_comp_listing_url,
+        "preferred_comp_room_ids": preferred_comp_room_ids,
         "propertyType": attributes.get("propertyType", ""),
         "refundable": discount_policy.get("refundable", True),
         "stackingMode": discount_policy.get("stackingMode", "compound"),

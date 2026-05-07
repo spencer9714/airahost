@@ -168,6 +168,7 @@ def estimate_base_price_for_date(
     rate_limit_seconds: float = 1.0,
     top_k: int = 20,
     preferred_comps: Optional[List[Dict[str, Any]]] = None,
+    excluded_room_ids: Optional[set[str]] = None,
     max_radius_km: Optional[float] = None,
 ) -> DayResult:
     """
@@ -245,6 +246,24 @@ def estimate_base_price_for_date(
             f"[day_query] {checkin_str}: daily pools one_night={len(one_night_comps)} "
             f"two_night={len(two_night_comps)} merged={len(comps)}"
         )
+
+        # ── User blacklist filter (per-listing excludedComps) ─────
+        # Drop comps whose Airbnb roomId is in the user's exclusion set BEFORE
+        # similarity / pricing math AND before build_comp_prices_dict — otherwise
+        # transparent priceByDate would still surface the excluded comp.
+        if excluded_room_ids:
+            pre = len(comps)
+            comps = [
+                c for c in comps
+                if build_comp_id(c.url or "") not in excluded_room_ids
+            ]
+            dropped = pre - len(comps)
+            if dropped > 0:
+                logger.info(
+                    f"[day_query] {checkin_str}: excluded_by_user={dropped} "
+                    f"(remaining {len(comps)})"
+                )
+
         # ── Phase 3A: Geographic distance filter ──────────────────
         # Applied before similarity scoring.  Requires both the target
         # and at least some comps to have coordinates; otherwise skipped.
