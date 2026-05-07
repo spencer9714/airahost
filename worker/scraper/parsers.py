@@ -1,6 +1,9 @@
 import re
 import base64
+import logging
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("worker.scraper")
 
 
 def _find_keys(obj: Any, target_key: str) -> List[Any]:
@@ -836,6 +839,12 @@ def parse_search_listing_context(data: Dict[str, Any]) -> Dict[str, Dict[str, An
                 if v not in (None, "", 0):
                     row[key] = v
 
+        logger.info(
+            "[amenities][search] listing_id=%s amenities=%s",
+            listing_id,
+            list(row.get("amenities") or []),
+        )
+
     return context
 
 
@@ -1251,6 +1260,35 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
         if item.get("unavailable") is True or item.get("isUnavailable") is True:
             return False
         return True
+
+    def _collect_amenity_items(node: Any, parent_negative: bool = False) -> None:
+        if isinstance(node, list):
+            for item in node:
+                _collect_amenity_items(item, parent_negative=parent_negative)
+            return
+        if isinstance(node, dict):
+            title = node.get("title") or node.get("name") or node.get("label")
+            title_text = str(title or "").strip()
+            node_negative = parent_negative
+            if title_text and any(marker in title_text.lower() for marker in negative_group_markers):
+                node_negative = True
+
+            if title_text and not any(isinstance(node.get(k), list) for k in ("amenities", "items", "previewAmenitiesGroups", "seeAllAmenitiesGroups", "amenityGroups")):
+                if node_negative or not _is_amenity_available(node):
+                    blocked_amenity_names.add(title_text)
+                else:
+                    amenity_names.add(title_text)
+
+            for key in ("amenities", "items", "previewAmenitiesGroups", "seeAllAmenitiesGroups", "amenityGroups"):
+                child = node.get(key)
+                if isinstance(child, (list, dict)):
+                    _collect_amenity_items(child, parent_negative=node_negative)
+            return
+        if isinstance(node, str) and node.strip():
+            if parent_negative:
+                blocked_amenity_names.add(node.strip())
+            else:
+                amenity_names.add(node.strip())
     amenities_candidates = (
         _find_keys(data, "amenities")
         + _find_keys(data, "previewAmenitiesGroups")
@@ -1310,12 +1348,109 @@ def parse_pdp_response(data: Dict[str, Any], listing_id: str, base_url: str) -> 
                         else:
                             amenity_names.add(item.strip())
 
+    # Explicitly parse AMENITIES_* sections from section payloads.
+    if isinstance(sections_root, list):
+        for entry in sections_root:
+            if not isinstance(entry, dict):
+                continue
+            sid = str(entry.get("sectionId") or "").upper()
+            if "AMENITIES" not in sid:
+                continue
+            sec = entry.get("section")
+            if not isinstance(sec, dict):
+                continue
+            for key in ("previewAmenitiesGroups", "seeAllAmenitiesGroups", "amenityGroups", "amenities", "items"):
+                if key in sec:
+                    _collect_amenity_items(sec.get(key))
+
+    # Some payload shapes keep amenity groups outside `sections_root` in SBUI objects.
+    for key in ("previewAmenitiesGroups", "seeAllAmenitiesGroups", "amenityGroups", "amenities"):
+        for candidate in _find_keys(data, key):
+            _collect_amenity_items(candidate)
+
     for candidate in _find_keys(data, "brandAccessibilityLabel") + _find_keys(data, "textAccessibilityLabel"):
         if isinstance(candidate, str) and re.search(r"guest favou?rite", candidate, re.I):
             amenity_names.add("Guest favorite")
             break
 
+    # Fallback for payloads that omit AMENITIES_* sections.
+    # Parse safety/property bullets and media-tour stop labels that represent amenities.
+    policies_sections = _find_keys(data, "safetyAndPropertiesSections")
+    for groups in policies_sections:
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for item in group.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                if not title:
+                    continue
+                clean_title = re.sub(r"\s+installed$", "", title, flags=re.I).strip()
+                if clean_title:
+                    amenity_names.add(clean_title)
+
+    for preview in _find_keys(data, "previewSafetyAndProperties"):
+        if not isinstance(preview, list):
+            continue
+        for item in preview:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if title:
+                amenity_names.add(title)
+
+    for groups in _find_keys(data, "houseRulesSections"):
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for item in group.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip().lower()
+                if "self check-in" in title or "smart lock" in title:
+                    amenity_names.add("Self check-in")
+
+    media_tour_stops = _get_nested(
+        data,
+        ["data", "node", "pdpPresentation", "mediaTour", "stops"],
+    )
+    if isinstance(media_tour_stops, list):
+        for stop in media_tour_stops:
+            if not isinstance(stop, dict):
+                continue
+            stop_name = str(stop.get("name") or "").strip().lower()
+            if not stop_name:
+                continue
+            if "kitchen" in stop_name:
+                amenity_names.add("Kitchen")
+            if "workspace" in stop_name:
+                amenity_names.add("Dedicated workspace")
+            if "backyard" in stop_name:
+                amenity_names.add("Backyard")
+            if "gym" in stop_name:
+                amenity_names.add("Gym")
+            if "pool" in stop_name:
+                amenity_names.add("Pool")
+            if "hot tub" in stop_name:
+                amenity_names.add("Hot tub")
+            if "parking" in stop_name:
+                amenity_names.add("Free parking")
+            if "washer" in stop_name:
+                amenity_names.add("Washer")
+            if "dryer" in stop_name:
+                amenity_names.add("Dryer")
+
     result["amenities"] = sorted(a for a in amenity_names if a not in blocked_amenity_names)
+    logger.info(
+        "[amenities][pdp] listing_id=%s amenities=%s",
+        listing_id,
+        result["amenities"],
+    )
 
     if not result["title"]:
         result["title"] = f"Listing {listing_id}"

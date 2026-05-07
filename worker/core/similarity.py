@@ -1,4 +1,4 @@
-"""
+﻿"""
 Similarity scoring and filtering for comparable listings.
 
 Compares candidate listings against a target listing using weighted

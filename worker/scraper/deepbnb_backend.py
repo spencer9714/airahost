@@ -1,6 +1,5 @@
 import base64
 import copy
-import json
 import logging
 import os
 import re
@@ -277,7 +276,21 @@ class DeepBnbBackend:
             pdp_req["adults"] = str(adults)
             pdp_req["checkIn"] = checkin
             pdp_req["checkOut"] = checkout
+            pdp_req["layouts"] = ["SIDEBAR", "SINGLE_COLUMN"]
             pdp_req["sectionIds"] = list(_DEFAULT_STAYS_PDP_SECTION_IDS)
+
+        # Some templates use `variables.request` (not `pdpSectionsRequest`).
+        # Keep both shapes in sync so amenities sections are always requested.
+        req_obj = vars_obj.get("request")
+        if isinstance(req_obj, dict):
+            req_obj["adults"] = str(adults)
+            req_obj["checkIn"] = checkin
+            req_obj["checkOut"] = checkout
+            req_obj["layouts"] = ["SIDEBAR", "SINGLE_COLUMN"]
+            req_obj["sectionIds"] = list(_DEFAULT_STAYS_PDP_SECTION_IDS)
+            # Ensure GraphQL fragments carrying amenities are enabled.
+            req_obj["includeGpAmenitiesFragment"] = True
+            req_obj["includePdpMigrationAmenitiesFragment"] = True
 
         date_range = vars_obj.setdefault("dateRange", {})
         if isinstance(date_range, dict):
@@ -366,23 +379,14 @@ class DeepBnbBackend:
             if status in (401, 403):
                 raise ScraperForbiddenError(f"DeepBnb StaysSearch blocked with status={status}")
             raw_json = resp.json() if resp.content else {}
-            try:
-                logger.info(
-                    "[deepbnb_raw_search][checkin=%s][checkout=%s][adults=%s][status=%s] %s",
-                    checkin,
-                    checkout,
-                    adults,
-                    status,
-                    json.dumps(raw_json, ensure_ascii=False, default=str),
-                )
-            except Exception:
-                logger.info(
-                    "[deepbnb_raw_search][checkin=%s][checkout=%s][adults=%s][status=%s] <unserializable_payload>",
-                    checkin,
-                    checkout,
-                    adults,
-                    status,
-                )
+            logger.info(
+                "[deepbnb_search_response] checkin=%s checkout=%s adults=%s status=%s has_errors=%s",
+                checkin,
+                checkout,
+                adults,
+                status,
+                bool((raw_json or {}).get("errors")) if isinstance(raw_json, dict) else False,
+            )
             if self._looks_blocked(status, raw_json if isinstance(raw_json, dict) else {}):
                 raise ScraperForbiddenError(f"DeepBnb StaysSearch blocked with status={status}")
         except Exception as exc:

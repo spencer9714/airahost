@@ -12,11 +12,15 @@ from urllib.parse import urlencode
 from worker.core.similarity import comp_urls_match
 from worker.core.concurrent_runner import MAX_SCRAPER_WORKERS
 from worker.scraper.parsers import (
-    parse_pdp_baths_property_type_fast,
+    parse_pdp_response,
     parse_search_listing_context,
     parse_search_response,
 )
-from worker.scraper.target_extractor import ListingSpec, normalize_property_type
+from worker.scraper.target_extractor import (
+    ListingSpec,
+    normalize_property_type,
+    safe_domain_base,
+)
 
 logger = logging.getLogger("worker.scraper.comp_collection")
 _ROOM_ID_RE = re.compile(r"/rooms/(\d+)")
@@ -167,8 +171,8 @@ def _enrich_comps_baths_and_property_type_from_pdp(
     adults: int,
 ) -> None:
     """
-    Enrich comps with accurate baths/property_type from individual PDP fetches.
-    Fast parser exits after reading just those two fields.
+    Enrich comps with PDP fields from individual listing-detail fetches.
+    Uses full PDP parsing so amenities are populated for each compset listing.
     """
     if not comps or not hasattr(client, "get_listing_details"):
         return
@@ -190,7 +194,7 @@ def _enrich_comps_baths_and_property_type_from_pdp(
     if attempted == 0:
         return
 
-    def _fetch(item: Tuple[int, ListingSpec, str]) -> Tuple[int, Optional[float], str]:
+    def _fetch(item: Tuple[int, ListingSpec, str]) -> Tuple[int, Optional[float], str, List[str]]:
         idx, _comp, lid = item
         try:
             pdp_data = client.get_listing_details(
@@ -199,22 +203,28 @@ def _enrich_comps_baths_and_property_type_from_pdp(
                 checkout=checkout,
                 adults=adults,
             )
-            fast = parse_pdp_baths_property_type_fast(pdp_data)
-            baths = fast.get("baths")
-            ptype_raw = fast.get("property_type")
+            parsed = parse_pdp_response(
+                pdp_data,
+                lid,
+                safe_domain_base(str(_comp.url or "")),
+            )
+            baths = parsed.get("baths")
+            ptype_raw = parsed.get("property_type")
             ptype_norm = normalize_property_type(str(ptype_raw or ""))
             b_val = float(baths) if isinstance(baths, (int, float)) else None
             p_val = ptype_norm.strip() if isinstance(ptype_norm, str) and ptype_norm.strip() else ""
-            return idx, b_val, p_val
+            amenities = [a for a in (parsed.get("amenities") or []) if isinstance(a, str) and a.strip()]
+            return idx, b_val, p_val, amenities
         except Exception:
-            return idx, None, ""
+            return idx, None, "", []
 
     max_workers = max(1, min(int(os.getenv("PDP_DETAIL_MAX_WORKERS", str(MAX_SCRAPER_WORKERS))), MAX_SCRAPER_WORKERS))
     updated = 0
+    amenities_populated = 0
     with ThreadPoolExecutor(max_workers=min(max_workers, attempted)) as ex:
         futures = [ex.submit(_fetch, item) for item in work_items]
         for f in as_completed(futures):
-            idx, b_val, p_val = f.result()
+            idx, b_val, p_val, amenities = f.result()
             comp = comps[idx]
             changed = False
             if isinstance(b_val, (int, float)):
@@ -225,14 +235,27 @@ def _enrich_comps_baths_and_property_type_from_pdp(
                 if comp.property_type != p_val:
                     comp.property_type = p_val
                     changed = True
+            if amenities:
+                existing = set(str(a).strip() for a in (comp.amenities or []) if str(a).strip())
+                merged = list(comp.amenities or [])
+                for amenity in amenities:
+                    if amenity not in existing:
+                        merged.append(amenity)
+                        existing.add(amenity)
+                if merged != list(comp.amenities or []):
+                    comp.amenities = merged
+                    changed = True
+                if comp.amenities:
+                    amenities_populated += 1
             if changed:
                 updated += 1
 
     if attempted:
         logger.info(
-            "[comp_collection] PDP structural enrichment attempted=%s updated=%s workers=%s",
+            "[comp_collection] PDP enrichment attempted=%s updated=%s amenities_populated=%s workers=%s",
             attempted,
             updated,
+            amenities_populated,
             max_workers,
         )
 
