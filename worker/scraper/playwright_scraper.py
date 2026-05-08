@@ -885,6 +885,80 @@ class PlaywrightScraper:
         base_url = self._normalize_base_url(self.base_url)
         return f"{base_url}{search_path}?{urlencode(params)}"
 
+    @staticmethod
+    def _build_minimal_search_payload_from_listing_ids(listing_ids: list[str]) -> Optional[Dict[str, Any]]:
+        """
+        Convert listing IDs into the minimal StaysSearch-shaped payload expected
+        by parse_search_response()/parse_search_listing_context().
+        """
+        if not isinstance(listing_ids, list):
+            return None
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for lid in listing_ids:
+            s = str(lid).strip()
+            if not s or not s.isdigit() or s in seen:
+                continue
+            seen.add(s)
+            deduped.append(s)
+        if not deduped:
+            return None
+        search_results = [{"listingId": lid} for lid in deduped]
+        return {
+            "data": {
+                "presentation": {
+                    "staysSearch": {
+                        "results": {
+                            "searchResults": search_results,
+                        }
+                    }
+                }
+            }
+        }
+
+    @staticmethod
+    async def _extract_search_listing_ids_from_rendered_dom(page) -> list[str]:
+        """
+        Rendered-DOM fallback: read listing IDs from the hydrated search page.
+        This avoids relying on pre-hydration shell HTML.
+        """
+        js = r"""
+() => {
+  const ids = new Set();
+  const addFromText = (v) => {
+    const s = String(v || '');
+    const re = /\/rooms\/(\d{5,})/g;
+    let m;
+    while ((m = re.exec(s)) !== null) ids.add(String(m[1]));
+  };
+
+  const anchors = Array.from(document.querySelectorAll('a[href*="/rooms/"]'));
+  for (const a of anchors) {
+    addFromText(a.getAttribute('href') || '');
+    addFromText(a.href || '');
+  }
+
+  const attrs = ['data-testid', 'data-ev-label', 'data-ev-data', 'aria-label'];
+  const nodes = Array.from(document.querySelectorAll('[data-testid], [data-ev-label], [data-ev-data], [aria-label]'));
+  for (const n of nodes) {
+    for (const key of attrs) addFromText(n.getAttribute(key) || '');
+  }
+
+  return Array.from(ids);
+}
+"""
+        try:
+            values = await page.evaluate(js)
+        except Exception:
+            values = []
+        out: list[str] = []
+        if isinstance(values, list):
+            for v in values:
+                s = str(v or "").strip()
+                if s.isdigit():
+                    out.append(s)
+        return out
+
     async def _ensure_browser(self):
         if self._browser is not None and self._pw is not None:
             return self._browser
@@ -1030,22 +1104,34 @@ class PlaywrightScraper:
         try:
             captured_status: int = 0
             captured_data: Optional[Dict[str, Any]] = None
+            captured_url: str = ""
+            saw_stayssearch_response = False
+            latest_nav_html: str = ""
+            latest_nav_url: str = ""
+            challenge_detected = False
+            challenge_reason = ""
             response_tasks: set[asyncio.Task] = set()
 
             async def _handle_response(resp):
-                nonlocal captured_status, captured_data
+                nonlocal captured_status, captured_data, captured_url, saw_stayssearch_response
                 try:
                     if captured_data is not None:
                         return
                     req = resp.request
-                    if req.method != "POST":
+                    req_method = str(getattr(req, "method", "") or "").upper()
+                    if req_method not in ("POST", "GET"):
                         return
-                    if "/api/v3/StaysSearch/" not in resp.url:
+                    resp_url = str(getattr(resp, "url", "") or "")
+                    # Airbnb endpoints drift (slash/no-slash, locale/CDN variants).
+                    # Match by operation token instead of exact hardcoded path.
+                    if "stayssearch" not in resp_url.lower():
                         return
+                    saw_stayssearch_response = True
                     captured_status = int(resp.status)
                     payload = await resp.json()
                     if isinstance(payload, dict):
                         captured_data = payload
+                        captured_url = resp_url
                 except Exception:
                     return
 
@@ -1075,6 +1161,15 @@ class PlaywrightScraper:
                 str((nav or {}).get("status")),
                 len(str((nav or {}).get("html") or "")),
             )
+            latest_nav_html = str((nav or {}).get("html") or "")
+            latest_nav_url = str((nav or {}).get("final_url") or "")
+            if self._page_looks_challenged(
+                str((nav or {}).get("html") or ""),
+                str((nav or {}).get("final_url") or ""),
+            ):
+                challenge_detected = True
+                challenge_reason = "Playwright browser search reached login/challenge page; StaysSearch is blocked"
+                logger.warning(challenge_reason)
             if str((nav or {}).get("final_url") or "").lower().startswith("about:blank"):
                 logger.warning("Browser remained on about:blank after search navigate; retrying with safe base URL.")
                 safe_base = self._normalize_base_url(None)
@@ -1089,6 +1184,8 @@ class PlaywrightScraper:
                     timeout=30000,
                     label="search_about_blank_retry",
                 )
+                latest_nav_html = str((nav or {}).get("html") or "")
+                latest_nav_url = str((nav or {}).get("final_url") or "")
             await page.wait_for_timeout(int(random.uniform(900, 1600)))
             await page.mouse.wheel(0, 600)
 
@@ -1107,6 +1204,18 @@ class PlaywrightScraper:
                     timeout=30000,
                     label="search_filter_change_fallback",
                 )
+                latest_nav_html = str((nav or {}).get("html") or "")
+                latest_nav_url = str((nav or {}).get("final_url") or "")
+                if self._page_looks_challenged(
+                    str((nav or {}).get("html") or ""),
+                    str((nav or {}).get("final_url") or ""),
+                ):
+                    challenge_detected = True
+                    challenge_reason = (
+                        "Playwright browser search fallback reached login/challenge page; "
+                        "StaysSearch is blocked"
+                    )
+                    logger.warning(challenge_reason)
                 await page.wait_for_timeout(int(random.uniform(900, 1600)))
                 await page.mouse.wheel(0, 700)
                 for _ in range(24):
@@ -1121,7 +1230,52 @@ class PlaywrightScraper:
             self._save_cached_state()
 
             if captured_data is None:
-                raise RuntimeError("Playwright browser search did not capture StaysSearch response")
+                if challenge_detected:
+                    html_preview = (latest_nav_html or "").replace("\n", " ").replace("\r", " ")
+                    if len(html_preview) > 4000:
+                        html_preview = html_preview[:4000] + "...<truncated>"
+                    logger.warning(
+                        "Playwright challenge fallback HTML snapshot final_url=%s html_len=%s html_preview=%s",
+                        latest_nav_url,
+                        len(latest_nav_html or ""),
+                        html_preview,
+                    )
+                # Rendered-DOM fallback only: wait briefly for hydration, then
+                # extract listing IDs from actual DOM state.
+                await page.wait_for_timeout(1200)
+                dom_listing_ids = await self._extract_search_listing_ids_from_rendered_dom(page)
+                dom_fallback = self._build_minimal_search_payload_from_listing_ids(dom_listing_ids)
+                if isinstance(dom_fallback, dict):
+                    extracted = (
+                        (((dom_fallback.get("data") or {}).get("presentation") or {}).get("staysSearch") or {})
+                        .get("results", {})
+                        .get("searchResults", [])
+                    )
+                    logger.warning(
+                        "Playwright StaysSearch capture missing; using rendered-DOM fallback parser "
+                        "final_url=%s extracted_listings=%s",
+                        latest_nav_url,
+                        len(extracted) if isinstance(extracted, list) else 0,
+                    )
+                    return 200, dom_fallback
+                if challenge_detected:
+                    logger.warning(
+                        "Playwright challenge rendered-DOM fallback found no listing IDs final_url=%s html_len=%s",
+                        latest_nav_url,
+                        len(latest_nav_html or ""),
+                    )
+                if challenge_detected and challenge_reason:
+                    raise RuntimeError(challenge_reason)
+                if saw_stayssearch_response:
+                    raise RuntimeError(
+                        "Playwright browser search saw StaysSearch traffic but could not parse JSON payload"
+                    )
+                raise RuntimeError(
+                    "Playwright browser search did not capture StaysSearch response "
+                    f"(search_url={search_url})"
+                )
+            if captured_url:
+                logger.info("Playwright captured StaysSearch response url=%s status=%s", captured_url, captured_status)
             return (captured_status or 200), captured_data
         finally:
             await self._close_capped_page(page)

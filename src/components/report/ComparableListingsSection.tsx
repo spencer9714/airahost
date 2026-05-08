@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import type {
@@ -8,7 +8,7 @@ import type {
   ExcludedComp,
 } from "@/lib/schemas";
 
-// ── Stable identifier helpers ────────────────────────────────────
+// â”€â”€ Stable identifier helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // roomId is the canonical key for all comp-level decisions (pinned,
 // excluded, conflict).  URLs are display-only / fallback.
 
@@ -19,7 +19,7 @@ function extractRoomId(url: string | null | undefined): string | null {
 }
 
 function listingRoomId(listing: ComparableListing): string | null {
-  // Worker fills `id` with build_comp_id() — usually room ID, falls back to URL.
+  // Worker fills `id` with build_comp_id() â€” usually room ID, falls back to URL.
   // Prefer `id` first; if it's not numeric, derive from `url`.
   if (listing.id && /^\d+$/.test(listing.id)) return listing.id;
   return extractRoomId(listing.url);
@@ -38,7 +38,7 @@ function isPinnedListing(
   return false;
 }
 
-// ── Date helpers ────────────────────────────────────────────────
+// â”€â”€ Date helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function nextDay(dateStr: string, nights = 1): string {
   const d = new Date(dateStr + "T00:00:00Z");
@@ -60,13 +60,13 @@ function listingUrlForDate(url: string, date: string, nights = 1): string {
     u.searchParams.set("check_out", checkout);
     return u.toString();
   } catch {
-    // Fallback for relative or malformed URLs — safe append.
+    // Fallback for relative or malformed URLs â€” safe append.
     const sep = url.includes("?") ? "&" : "?";
     return `${url}${sep}check_in=${date}&check_out=${checkout}`;
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function similarityBadgeClasses(similarity: number): string {
   if (similarity >= 0.8) return "bg-green-50 text-green-700";
@@ -101,14 +101,17 @@ function matchQualityLabel(stage: string): {
   }
 }
 
-function formatPropertyType(type: string): string {
+function formatPropertyType(type: string | null | undefined): string {
+  if (!type) return "";
   return type
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function formatComparableSpecs(listing: ComparableListing): string {
-  const parts = [formatPropertyType(listing.propertyType)];
+  const parts: string[] = [];
+  const propertyType = formatPropertyType(listing.propertyType);
+  if (propertyType) parts.push(propertyType);
 
   if (typeof listing.accommodates === "number") {
     parts.push(`${listing.accommodates} guest${listing.accommodates !== 1 ? "s" : ""}`);
@@ -120,10 +123,10 @@ function formatComparableSpecs(listing: ComparableListing): string {
     parts.push(`${listing.baths} ba`);
   }
 
-  return parts.join(" · ");
+  return parts.join(" | ");
 }
 
-// ── Skeleton ────────────────────────────────────────────────────
+// â”€â”€ Skeleton â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function SkeletonCard() {
   return (
@@ -146,7 +149,7 @@ function SkeletonCard() {
   );
 }
 
-// ── Mobile overflow menu (••• kebab) ─────────────────────────────
+// â”€â”€ Mobile overflow menu (â€¢â€¢â€¢ kebab) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function MobileCompActionMenu({
   listing,
@@ -211,7 +214,7 @@ function MobileCompActionMenu({
             }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-amber-700 hover:bg-amber-50 disabled:cursor-not-allowed disabled:text-gray-400"
           >
-            <span aria-hidden="true">⭐</span>
+            <span aria-hidden="true">â­</span>
             {alreadyBenchmark ? "Already a benchmark" : "Use as benchmark"}
           </button>
           <button
@@ -225,7 +228,7 @@ function MobileCompActionMenu({
             }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-rose-700 hover:bg-rose-50"
           >
-            <span aria-hidden="true">⊘</span>
+            <span aria-hidden="true">âŠ˜</span>
             Hide from future reports
           </button>
         </div>
@@ -234,7 +237,7 @@ function MobileCompActionMenu({
   );
 }
 
-// ── Listing Card ────────────────────────────────────────────────
+// â”€â”€ Listing Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface ComparableCardProps {
   listing: ComparableListing;
@@ -244,9 +247,9 @@ interface ComparableCardProps {
   canManage?: boolean;
   /** True if this card is in the process of being hidden (animation hint). */
   isExiting?: boolean;
-  /** True if the comp is already a benchmark — disable the Promote button. */
+  /** True if the comp is already a benchmark â€” disable the Promote button. */
   alreadyBenchmark?: boolean;
-  /** True if pressing Promote should open a "Replace which?" picker (≥10). */
+  /** True if pressing Promote should open a "Replace which?" picker (â‰¥10). */
   promoteAtCap?: boolean;
   onExclude?: (listing: ComparableListing) => void;
   onPromote?: (listing: ComparableListing) => void;
@@ -263,7 +266,7 @@ function ComparableCard({
   onExclude,
   onPromote,
 }: ComparableCardProps) {
-  // Action icons require a stable numeric roomId — without one we can't write
+  // Action icons require a stable numeric roomId â€” without one we can't write
   // a guaranteed-stable excludedComps entry, so the action would 400 at the
   // schema level.  Hide rather than letting the user hit a wall.
   const hasStableRoomId = !!listingRoomId(listing);
@@ -272,13 +275,13 @@ function ComparableCard({
   const badgeClasses = similarityBadgeClasses(listing.similarity);
 
   // When a date is selected, use only the exact scraped price for that date.
-  // Do NOT fall back to nightlyPrice or an average — that would mislead the user.
+  // Do NOT fall back to nightlyPrice or an average â€” that would mislead the user.
   const datePrice: number | undefined = selectedDate
     ? (listing.priceByDateDetails?.[selectedDate]?.price ?? listing.priceByDate?.[selectedDate])
     : undefined;
-  // No date selected → show the general comparable price.
-  // Date selected + price found → show sampled date price.
-  // Date selected + no price → show unavailable (not a fallback average).
+  // No date selected â†’ show the general comparable price.
+  // Date selected + price found â†’ show sampled date price.
+  // Date selected + no price â†’ show unavailable (not a fallback average).
   const hasSampledDatePrice = selectedDate != null && datePrice != null;
   const isPriceUnavailable = selectedDate != null && datePrice == null;
   const displayPrice = selectedDate ? datePrice : listing.nightlyPrice;
@@ -330,7 +333,7 @@ function ComparableCard({
         isPinned ? "border-amber-300 bg-amber-50/70 shadow-sm ring-1 ring-amber-100" : "border-gray-100 bg-white"
       }`}
     >
-      {/* Hover-reveal action icons (desktop only — md+) */}
+      {/* Hover-reveal action icons (desktop only â€” md+) */}
       {showActions && (
         <div
           className="pointer-events-none absolute right-3 top-3 hidden gap-1 opacity-0 transition-opacity duration-150 ease-out md:flex md:group-hover:opacity-100 md:group-focus-within:opacity-100"
@@ -377,7 +380,7 @@ function ComparableCard({
         </div>
       )}
 
-      {/* Mobile overflow menu (••• kebab — replaces hover on touch devices) */}
+      {/* Mobile overflow menu (â€¢â€¢â€¢ kebab â€” replaces hover on touch devices) */}
       {showActions && (
         <MobileCompActionMenu
           listing={listing}
@@ -468,7 +471,7 @@ function ComparableCard({
   );
 }
 
-// ── Section ─────────────────────────────────────────────────────
+// â”€â”€ Section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type SortMode = "similarity" | "price";
 
@@ -480,7 +483,7 @@ interface ComparableListingsSectionProps {
   embedded?: boolean;
   /**
    * @deprecated use pinnedRoomIds (roomId-first) instead.
-   * Kept for backward-compat — derived to roomIds internally.
+   * Kept for backward-compat â€” derived to roomIds internally.
    */
   pinnedUrls?: string[];
   /** Stable room IDs of comps that are user benchmarks. */
@@ -489,16 +492,16 @@ interface ComparableListingsSectionProps {
   selectedDate?: string | null;
   /** The date the user clicked. */
   clickedDate?: string | null;
-  // ── Per-listing manage controls (dashboard view only) ──────────
-  /** Room IDs the user has excluded — filtered out at render time. */
+  // â”€â”€ Per-listing manage controls (dashboard view only) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  /** Room IDs the user has excluded â€” filtered out at render time. */
   excludedRoomIds?: string[];
   /** Full ExcludedComp objects for the Manage popover (title + restore). */
   excludedDetails?: ExcludedComp[];
-  /** Snapshot from report.excludedRoomIdsAtRun — controls banner wording. */
+  /** Snapshot from report.excludedRoomIdsAtRun â€” controls banner wording. */
   reportExcludedRoomIdsAtRun?: string[] | null;
   /**
    * True only when the viewer owns the listing.  Public share view passes
-   * false → action icons / banner / Manage all hidden.
+   * false â†’ action icons / banner / Manage all hidden.
    */
   canManageComps?: boolean;
   onExcludeComp?: (listing: ComparableListing) => void;
@@ -575,8 +578,8 @@ export function ComparableListingsSection({
   // Banner two-state logic:
   //   - hasPendingHide: there are excluded comps not yet reflected in this report
   //   - alreadyApplied: every current excluded id is already in the report snapshot
-  //                     → "Pricing excludes X hidden comparables" (no Re-run button)
-  //   - mixed/pending → "X comparables hidden locally. Re-run to update pricing."
+  //                     â†’ "Pricing excludes X hidden comparables" (no Re-run button)
+  //   - mixed/pending â†’ "X comparables hidden locally. Re-run to update pricing."
   const allExcludedAlreadyAtRun = excludedRoomIds.every((rid) =>
     reportSnapshotSet.has(rid)
   );
@@ -593,10 +596,10 @@ export function ComparableListingsSection({
       : listings;
     // Render-time filter: drop user-excluded comps so the card list reflects
     // the (eventually) post-rerun report.  canManageComps=false on share view
-    // → snapshot semantics, don't filter.
+    // â†’ snapshot semantics, don't filter.
     //
     // Exception: cards in `exitingRoomIds` stay rendered (with isExiting=true)
-    // even though they're already in the optimistic excludedSet — this lets
+    // even though they're already in the optimistic excludedSet â€” this lets
     // the 200 ms exit animation actually play out before the DOM removal.
     if (canManageComps && excludedSet.size > 0) {
       filtered = filtered.filter((listing) => {
@@ -662,7 +665,7 @@ export function ComparableListingsSection({
       : visible.some((listing) => listing.priceByDate?.[selectedDate] != null))
   );
 
-  // ── Loading state ──────────────────────────────────────────
+  // â”€â”€ Loading state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (loading) {
     return (
       <section className={embedded ? "" : "mb-8"}>
@@ -680,7 +683,7 @@ export function ComparableListingsSection({
     );
   }
 
-  // ── Empty state ────────────────────────────────────────────
+  // â”€â”€ Empty state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!listings || listings.length === 0) {
     if (comps && comps.usedForPricing > 0) {
       return (
@@ -701,7 +704,7 @@ export function ComparableListingsSection({
     return null;
   }
 
-  // ── Populated state ────────────────────────────────────────
+  // â”€â”€ Populated state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
     <section className={embedded ? "" : "mb-8"}>
       {/* Header */}
@@ -729,7 +732,7 @@ export function ComparableListingsSection({
         </p>
       )}
 
-      {/* Hidden-comps banner — two states based on whether the report has been re-run */}
+      {/* Hidden-comps banner â€” two states based on whether the report has been re-run */}
       {canManageComps && hiddenCount > 0 && (
         <div
           data-testid="hidden-banner"
@@ -760,7 +763,7 @@ export function ComparableListingsSection({
               }}
               className="rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-900 ring-1 ring-amber-200 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {rerunStarting ? "Starting…" : "Re-run"}
+              {rerunStarting ? "Startingâ€¦" : "Re-run"}
             </button>
           )}
           <button
@@ -828,7 +831,7 @@ export function ComparableListingsSection({
         </div>
       )}
 
-      {/* Inline confirm dialog (conflict cases — single feedback channel, no toast error) */}
+      {/* Inline confirm dialog (conflict cases â€” single feedback channel, no toast error) */}
       {conflictDialog && (
         <div
           role="alertdialog"
@@ -932,7 +935,7 @@ export function ComparableListingsSection({
               promoteAtCap={promoteAtCap}
               onExclude={(l) => {
                 const r = listingRoomId(l);
-                // Conflict: comp is currently a benchmark → inline confirm.
+                // Conflict: comp is currently a benchmark â†’ inline confirm.
                 if (r && pinnedRoomIds.includes(r)) {
                   setConflictDialog({
                     type: "exclude-benchmark",
@@ -944,7 +947,7 @@ export function ComparableListingsSection({
                 if (!r) return;
                 // Queue *immediately* so the manager owns the pending op.
                 // If the user navigates within 200 ms, pagehide / route /
-                // listing-switch flush paths now know about this click —
+                // listing-switch flush paths now know about this click â€”
                 // delaying the queue would silently lose the operation.
                 onExcludeComp?.(l);
                 // Animation runs in parallel: keep the card mounted with
@@ -968,7 +971,7 @@ export function ComparableListingsSection({
               }}
               onPromote={(l) => {
                 const r = listingRoomId(l);
-                // If comp is currently in excluded → inline confirm before atomic
+                // If comp is currently in excluded â†’ inline confirm before atomic
                 // promote-and-unexclude.
                 if (r && isExcluded) {
                   setConflictDialog({
@@ -1005,3 +1008,4 @@ export function ComparableListingsSection({
     </section>
   );
 }
+
